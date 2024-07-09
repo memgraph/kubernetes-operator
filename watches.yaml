@@ -1,0 +1,6 @@
+# Use the 'create api' subcommand to add watches to this file.
+- group: charts.my.domain
+  version: v1alpha1
+  kind: MemgraphHighAvailability
+  chart: helm-charts/memgraph-high-availability
+#+kubebuilder:scaffold:watch
