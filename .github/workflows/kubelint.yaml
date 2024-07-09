@@ -1,0 +1,76 @@
+name: Kubelinter-check
+
+on:
+  push:
+    branches:
+    - main
+    paths-ignore:
+    - docs/**
+  pull_request:
+    branches:
+    - main
+  workflow_dispatch: {}
+
+env:
+  KUBELINTER_VERSION: "143183121"
+
+jobs:
+  Kubelinter-check:
+    name: Run Kube-linter check
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v2
+
+    - name: Scan directory ./config/crd/ with kube-linter
+      uses: stackrox/kube-linter-action@v1.0.3
+      with:
+        directory: config/crd
+        config: ${GITHUB_WORKSPACE}/.github/config_files/config_lint.yaml
+        version: $KUBELINTER_VERSION
+
+    - name: Scan directory ./config/default/ with kube-linter
+      uses: stackrox/kube-linter-action@v1.0.3
+      with:
+        directory: config/default
+        config: ${GITHUB_WORKSPACE}/.github/config_files/config_lint.yaml
+        version: $KUBELINTER_VERSION
+
+    - name: Scan directory ./config/manager/ with kube-linter
+      uses: stackrox/kube-linter-action@v1.0.3
+      with:
+        directory: config/manager
+        config: ${GITHUB_WORKSPACE}/.github/config_files/config_lint.yaml
+        version: $KUBELINTER_VERSION
+
+    - name: Scan directory ./config/manifests/ with kube-linter
+      uses: stackrox/kube-linter-action@v1.0.3
+      with:
+        directory: config/manifests
+        config: ${GITHUB_WORKSPACE}/.github/config_files/config_lint.yaml
+        version: $KUBELINTER_VERSION 
+
+    - name: Scan directory ./config/samples/ with kube-linter
+      uses: stackrox/kube-linter-action@v1.0.3
+      with:
+        directory: config/samples
+        config: ${GITHUB_WORKSPACE}/.github/config_files/config_lint.yaml
+        version: $KUBELINTER_VERSION 
+
+    - name: Scan directory ./config/scorecard/ with kube-linter
+      uses: stackrox/kube-linter-action@v1.0.3
+      with:
+        directory: config/scorecard
+        config: ${GITHUB_WORKSPACE}/.github/config_files/config_lint.yaml
+        version: $KUBELINTER_VERSION 
+
+
+
+
+
+
+
+
+
+
+

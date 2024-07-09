@@ -1,0 +1,49 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: memgraph-operator-system
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  namespace: memgraph-operator-system
+  annotations:
+    email: engineering@memgraph.io
+  labels:
+    owner: Memgraph
+  name: memgraph-kubernetes-operator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      name: memgraph-kubernetes-operator
+  strategy:
+    rollingUpdate:
+      maxUnavailable: 1
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        name: memgraph-kubernetes-operator
+    spec:
+      securityContext:
+        runAsNonRoot: true
+      containers:
+      - args:
+        image: memgraph/kubernetes-operator:0.0.2
+        name: manager
+        securityContext:
+          readOnlyRootFilesystem: true
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - "ALL"
+        resources:
+          limits:
+            cpu: 500m
+            memory: 128Mi
+          requests:
+            cpu: 10m
+            memory: 64Mi
+      serviceAccountName: memgraph-kubernetes-operator
+      terminationGracePeriodSeconds: 10

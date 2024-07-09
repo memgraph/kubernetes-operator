@@ -1,0 +1,8 @@
+namespace: memgraph-operator-system
+
+namePrefix: ""
+
+resources:
+- ../crd
+- ../rbac
+- ../manager
