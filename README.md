@@ -48,6 +48,13 @@ Let's say I want to change `--log-level` flag for coordinators with id 1 and 2. 
 Only pods corresponding to these 2 coordinators will get restarted:
 ![image](https://github.com/memgraph/kubernetes-operator/assets/53269502/930ac553-31ad-4230-9e2e-f67858f3fe25)
 
+## Clear resources
+
+```
+kubectl delete -f config/samples/memgraph_v1_memgraphha.yaml
+make undeploy
+```
+
 
 
 
