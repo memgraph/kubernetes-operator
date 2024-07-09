@@ -28,9 +28,22 @@ This also causes creating `kubernetes-operator-controller-manager-768d9db99b-xs6
 ![image](https://github.com/memgraph/kubernetes-operator/assets/53269502/7220c1bd-588c-4662-b696-d43b3085eac3)
 
 
-
 If you position yourself into operator-controller-manager pod with:
 `kubectl exec -it -n kubernetes-operator-system kubernetes-operator-controller-manager-768d9db99b-xs6hk bash` and run ls, you should be able to see two items: `helm-charts` directory and watches.yaml.
+
+Go to `config/samples/memgraph_v1_memghraphha.yaml` and provide your license information by setting `MEMGRAPH_ORGANIZATION_NAME` and `MEMGRAPH_ENTERPRISE_LICENSE`.
+
+After approx. 60s, you should be able to see your cluster running with `kubectl get pods -A`:
+![image](https://github.com/memgraph/kubernetes-operator/assets/53269502/069e2079-03f2-4827-83c1-b06a338b63e4)
+
+Find URL of any coordinator instances:
+![Screenshot from 2024-07-09 13-10-42](https://github.com/memgraph/kubernetes-operator/assets/53269502/fbc2d487-e258-4613-bc85-0484bcf2e0dd)
+
+and connect to see the state of the cluster:
+![image](https://github.com/memgraph/kubernetes-operator/assets/53269502/c68d52e2-19f7-4e45-8ff0-fc2ee662c64b)
+
+
+
 
 
 
