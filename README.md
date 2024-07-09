@@ -21,7 +21,8 @@ make docker-build docker-push
 make deploy
 ```
 
-After following steps above you should be able to get the following output:
+After following steps above you should be able to see `kubernetes-operator-controller-manager` in `kubernetes-operator-system` namespace:
+![image](https://github.com/memgraph/kubernetes-operator/assets/53269502/a4fc70fe-ef5b-4541-afd8-3ad3ee43a070)
 
 
 
