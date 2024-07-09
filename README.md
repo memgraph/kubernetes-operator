@@ -42,6 +42,19 @@ Find URL of any coordinator instances:
 and connect to see the state of the cluster:
 ![image](https://github.com/memgraph/kubernetes-operator/assets/53269502/c68d52e2-19f7-4e45-8ff0-fc2ee662c64b)
 
+Let's say I want to change `--log-level` flag for coordinators with id 1 and 2. I can do that in the following way:
+![image](https://github.com/memgraph/kubernetes-operator/assets/53269502/87ff43e7-f5b1-4764-9fed-4d87758b0f77)
+
+Only pods corresponding to these 2 coordinators will get restarted:
+![image](https://github.com/memgraph/kubernetes-operator/assets/53269502/930ac553-31ad-4230-9e2e-f67858f3fe25)
+
+
+
+
+
+
+
+
 
 
 
