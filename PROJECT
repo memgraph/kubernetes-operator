@@ -2,7 +2,7 @@
 # This file is used to track the info used to scaffold your project
 # and allow the plugins properly work.
 # More info: https://book.kubebuilder.io/reference/project-config.html
-domain: my.domain
+domain: com
 layout:
 - helm.sdk.operatorframework.io/v1
 plugins:
@@ -13,8 +13,8 @@ resources:
 - api:
     crdVersion: v1
     namespaced: true
-  domain: my.domain
-  group: charts
-  kind: MemgraphHighAvailability
-  version: v1alpha1
+  domain: com
+  group: memgraph
+  kind: MemgraphHA
+  version: v1
 version: "3"

@@ -2,20 +2,20 @@
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
-  name: memgraphhighavailabilities.charts.my.domain
+  name: memgraphhas.memgraph.com
 spec:
-  group: charts.my.domain
+  group: memgraph.com
   names:
-    kind: MemgraphHighAvailability
-    listKind: MemgraphHighAvailabilityList
-    plural: memgraphhighavailabilities
-    singular: memgraphhighavailability
+    kind: MemgraphHA
+    listKind: MemgraphHAList
+    plural: memgraphhas
+    singular: memgraphha
   scope: Namespaced
   versions:
-  - name: v1alpha1
+  - name: v1
     schema:
       openAPIV3Schema:
-        description: MemgraphHighAvailability is the Schema for the memgraphhighavailabilities API
+        description: MemgraphHA is the Schema for the memgraphhas API
         properties:
           apiVersion:
             description: 'APIVersion defines the versioned schema of this representation
@@ -30,11 +30,11 @@ spec:
           metadata:
             type: object
           spec:
-            description: Spec defines the desired state of MemgraphHighAvailability
+            description: Spec defines the desired state of MemgraphHA
             type: object
             x-kubernetes-preserve-unknown-fields: true
           status:
-            description: Status defines the observed state of MemgraphHighAvailability
+            description: Status defines the observed state of MemgraphHA
             type: object
             x-kubernetes-preserve-unknown-fields: true
         type: object

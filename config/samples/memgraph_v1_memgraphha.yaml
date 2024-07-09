@@ -1,7 +1,7 @@
-apiVersion: charts.my.domain/v1alpha1
-kind: MemgraphHighAvailability
+apiVersion: memgraph.com/v1
+kind: MemgraphHA
 metadata:
-  name: memgraphhighavailability-sample
+  name: memgraphha-sample
 spec:
   # Default values copied from <project_dir>/helm-charts/memgraph-high-availability/values.yaml
   coordinators:

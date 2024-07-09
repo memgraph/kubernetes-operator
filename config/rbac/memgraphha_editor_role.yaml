@@ -1,27 +1,31 @@
-# permissions for end users to view memgraphhighavailabilities.
+# permissions for end users to edit memgraphhas.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   labels:
     app.kubernetes.io/name: clusterrole
-    app.kubernetes.io/instance: memgraphhighavailability-viewer-role
+    app.kubernetes.io/instance: memgraphha-editor-role
     app.kubernetes.io/component: rbac
     app.kubernetes.io/created-by: kubernetes-operator
     app.kubernetes.io/part-of: kubernetes-operator
     app.kubernetes.io/managed-by: kustomize
-  name: memgraphhighavailability-viewer-role
+  name: memgraphha-editor-role
 rules:
 - apiGroups:
-  - charts.my.domain
+  - memgraph.com
   resources:
-  - memgraphhighavailabilities
+  - memgraphhas
   verbs:
+  - create
+  - delete
   - get
   - list
+  - patch
+  - update
   - watch
 - apiGroups:
-  - charts.my.domain
+  - memgraph.com
   resources:
-  - memgraphhighavailabilities/status
+  - memgraphhas/status
   verbs:
   - get

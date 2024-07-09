@@ -29,14 +29,14 @@ rules:
   - create
 
 ##
-## Rules for charts.my.domain/v1alpha1, Kind: MemgraphHighAvailability
+## Rules for memgraph.com/v1, Kind: MemgraphHA
 ##
 - apiGroups:
-  - charts.my.domain
+  - memgraph.com
   resources:
-  - memgraphhighavailabilities
-  - memgraphhighavailabilities/status
-  - memgraphhighavailabilities/finalizers
+  - memgraphhas
+  - memgraphhas/status
+  - memgraphhas/finalizers
   verbs:
   - create
   - delete
@@ -45,6 +45,12 @@ rules:
   - patch
   - update
   - watch
+- verbs:
+  - "*"
+  apiGroups:
+  - "apps"
+  resources:
+  - "statefulsets"
 - verbs:
   - "*"
   apiGroups:
@@ -57,11 +63,5 @@ rules:
   - ""
   resources:
   - "services"
-- verbs:
-  - "*"
-  apiGroups:
-  - "apps"
-  resources:
-  - "statefulsets"
 
 #+kubebuilder:scaffold:rules
