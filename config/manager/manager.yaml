@@ -16,6 +16,8 @@ kind: Deployment
 metadata:
   name: controller-manager
   namespace: system
+  annotations:
+    email: engineering@memgraph.io
   labels:
     control-plane: controller-manager
     app.kubernetes.io/name: deployment
@@ -24,11 +26,16 @@ metadata:
     app.kubernetes.io/created-by: kubernetes-operator
     app.kubernetes.io/part-of: kubernetes-operator
     app.kubernetes.io/managed-by: kustomize
+    owner: Memgraph
 spec:
   selector:
     matchLabels:
       control-plane: controller-manager
   replicas: 1
+  strategy:
+    rollingUpdate:
+      maxUnavailable: 1
+    type: RollingUpdate
   template:
     metadata:
       annotations:
@@ -69,9 +76,10 @@ spec:
       - args:
         - --leader-elect
         - --leader-election-id=kubernetes-operator
-        image: controller:latest
+        image: memgraph/kubernetes-operator
         name: manager
         securityContext:
+          readOnlyRootFilesystem: true
           allowPrivilegeEscalation: false
           capabilities:
             drop:
