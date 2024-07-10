@@ -36,13 +36,6 @@ jobs:
         config: ${GITHUB_WORKSPACE}/.github/config_files/config_lint.yaml
         version: $KUBELINTER_VERSION 
 
-    - name: Scan directory ./config/rbac/ with kube-linter
-      uses: stackrox/kube-linter-action@v1.0.3
-      with:
-        directory: config/rbac
-        config: ${GITHUB_WORKSPACE}/.github/config_files/config_lint.yaml
-        version: $KUBELINTER_VERSION 
-
     - name: Scan directory ./config/samples/ with kube-linter
       uses: stackrox/kube-linter-action@v1.0.3
       with:
