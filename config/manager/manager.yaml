@@ -76,7 +76,7 @@ spec:
       - args:
         - --leader-elect
         - --leader-election-id=kubernetes-operator
-        image: memgraph/kubernetes-operator
+        image: memgraph/kubernetes-operator:0.0.2
         name: manager
         securityContext:
           readOnlyRootFilesystem: true
