@@ -11,6 +11,9 @@ on:
     - main
   workflow_dispatch: {}
 
+env:
+  KUBELINTER_VERSION: "143183121"
+
 jobs:
   Kubelinter-check:
     name: Run Kube-linter check
@@ -19,23 +22,62 @@ jobs:
     - name: Checkout Code
       uses: actions/checkout@v2
 
+    - name: Scan directory ./config/crd/ with kube-linter
+      uses: stackrox/kube-linter-action@v1.0.3
+      with:
+        directory: config/crd
+        config: ${GITHUB_WORKSPACE}/.github/config_files/config_lint.yaml
+        version: $KUBELINTER_VERSION
+
+    - name: Scan directory ./config/default/ with kube-linter
+      uses: stackrox/kube-linter-action@v1.0.3
+      with:
+        directory: config/default
+        config: ${GITHUB_WORKSPACE}/.github/config_files/config_lint.yaml
+        version: $KUBELINTER_VERSION 
+
     - name: Scan directory ./config/manager/ with kube-linter
       uses: stackrox/kube-linter-action@v1.0.3
       with:
-        directory: config/manager/manager.yaml
+        directory: config/manager
         config: ${GITHUB_WORKSPACE}/.github/config_files/config_lint.yaml
-        version: "48442350"
+        version: $KUBELINTER_VERSION 
+
+    - name: Scan directory ./config/manifests/ with kube-linter
+      uses: stackrox/kube-linter-action@v1.0.3
+      with:
+        directory: config/manifests
+        config: ${GITHUB_WORKSPACE}/.github/config_files/config_lint.yaml
+        version: $KUBELINTER_VERSION 
+
+    - name: Scan directory ./config/rbac/ with kube-linter
+      uses: stackrox/kube-linter-action@v1.0.3
+      with:
+        directory: config/rbac
+        config: ${GITHUB_WORKSPACE}/.github/config_files/config_lint.yaml
+        version: $KUBELINTER_VERSION 
 
     - name: Scan directory ./config/samples/ with kube-linter
       uses: stackrox/kube-linter-action@v1.0.3
       with:
         directory: config/samples
         config: ${GITHUB_WORKSPACE}/.github/config_files/config_lint.yaml
-        version: "48442350"
+        version: $KUBELINTER_VERSION 
 
-    - name: Scan directory ./config/crd/ with kube-linter
+    - name: Scan directory ./config/scoreboard/ with kube-linter
       uses: stackrox/kube-linter-action@v1.0.3
       with:
-        directory: config/crd
+        directory: config/scoreboard
         config: ${GITHUB_WORKSPACE}/.github/config_files/config_lint.yaml
-        version: "48442350"
+        version: $KUBELINTER_VERSION 
+
+
+
+
+
+
+
+
+
+
+
