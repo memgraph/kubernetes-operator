@@ -1,6 +1,6 @@
 # Install Memgraph Kubernetes Operator
 
-## Install
+## Option I: Install using Makefile
 
 Make sure to clone this repository with its submodule (helm-charts).
 
@@ -16,13 +16,19 @@ make deploy
 
 This command will use operator's image from Memgraph's DockerHub and create all necessary Kubernetes resources for running an operator.
 
+## Option II: Install using Helm Charts
+
+```bash
+cd helm-charts
+helm install kubernetes-operator charts/kubernetes-operator
+```
+
 ## Verify installation
 
 To verify that deployment ran successfully please run:
 
 ```bash
 kubectl get deployments -A
-
 ```
 
 and you should be able to see `kubernetes-operator-controller-manager` deployment in `kubernetes-operator-system` namespace:
@@ -52,6 +58,7 @@ Find URL of any coordinator instances:
 
 and connect to see the state of the cluster:
 ![image](https://github.com/memgraph/kubernetes-operator/assets/53269502/c68d52e2-19f7-4e45-8ff0-fc2ee662c64b)
+
 
 ## Clear resources
 

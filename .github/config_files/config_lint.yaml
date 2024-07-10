@@ -1,0 +1,8 @@
+checks:
+  addAllBuiltIn: true
+  exclude:
+  - "non-existent-service-account"  # because the service account is created in another file
+  - "minimum-three-replicas"  # because the deployment contains only 1 replica of the operator
+  - "no-liveness-probe"  # not necessary
+  - "no-readiness-probe" # no necessary
+  - "use-namespace"
