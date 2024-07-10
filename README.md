@@ -12,12 +12,6 @@ git clone git@github.com:memgraph/kubernetes-operator.git
 git checkout helm-operator (until merged)
 git submodule init
 git submodule update
-```
-
-Change andidocker8888 to your domain name to download latest kubernetes operator.
-(This is just for developers, users will be able to download this from our DockerHub.)
-```bash
-make docker-build docker-push
 make deploy
 ```
 
@@ -32,6 +26,7 @@ If you position yourself into operator-controller-manager pod with:
 `kubectl exec -it -n kubernetes-operator-system kubernetes-operator-controller-manager-768d9db99b-xs6hk bash` and run ls, you should be able to see two items: `helm-charts` directory and watches.yaml.
 
 Go to `config/samples/memgraph_v1_memghraphha.yaml` and provide your license information by setting `MEMGRAPH_ORGANIZATION_NAME` and `MEMGRAPH_ENTERPRISE_LICENSE`.
+Start Memgraph HA cluster with `kubectl apply -f config/samples/memgraph_v1_memgraphha.yaml`.
 
 After approx. 60s, you should be able to see your cluster running with `kubectl get pods -A`:
 ![image](https://github.com/memgraph/kubernetes-operator/assets/53269502/069e2079-03f2-4827-83c1-b06a338b63e4)

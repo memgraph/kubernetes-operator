@@ -79,8 +79,8 @@ spec:
         storagePVCClassName: ""
         storagePVCSize: 1Gi
     env:
-      MEMGRAPH_ENTERPRISE_LICENSE: <your-license>
-      MEMGRAPH_ORGANIZATION_NAME: <your-organization-name>
+      MEMGRAPH_ENTERPRISE_LICENSE: ""
+      MEMGRAPH_ORGANIZATION_NAME: ""
     image:
       pullPolicy: IfNotPresent
       repository: memgraph/memgraph

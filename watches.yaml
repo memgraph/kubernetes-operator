@@ -2,5 +2,5 @@
 - group: memgraph.com
   version: v1
   kind: MemgraphHA
-  chart: helm-charts/memgraph-high-availability
+  chart: helm-charts/charts/memgraph-high-availability
 #+kubebuilder:scaffold:watch
