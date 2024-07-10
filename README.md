@@ -14,7 +14,7 @@ through it.
 ## Prerequisites
 
 We use Go version 1.22.5 (not needed at the moment). Check out here how to [install Go](https://go.dev/doc/install). 
-Current Helm version is v3.14.4.
+The current Helm version is v3.14.4.
 
 ## Documentation
 
