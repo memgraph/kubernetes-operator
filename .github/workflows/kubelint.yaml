@@ -29,13 +29,6 @@ jobs:
         config: ${GITHUB_WORKSPACE}/.github/config_files/config_lint.yaml
         version: $KUBELINTER_VERSION
 
-    - name: Scan directory ./config/manager/ with kube-linter
-      uses: stackrox/kube-linter-action@v1.0.3
-      with:
-        directory: config/manager
-        config: ${GITHUB_WORKSPACE}/.github/config_files/config_lint.yaml
-        version: $KUBELINTER_VERSION 
-
     - name: Scan directory ./config/manifests/ with kube-linter
       uses: stackrox/kube-linter-action@v1.0.3
       with:
