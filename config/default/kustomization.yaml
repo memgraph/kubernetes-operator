@@ -1,7 +1,6 @@
-# Adds namespace to all resources.
 namespace: memgraph-operator-system
 
-namePrefix: memgraph-k8-
+namePrefix: ""
 
 resources:
 - ../crd
