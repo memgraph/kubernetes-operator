@@ -1,5 +1,7 @@
 # Install Memgraph Kubernetes Operator
 
+All described installation options will run the Operator inside the cluster.
+
 ## Option I: Install using Makefile
 
 Make sure to clone this repository with its submodule (helm-charts).
