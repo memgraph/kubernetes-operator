@@ -16,37 +16,36 @@ make deploy
 
 This command will use operator's image from Memgraph's DockerHub and create all necessary Kubernetes resources for running an operator.
 
-## Option II: Install using Helm Charts
+## Option II: Install using kubectl
 
 ```bash
-cd helm-charts
-helm install kubernetes-operator charts/kubernetes-operator
+kubectl apply -k config/default
 ```
 
 ## Verify installation
 
-To verify that deployment ran successfully please run:
+Installation using any of options described above will cause creating Kubernetes ServiceAccount, RoleBinding, Role, Deployment and Pods all in newly created all in newly created all in newly created
+namespace `memgraph-operator-system`. You can check your resources with:
 
 ```bash
+kubectl get serviceaccounts -A
+kubectl get rolebindings -A
+kubectl get roles -A
 kubectl get deployments -A
+kubectl get pods -A
 ```
 
-and you should be able to see `kubernetes-operator-controller-manager` deployment in `kubernetes-operator-system` namespace:
-![image](https://github.com/memgraph/kubernetes-operator/assets/53269502/a4fc70fe-ef5b-4541-afd8-3ad3ee43a070)
+CustomResourceDefinition `memgraphhas.memgraph.com`, whose job is to monitor CustomResource `MemgraphHA`, will also get created and you can verify
+this with:
 
-Together with the deployment, `kubernetes-operator-controller-manager-768d9db99b-xs6hk` pod with 2 containers in
-`kubernetes-operator-system` namespace should also get created and you can verify this with:
-![image](https://github.com/memgraph/kubernetes-operator/assets/53269502/7220c1bd-588c-4662-b696-d43b3085eac3)
-
-
-If you position yourself into operator-controller-manager pod with:
-`kubectl exec -it -n kubernetes-operator-system kubernetes-operator-controller-manager-768d9db99b-xs6hk bash` and run ls, 
-you should be able to see two items: `helm-charts` directory and `watches.yaml` file.
+```bash
+kubectl get crds -A
+```
 
 ## Start Memgraph High Availability Cluster
 
 We already provide sample cluster in `config/samples/memgraph_v1_ha.yaml`. You only need to set your license information by setting 
-`MEMGRAPH_ORGANIZATION_NAME` and `MEMGRAPH_ENTERPRISE_LICENSE` environment variables.
+`MEMGRAPH_ORGANIZATION_NAME` and `MEMGRAPH_ENTERPRISE_LICENSE` environment variables in the sample file.
 
 Start Memgraph HA cluster with `kubectl apply -f config/samples/memgraph_v1_ha.yaml`.
 
@@ -62,7 +61,7 @@ and connect to see the state of the cluster:
 
 ## Clear resources
 
-```
+```bash
 kubectl delete -f config/samples/memgraph_v1_ha.yaml
-make undeploy
+make undeploy / or kubectl delete -k config/default
 ```
