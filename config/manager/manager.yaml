@@ -19,12 +19,12 @@ metadata:
     email: engineering@memgraph.io
   labels:
     owner: Memgraph
-  name: controller-manager
+  name: memgraph-kubernetes-operator
 spec:
   replicas: 1
   selector:
     matchLabels:
-      name: controller-manager
+      name: memgraph-kubernetes-operator
   strategy:
     rollingUpdate:
       maxUnavailable: 1
@@ -34,7 +34,7 @@ spec:
       annotations:
         kubectl.kubernetes.io/default-container: manager
       labels:
-        name: controller-manager
+        name: memgraph-kubernetes-operator
     spec:
       securityContext:
         runAsNonRoot: true
