@@ -30,8 +30,6 @@ spec:
         runAsNonRoot: true
       containers:
       - args:
-        - --leader-elect
-        - --leader-election-id=kubernetes-operator
         image: memgraph/kubernetes-operator:0.0.2
         name: manager
         securityContext:
