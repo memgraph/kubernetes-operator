@@ -16,4 +16,4 @@ roleRef:
 subjects:
 - kind: ServiceAccount
   name: memgraph-kubernetes-operator
-  namespace: system
+  namespace: memgraph-operator-system
