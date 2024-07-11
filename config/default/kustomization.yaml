@@ -1,7 +1,7 @@
 # Adds namespace to all resources.
-namespace: kubernetes-operator-system
+namespace: memgraph-operator-system
 
-namePrefix: kubernetes-operator-
+namePrefix: memgraph-k8-
 
 resources:
 - ../crd

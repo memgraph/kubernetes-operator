@@ -6,3 +6,6 @@ images:
 - name: controller
   newName: memgraph/kubernetes-operator
   newTag: 0.0.2
+- name: memgraph-k8-operator
+  newName: memgraph/kubernetes-operator
+  newTag: 0.0.2
