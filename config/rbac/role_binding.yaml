@@ -8,5 +8,5 @@ roleRef:
   name: memgraph-kubernetes-operator
 subjects:
 - kind: ServiceAccount
-  name: controller-manager
+  name: memgraph-kubernetes-operator
   namespace: system
