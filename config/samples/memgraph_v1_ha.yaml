@@ -67,7 +67,7 @@ spec:
         logPVC: false
         logPVCClassName: ""
         logPVCSize: 256Mi
-        storagePVC: true
+        storagePVC: false
         storagePVCClassName: ""
         storagePVCSize: 1Gi
     data:
@@ -75,7 +75,7 @@ spec:
         logPVC: false
         logPVCClassName: ""
         logPVCSize: 256Mi
-        storagePVC: true
+        storagePVC: false
         storagePVCClassName: ""
         storagePVCSize: 1Gi
     env:
