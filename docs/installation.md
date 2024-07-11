@@ -49,13 +49,11 @@ We already provide sample cluster in `config/samples/memgraph_v1_ha.yaml`. You o
 
 Start Memgraph HA cluster with `kubectl apply -f config/samples/memgraph_v1_ha.yaml`.
 
-After approx. 60s, you should be able to see your cluster running with `kubectl get pods -A`:
-![image](https://github.com/memgraph/kubernetes-operator/assets/53269502/069e2079-03f2-4827-83c1-b06a338b63e4)
+After approx. 60s, you should be able to see instances in the output of `kubectl get pods -A`:
 
-Find URL of any coordinator instances:
-![Screenshot from 2024-07-09 13-10-42](https://github.com/memgraph/kubernetes-operator/assets/53269502/fbc2d487-e258-4613-bc85-0484bcf2e0dd)
 
-and connect to see the state of the cluster:
+You can now find URL of any coordinator instances by running e.g `minikube service list` and connect to see the state of the cluster by running
+`show instances;`:
 ![image](https://github.com/memgraph/kubernetes-operator/assets/53269502/c68d52e2-19f7-4e45-8ff0-fc2ee662c64b)
 
 
