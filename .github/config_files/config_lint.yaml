@@ -6,3 +6,5 @@ checks:
   - "no-liveness-probe"  # not necessary
   - "no-readiness-probe" # no necessary
   - "use-namespace"
+  - "dnsconfig-options"
+  - "no-node-affinity"
