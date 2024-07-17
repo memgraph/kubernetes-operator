@@ -1,0 +1,99 @@
+apiVersion: memgraph.com/v1
+kind: MemgraphHA
+metadata:
+  name: memgraphha-sample
+spec:
+  # Default values copied from <project_dir>/helm-charts/memgraph-high-availability/values.yaml
+  coordinators:
+  - args:
+    - --experimental-enabled=high-availability
+    - --coordinator-id=1
+    - --coordinator-port=12000
+    - --bolt-port=7687
+    - --also-log-to-stderr
+    - --log-level=TRACE
+    - --coordinator-hostname=memgraph-coordinator-1.default.svc.cluster.local
+    boltPort: 7687
+    coordinatorPort: 12000
+    id: "1"
+  - args:
+    - --experimental-enabled=high-availability
+    - --coordinator-id=2
+    - --coordinator-port=12000
+    - --bolt-port=7687
+    - --also-log-to-stderr
+    - --log-level=TRACE
+    - --coordinator-hostname=memgraph-coordinator-2.default.svc.cluster.local
+    boltPort: 7687
+    coordinatorPort: 12000
+    id: "2"
+  - args:
+    - --experimental-enabled=high-availability
+    - --coordinator-id=3
+    - --coordinator-port=12000
+    - --bolt-port=7687
+    - --also-log-to-stderr
+    - --log-level=TRACE
+    - --coordinator-hostname=memgraph-coordinator-3.default.svc.cluster.local
+    boltPort: 7687
+    coordinatorPort: 12000
+    id: "3"
+  data:
+  - args:
+    - --experimental-enabled=high-availability
+    - --management-port=10000
+    - --bolt-port=7687
+    - --also-log-to-stderr
+    - --log-level=TRACE
+    - --replication-restore-state-on-startup=true
+    boltPort: 7687
+    id: "0"
+    managementPort: 10000
+    replicationPort: 20000
+  - args:
+    - --experimental-enabled=high-availability
+    - --management-port=10000
+    - --bolt-port=7687
+    - --also-log-to-stderr
+    - --log-level=TRACE
+    - --replication-restore-state-on-startup=true
+    boltPort: 7687
+    id: "1"
+    managementPort: 10000
+    replicationPort: 20000
+  memgraph:
+    coordinators:
+      volumeClaim:
+        logPVC: false
+        logPVCClassName: ""
+        logPVCSize: 256Mi
+        storagePVC: false
+        storagePVCClassName: ""
+        storagePVCSize: 1Gi
+    data:
+      volumeClaim:
+        logPVC: false
+        logPVCClassName: ""
+        logPVCSize: 256Mi
+        storagePVC: false
+        storagePVCClassName: ""
+        storagePVCSize: 1Gi
+    env:
+      MEMGRAPH_ENTERPRISE_LICENSE: ""
+      MEMGRAPH_ORGANIZATION_NAME: ""
+    image:
+      pullPolicy: IfNotPresent
+      repository: memgraph/memgraph
+      tag: 2.18.0
+    probes:
+      liveness:
+        initialDelaySeconds: 30
+        periodSeconds: 10
+      readiness:
+        initialDelaySeconds: 5
+        periodSeconds: 5
+      startup:
+        failureThreshold: 30
+        periodSeconds: 10
+  
+  
