@@ -1,3 +1,4 @@
 [submodule "helm-charts"]
 	path = helm-charts
-	url = https://github.com/memgraph/helm-charts.git
+  url = https://github.com/memgraph/helm-charts.git
+  branch = main
