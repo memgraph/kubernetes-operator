@@ -46,12 +46,19 @@ kubectl get crds -A
 
 ## Start Memgraph High Availability Cluster
 
-We already provide sample cluster in `config/samples/memgraph_v1_ha.yaml`. You only need to set your license information by setting 
-`MEMGRAPH_ORGANIZATION_NAME` and `MEMGRAPH_ENTERPRISE_LICENSE` environment variables in the sample file.
+We already provide sample cluster in `config/samples/memgraph_v1_ha.yaml`. You only need to set your license information by setting
+environment variables `MEMGRAPH_ORGANIZATION_NAME` and `MEMGRAPH_ENTERPRISE_LICENSE` in your local environment with:
 
-Start Memgraph HA cluster with `kubectl apply -f config/samples/memgraph_v1_ha.yaml`.
+```bash
+export MEMGRAPH_ORGANIZATION_NAME="<YOUR_ORGANIZATION_NAME>"
+export MEMGRAPH_ENTERPRISE_LICENSE="<MEMGRAPH_ENTERPRISE_LICENSE>"
+```
 
-After approx. 60s, you should be able to see instances in the output of `kubectl get pods -A`:
+Start Memgraph HA cluster with `envsubst < config/samples/memgraph_v1_ha.yaml | kubectl apply -f -`. (The `envsubst command` is a part of the gettext package.)
+Instead of using `envsubst` command, you can directly set environment variables in `config/samples/memgraph_v1_ha.yaml`.
+
+
+After ~40s, you should be able to see instances in the output of `kubectl get pods -A`:
 
 
 You can now find URL of any coordinator instances by running e.g `minikube service list` and connect to see the state of the cluster by running
