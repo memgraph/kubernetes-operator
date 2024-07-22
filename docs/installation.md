@@ -30,11 +30,11 @@ Installation using any of options described above will cause creating Kubernetes
 namespace `memgraph-operator-system`. You can check your resources with:
 
 ```bash
-kubectl get serviceaccounts -A
-kubectl get rolebindings -A
-kubectl get roles -A
-kubectl get deployments -A
-kubectl get pods -A
+kubectl get serviceaccounts -n memgraph-operator-system
+kubectl get clusterrolebindings -n memgraph-operator-system
+kubectl get clusterroles -n memgraph-operator-system
+kubectl get deployments -n memgraph-operator-system
+kubectl get pods -n memgraph-operator-system
 ```
 
 CustomResourceDefinition `memgraphhas.memgraph.com`, whose job is to monitor CustomResource `MemgraphHA`, will also get created and you can verify
