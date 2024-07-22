@@ -90,7 +90,7 @@ spec:
     coordinators:
       volumeClaim:
         logPVCClassName: ""
-        logPVC: false # TODO: (andi) Fix
+        logPVC: true
         logPVCSize: 256Mi
         storagePVCClassName: ""
         storagePVC: true
@@ -102,7 +102,7 @@ spec:
     image:
       pullPolicy: IfNotPresent
       repository: memgraph/memgraph
-      tag: 2.18.0_27_0b62e6a73
+      tag: 2.18.0
     probes:
       liveness:
         initialDelaySeconds: 30

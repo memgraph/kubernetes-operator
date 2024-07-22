@@ -2,7 +2,6 @@
 
 All described installation options will run the Operator inside the cluster.
 
-## Option I: Install using Makefile
 
 Make sure to clone this repository with its submodule (helm-charts).
 
@@ -10,19 +9,13 @@ Make sure to clone this repository with its submodule (helm-charts).
 git clone --recurse-submodules git@github.com:memgraph/kubernetes-operator.git
 ```
 
-After this you can start your operator with a single command:
-
-```bash
-make deploy
-```
-
-This command will use operator's image from Memgraph's DockerHub and create all necessary Kubernetes resources for running an operator.
-
-## Option II: Install using kubectl
+## Install K8 resources
 
 ```bash
 kubectl apply -k config/default
 ```
+
+This command will use operator's image from Memgraph's DockerHub and create all necessary Kubernetes resources for running an operator.
 
 ## Verify installation
 
@@ -54,7 +47,7 @@ export MEMGRAPH_ORGANIZATION_NAME="<YOUR_ORGANIZATION_NAME>"
 export MEMGRAPH_ENTERPRISE_LICENSE="<MEMGRAPH_ENTERPRISE_LICENSE>"
 ```
 
-Start Memgraph HA cluster with `envsubst < config/samples/memgraph_v1_ha.yaml | kubectl apply -f -`. (The `envsubst command` is a part of the gettext package.)
+Start Memgraph HA cluster with `envsubst < config/samples/memgraph_v1_ha.yaml | kubectl apply -f -`. (The `envsubst command` is a part of the `gettext` package.)
 Instead of using `envsubst` command, you can directly set environment variables in `config/samples/memgraph_v1_ha.yaml`.
 
 
@@ -70,5 +63,6 @@ You can now find URL of any coordinator instances by running e.g `minikube servi
 
 ```bash
 kubectl delete -f config/samples/memgraph_v1_ha.yaml
-make undeploy / or kubectl delete -k config/default
+kubectl delete pvc --all  # Or leave them if you want to use persistent storage
+kubectl delete -k config/default
 ```

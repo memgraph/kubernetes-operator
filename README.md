@@ -3,7 +3,7 @@
 ## Introduction
 
 Memgraph Kubernetes Operator is WIP. You can currently install the operator and manage the deployment of Memgraph's High Availability cluster
-through it. 
+through it.
 
 ## Table of Contents
 
@@ -13,8 +13,8 @@ through it.
 
 ## Prerequisites
 
-We use Go version 1.22.5 (not needed at the moment). Check out here how to [install Go](https://go.dev/doc/install). 
-The current Helm version is v3.14.4.
+We use Go version 1.22.5 (not needed at the moment). Check out here how to [install Go](https://go.dev/doc/install).
+The current Helm version used is v3.14.4.
 
 ## Documentation
 
