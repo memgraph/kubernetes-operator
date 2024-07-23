@@ -3,84 +3,102 @@ kind: MemgraphHA
 metadata:
   name: memgraphha-sample
 spec:
-  # Default values copied from <project_dir>/helm-charts/memgraph-high-availability/values.yaml
   coordinators:
-  - args:
+  - id: "1"
+    boltPort: 7687
+    managementPort: 10000
+    coordinatorPort: 12000
+    args:
     - --experimental-enabled=high-availability
     - --coordinator-id=1
     - --coordinator-port=12000
+    - --management-port=10000
     - --bolt-port=7687
     - --also-log-to-stderr
     - --log-level=TRACE
     - --coordinator-hostname=memgraph-coordinator-1.default.svc.cluster.local
+    - --log-file=/var/log/memgraph/memgraph.log
+    - --nuraft-log-file=/var/log/memgraph/memgraph.log
+
+  - id: "2"
     boltPort: 7687
+    managementPort: 10000
     coordinatorPort: 12000
-    id: "1"
-  - args:
+    args:
     - --experimental-enabled=high-availability
     - --coordinator-id=2
     - --coordinator-port=12000
+    - --management-port=10000
     - --bolt-port=7687
     - --also-log-to-stderr
     - --log-level=TRACE
     - --coordinator-hostname=memgraph-coordinator-2.default.svc.cluster.local
+    - --log-file=/var/log/memgraph/memgraph.log
+    - --nuraft-log-file=/var/log/memgraph/memgraph.log
+
+  - id: "3"
     boltPort: 7687
+    managementPort: 10000
     coordinatorPort: 12000
-    id: "2"
-  - args:
+    args:
     - --experimental-enabled=high-availability
     - --coordinator-id=3
     - --coordinator-port=12000
+    - --management-port=10000
     - --bolt-port=7687
     - --also-log-to-stderr
     - --log-level=TRACE
     - --coordinator-hostname=memgraph-coordinator-3.default.svc.cluster.local
-    boltPort: 7687
-    coordinatorPort: 12000
-    id: "3"
+    - --log-file=/var/log/memgraph/memgraph.log
+    - --nuraft-log-file=/var/log/memgraph/memgraph.log
+
+
   data:
-  - args:
+  - id: "0"
+    boltPort: 7687
+    managementPort: 10000
+    replicationPort: 20000
+    args:
     - --experimental-enabled=high-availability
     - --management-port=10000
     - --bolt-port=7687
     - --also-log-to-stderr
     - --log-level=TRACE
-    - --replication-restore-state-on-startup=true
+    - --log-file=/var/log/memgraph/memgraph.log
+
+  - id: "1"
     boltPort: 7687
-    id: "0"
     managementPort: 10000
     replicationPort: 20000
-  - args:
+    args:
     - --experimental-enabled=high-availability
     - --management-port=10000
     - --bolt-port=7687
     - --also-log-to-stderr
     - --log-level=TRACE
-    - --replication-restore-state-on-startup=true
-    boltPort: 7687
-    id: "1"
-    managementPort: 10000
-    replicationPort: 20000
+    - --log-file=/var/log/memgraph/memgraph.log
+
   memgraph:
-    coordinators:
-      volumeClaim:
-        logPVC: false
-        logPVCClassName: ""
-        logPVCSize: 256Mi
-        storagePVC: false
-        storagePVCClassName: ""
-        storagePVCSize: 1Gi
     data:
       volumeClaim:
-        logPVC: false
-        logPVCClassName: ""
-        logPVCSize: 256Mi
-        storagePVC: false
         storagePVCClassName: ""
+        storagePVC: true
         storagePVCSize: 1Gi
+        logPVCClassName: ""
+        logPVC: true
+        logPVCSize: 256Mi
+    coordinators:
+      volumeClaim:
+        logPVCClassName: ""
+        logPVC: true
+        logPVCSize: 256Mi
+        storagePVCClassName: ""
+        storagePVC: true
+        storagePVCSize: 1Gi
+
     env:
-      MEMGRAPH_ENTERPRISE_LICENSE: ""
-      MEMGRAPH_ORGANIZATION_NAME: ""
+      MEMGRAPH_ENTERPRISE_LICENSE: "${MEMGRAPH_ENTERPRISE_LICENSE}"
+      MEMGRAPH_ORGANIZATION_NAME: "${MEMGRAPH_ORGANIZATION_NAME}"
     image:
       pullPolicy: IfNotPresent
       repository: memgraph/memgraph
@@ -95,5 +113,3 @@ spec:
       startup:
         failureThreshold: 30
         periodSeconds: 10
-  
-  

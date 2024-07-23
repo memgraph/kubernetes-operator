@@ -3,7 +3,7 @@
 # To re-generate a bundle for another specific version without changing the standard setup, you can:
 # - use the VERSION as arg of the bundle target (e.g make bundle VERSION=0.0.2)
 # - use environment variables to overwrite this value (e.g export VERSION=0.0.2)
-VERSION ?= 0.0.2
+VERSION ?= 0.0.3
 
 # CHANNELS define the bundle channels used in the bundle.
 # Add a new line here if you would like to change its default config. (E.g CHANNELS = "candidate,fast,stable")
@@ -28,7 +28,7 @@ BUNDLE_METADATA_OPTS ?= $(BUNDLE_CHANNELS) $(BUNDLE_DEFAULT_CHANNEL)
 # This variable is used to construct full image tags for bundle and catalog images.
 #
 # For example, running 'make bundle-build bundle-push catalog-build catalog-push' will build and push both
-u my.domain/kubernetes-operator-bundle:$VERSION and my.domain/kubernetes-operator-catalog:$VERSION.
+# my.domain/kubernetes-operator-bundle:$VERSION and my.domain/kubernetes-operator-catalog:$VERSION.
 IMAGE_TAG_BASE ?= memgraph/kubernetes-operator
 
 # BUNDLE_IMG defines the image:tag used for the bundle.
@@ -232,7 +232,6 @@ HELMIFY ?= helmify
 helmify: $(HELMIFY) ## Download helmify locally if necessary.
 $(HELMIFY): $(LOCALBIN)
 	test -s $(LOCALBIN)/helmify || GOBIN=$(LOCALBIN) go install github.com/arttor/helmify/cmd/helmify@latest
-    
+
 helm: config/manifests kustomize helmify
 	$(KUSTOMIZE) build config/default | $(HELMIFY)
-

@@ -2,7 +2,6 @@
 
 All described installation options will run the Operator inside the cluster.
 
-## Option I: Install using Makefile
 
 Make sure to clone this repository with its submodule (helm-charts).
 
@@ -10,19 +9,13 @@ Make sure to clone this repository with its submodule (helm-charts).
 git clone --recurse-submodules git@github.com:memgraph/kubernetes-operator.git
 ```
 
-After this you can start your operator with a single command:
-
-```bash
-make deploy
-```
-
-This command will use operator's image from Memgraph's DockerHub and create all necessary Kubernetes resources for running an operator.
-
-## Option II: Install using kubectl
+## Install K8 resources
 
 ```bash
 kubectl apply -k config/default
 ```
+
+This command will use operator's image from Memgraph's DockerHub and create all necessary Kubernetes resources for running an operator.
 
 ## Verify installation
 
@@ -30,11 +23,11 @@ Installation using any of options described above will cause creating Kubernetes
 namespace `memgraph-operator-system`. You can check your resources with:
 
 ```bash
-kubectl get serviceaccounts -A
-kubectl get rolebindings -A
-kubectl get roles -A
-kubectl get deployments -A
-kubectl get pods -A
+kubectl get serviceaccounts -n memgraph-operator-system
+kubectl get clusterrolebindings -n memgraph-operator-system
+kubectl get clusterroles -n memgraph-operator-system
+kubectl get deployments -n memgraph-operator-system
+kubectl get pods -n memgraph-operator-system
 ```
 
 CustomResourceDefinition `memgraphhas.memgraph.com`, whose job is to monitor CustomResource `MemgraphHA`, will also get created and you can verify
@@ -46,12 +39,19 @@ kubectl get crds -A
 
 ## Start Memgraph High Availability Cluster
 
-We already provide sample cluster in `config/samples/memgraph_v1_ha.yaml`. You only need to set your license information by setting 
-`MEMGRAPH_ORGANIZATION_NAME` and `MEMGRAPH_ENTERPRISE_LICENSE` environment variables in the sample file.
+We already provide sample cluster in `config/samples/memgraph_v1_ha.yaml`. You only need to set your license information by setting
+environment variables `MEMGRAPH_ORGANIZATION_NAME` and `MEMGRAPH_ENTERPRISE_LICENSE` in your local environment with:
 
-Start Memgraph HA cluster with `kubectl apply -f config/samples/memgraph_v1_ha.yaml`.
+```bash
+export MEMGRAPH_ORGANIZATION_NAME="<YOUR_ORGANIZATION_NAME>"
+export MEMGRAPH_ENTERPRISE_LICENSE="<MEMGRAPH_ENTERPRISE_LICENSE>"
+```
 
-After approx. 60s, you should be able to see instances in the output of `kubectl get pods -A`:
+Start Memgraph HA cluster with `envsubst < config/samples/memgraph_v1_ha.yaml | kubectl apply -f -`. (The `envsubst command` is a part of the `gettext` package.)
+Instead of using `envsubst` command, you can directly set environment variables in `config/samples/memgraph_v1_ha.yaml`.
+
+
+After ~40s, you should be able to see instances in the output of `kubectl get pods -A`:
 
 
 You can now find URL of any coordinator instances by running e.g `minikube service list` and connect to see the state of the cluster by running
@@ -63,5 +63,6 @@ You can now find URL of any coordinator instances by running e.g `minikube servi
 
 ```bash
 kubectl delete -f config/samples/memgraph_v1_ha.yaml
-make undeploy / or kubectl delete -k config/default
+kubectl delete pvc --all  # Or leave them if you want to use persistent storage
+kubectl delete -k config/default
 ```
