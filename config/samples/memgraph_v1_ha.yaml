@@ -102,7 +102,7 @@ spec:
     image:
       pullPolicy: IfNotPresent
       repository: memgraph/memgraph
-      tag: 2.18.0
+      tag: 2.18.0_27_0b62e6a73
     probes:
       liveness:
         initialDelaySeconds: 30

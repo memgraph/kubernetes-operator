@@ -25,7 +25,7 @@ spec:
         runAsNonRoot: true
       containers:
       - args:
-        image: memgraph/kubernetes-operator:0.0.3  # TODO: (andi) Try to specify this in a single place, currently used by kustomization.yaml and Makefile
+        image: memgraph/kubernetes-operator:0.0.3  # NOTE If you change this, you also need to update kustomization.yaml
         name: manager
         securityContext:
           readOnlyRootFilesystem: true
