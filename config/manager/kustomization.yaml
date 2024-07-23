@@ -1,9 +1,3 @@
 resources:
-- namespace.yaml
 - manager.yaml
-apiVersion: kustomize.config.k8s.io/v1beta1
-kind: Kustomization
-images:
-- name: memgraph-kubernetes-operator
-  newName: memgraph/kubernetes-operator
-  newTag: 0.0.3
+- namespace.yaml
