@@ -1,0 +1,226 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.15.0
+  name: memgraphhas.memgraph.com
+spec:
+  group: memgraph.com
+  names:
+    kind: MemgraphHA
+    listKind: MemgraphHAList
+    plural: memgraphhas
+    singular: memgraphha
+  scope: Namespaced
+  versions:
+  - name: v1
+    schema:
+      openAPIV3Schema:
+        description: MemgraphHA is the Schema for the memgraphhas API
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: MemgraphHASpec defines the desired state of MemgraphHA
+            properties:
+              coordinators:
+                items:
+                  properties:
+                    args:
+                      items:
+                        type: string
+                      type: array
+                    boltPort:
+                      type: integer
+                    coordinatorPort:
+                      type: integer
+                    id:
+                      type: string
+                    managementPort:
+                      type: integer
+                  required:
+                  - args
+                  - boltPort
+                  - coordinatorPort
+                  - id
+                  - managementPort
+                  type: object
+                type: array
+              data:
+                items:
+                  properties:
+                    args:
+                      items:
+                        type: string
+                      type: array
+                    boltPort:
+                      type: integer
+                    id:
+                      type: string
+                    managementPort:
+                      type: integer
+                    replicationPort:
+                      type: integer
+                  required:
+                  - args
+                  - boltPort
+                  - id
+                  - managementPort
+                  - replicationPort
+                  type: object
+                type: array
+              memgraph:
+                properties:
+                  coordinators:
+                    properties:
+                      volumeClaim:
+                        properties:
+                          logPVC:
+                            type: boolean
+                          logPVCClassName:
+                            type: string
+                          logPVCSize:
+                            type: string
+                          storagePVC:
+                            type: boolean
+                          storagePVCClassName:
+                            type: string
+                          storagePVCSize:
+                            type: string
+                        required:
+                        - logPVC
+                        - logPVCClassName
+                        - logPVCSize
+                        - storagePVC
+                        - storagePVCClassName
+                        - storagePVCSize
+                        type: object
+                    required:
+                    - volumeClaim
+                    type: object
+                  data:
+                    properties:
+                      volumeClaim:
+                        properties:
+                          logPVC:
+                            type: boolean
+                          logPVCClassName:
+                            type: string
+                          logPVCSize:
+                            type: string
+                          storagePVC:
+                            type: boolean
+                          storagePVCClassName:
+                            type: string
+                          storagePVCSize:
+                            type: string
+                        required:
+                        - logPVC
+                        - logPVCClassName
+                        - logPVCSize
+                        - storagePVC
+                        - storagePVCClassName
+                        - storagePVCSize
+                        type: object
+                    required:
+                    - volumeClaim
+                    type: object
+                  env:
+                    additionalProperties:
+                      type: string
+                    type: object
+                  image:
+                    properties:
+                      pullPolicy:
+                        type: string
+                      repository:
+                        type: string
+                      tag:
+                        type: string
+                    required:
+                    - pullPolicy
+                    - repository
+                    - tag
+                    type: object
+                  probes:
+                    properties:
+                      liveness:
+                        description: ProbeConfig configures individual probes
+                        properties:
+                          failureThreshold:
+                            type: integer
+                          initialDelaySeconds:
+                            type: integer
+                          periodSeconds:
+                            type: integer
+                        required:
+                        - initialDelaySeconds
+                        - periodSeconds
+                        type: object
+                      readiness:
+                        description: ProbeConfig configures individual probes
+                        properties:
+                          failureThreshold:
+                            type: integer
+                          initialDelaySeconds:
+                            type: integer
+                          periodSeconds:
+                            type: integer
+                        required:
+                        - initialDelaySeconds
+                        - periodSeconds
+                        type: object
+                      startup:
+                        description: ProbeConfig configures individual probes
+                        properties:
+                          failureThreshold:
+                            type: integer
+                          initialDelaySeconds:
+                            type: integer
+                          periodSeconds:
+                            type: integer
+                        required:
+                        - initialDelaySeconds
+                        - periodSeconds
+                        type: object
+                    required:
+                    - liveness
+                    - readiness
+                    - startup
+                    type: object
+                required:
+                - coordinators
+                - data
+                - env
+                - image
+                - probes
+                type: object
+            required:
+            - coordinators
+            - data
+            - memgraph
+            type: object
+          status:
+            description: MemgraphHAStatus defines the observed state of MemgraphHA
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

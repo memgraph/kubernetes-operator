@@ -1,15 +1,32 @@
+---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  labels:
-    app.kubernetes.io/name: clusterrole
-    app.kubernetes.io/instance: manager-role
-    app.kubernetes.io/component: rbac
-    app.kubernetes.io/created-by: kubernetes-operator
-    app.kubernetes.io/part-of: kubernetes-operator
-    app.kubernetes.io/managed-by: kustomize
   name: manager-role
 rules:
-- apiGroups: [""]
-  resources: ["pods"]
-  verbs: ["get", "list", "watch"]
+- apiGroups:
+  - memgraph.com
+  resources:
+  - memgraphhas
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - memgraph.com
+  resources:
+  - memgraphhas/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - memgraph.com
+  resources:
+  - memgraphhas/status
+  verbs:
+  - get
+  - patch
+  - update

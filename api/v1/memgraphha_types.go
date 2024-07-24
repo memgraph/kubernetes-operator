@@ -25,11 +25,69 @@ import (
 
 // MemgraphHASpec defines the desired state of MemgraphHA
 type MemgraphHASpec struct {
-	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
+	Coordinators []Coordinator  `json:"coordinators"`
+	Data         []DataItem     `json:"data"`
+	Memgraph     MemgraphConfig `json:"memgraph"`
+}
 
-	// Foo is an example field of MemgraphHA. Edit memgraphha_types.go to remove/update
-	Foo string `json:"foo,omitempty"`
+type Coordinator struct {
+	ID              string   `json:"id"`
+	BoltPort        int      `json:"boltPort"`
+	ManagementPort  int      `json:"managementPort"`
+	CoordinatorPort int      `json:"coordinatorPort"`
+	Args            []string `json:"args"`
+}
+
+type DataItem struct {
+	ID              string   `json:"id"`
+	BoltPort        int      `json:"boltPort"`
+	ManagementPort  int      `json:"managementPort"`
+	ReplicationPort int      `json:"replicationPort"`
+	Args            []string `json:"args"`
+}
+
+type MemgraphConfig struct {
+	Data         MemgraphDataConfig         `json:"data"`
+	Coordinators MemgraphCoordinatorsConfig `json:"coordinators"`
+	Env          map[string]string          `json:"env"`
+	Image        ImageConfig                `json:"image"`
+	Probes       MemgraphProbesConfig       `json:"probes"`
+}
+
+type MemgraphDataConfig struct {
+	VolumeClaim VolumeClaimConfig `json:"volumeClaim"`
+}
+
+type MemgraphCoordinatorsConfig struct {
+	VolumeClaim VolumeClaimConfig `json:"volumeClaim"`
+}
+
+type VolumeClaimConfig struct {
+	StoragePVCClassName string `json:"storagePVCClassName"`
+	StoragePVC          bool   `json:"storagePVC"`
+	StoragePVCSize      string `json:"storagePVCSize"`
+	LogPVCClassName     string `json:"logPVCClassName"`
+	LogPVC              bool   `json:"logPVC"`
+	LogPVCSize          string `json:"logPVCSize"`
+}
+
+type ImageConfig struct {
+	PullPolicy string `json:"pullPolicy"`
+	Repository string `json:"repository"`
+	Tag        string `json:"tag"`
+}
+
+type MemgraphProbesConfig struct {
+	Liveness  ProbeConfig `json:"liveness"`
+	Readiness ProbeConfig `json:"readiness"`
+	Startup   ProbeConfig `json:"startup"`
+}
+
+// ProbeConfig configures individual probes
+type ProbeConfig struct {
+	InitialDelaySeconds int `json:"initialDelaySeconds"`
+	PeriodSeconds       int `json:"periodSeconds"`
+	FailureThreshold    int `json:"failureThreshold,omitempty"`
 }
 
 // MemgraphHAStatus defines the observed state of MemgraphHA
