@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 
+	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -37,20 +38,25 @@ type MemgraphHAReconciler struct {
 //+kubebuilder:rbac:groups=memgraph.com,resources=memgraphhas/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=memgraph.com,resources=memgraphhas/finalizers,verbs=update
 
-// Reconcile is part of the main kubernetes reconciliation loop which aims to
-// move the current state of the cluster closer to the desired state.
-// TODO(user): Modify the Reconcile function to compare the state specified by
-// the MemgraphHA object against the actual cluster state, and then
-// perform operations to make the cluster state reflect the state specified by
-// the user.
-//
 // For more details, check Reconcile and its Result here:
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.16.3/pkg/reconcile
 func (r *MemgraphHAReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	_ = log.FromContext(ctx)
+	logger := log.FromContext(ctx)
 
-	// TODO(user): your logic here
+	memgraphha := &memgraphv1.MemgraphHA{}
+	err := r.Get(ctx, req.NamespacedName, memgraphha)
+	if err != nil {
+		// Handle specifically not found error
+		if errors.IsNotFound(err) {
+			logger.Info("MemgraphHA resource not found. Ignoring since object must be deleted.")
+			return ctrl.Result{}, nil
+		}
+		logger.Error(err, "Failed to get MemgraphHA")
+		// Requeue
+		return ctrl.Result{}, err
+	}
 
+	// The resource doesn't need to be reconciled anymore
 	return ctrl.Result{}, nil
 }
 
