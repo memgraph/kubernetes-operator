@@ -157,6 +157,17 @@ func (r *MemgraphHAReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 
 	logger.Info("Reconciliation of data instances finished without actions needed.")
 
+	setupJobStatus, setupJobErr := r.reconcileSetupJob(ctx, memgraphha, &logger)
+	if setupJobErr != nil {
+		logger.Info("Error returned when reconciling coordinator. Returning empty Result with error.")
+		return ctrl.Result{}, setupJobErr
+	}
+
+	if setupJobStatus == true {
+		logger.Info("SetupJob has been created. Returning Result with the request for requeing with error set to nil.")
+		return ctrl.Result{Requeue: true}, nil
+	}
+
 	// The resource doesn't need to be reconciled anymore
 	return ctrl.Result{}, nil
 }
