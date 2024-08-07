@@ -14,6 +14,11 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+/*
+In some way this file simulates types.go from k8s.io/api/apps/v1 to define new resources
+we are using.
+*/
+
 package v1
 
 import (
@@ -100,6 +105,11 @@ type MemgraphHAStatus struct {
 //+kubebuilder:subresource:status
 
 // MemgraphHA is the Schema for the memgraphhas API
+/*
+Every Kind needs to have two structures: metav1.TypeMeta and metav1.ObjectMeta.
+TypeMeta structure contains information about the GVK of the Kind.
+ObjectMeta contains metadata for the Kind.
+*/
 type MemgraphHA struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
