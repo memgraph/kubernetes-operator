@@ -50,6 +50,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 
+	"github.com/go-logr/logr"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -93,57 +94,93 @@ func (r *MemgraphHAReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 
 	logger.Info("MemgrahHA namespace", memgraphha.Namespace)
 
-	coord1StatefulSet := &appsv1.StatefulSet{}
-	err = r.Get(ctx, types.NamespacedName{Name: "memgraph-coordinator-1", Namespace: memgraphha.Namespace}, coord1StatefulSet)
-	if err != nil {
-		if errors.IsNotFound(err) {
-			coordId := int32(1)
-			coord := r.createStatefulSetForCoord(memgraphha, coordId)
-			logger.Info("Creating a new StatefulSet", "StatefulSet.Namespace", coord.Namespace, "StatefulSet.Name", coord.Name)
-			err := r.Create(ctx, coord)
-			if err != nil {
-				logger.Error(err, "Failed to create new StatefulSet", "StatefulSet.Namespace", coord.Namespace, "StatefulSet.Name", coord.Name)
-				return ctrl.Result{}, err
-			}
-			// Coordinator is created, requeue and continue reconciliation loop
-			return ctrl.Result{Requeue: true}, nil
+	// TODO: andi unroll loop
 
-		} else {
-			logger.Error(err, "Failed to fetch StatefulSet for coordinator1")
-			return ctrl.Result{}, err
-		}
+	coordsStatus, coordsErr := r.reconcileCoordinators(ctx, memgraphha, &logger)
+	if coordsErr != nil {
+		logger.Info("Error returned from reconciling coordinators. Returning empty Result with error.")
+		return ctrl.Result{}, coordsErr
+	}
+
+	if coordsStatus == true {
+		logger.Info("One of coordinators has been created. Returning Result with the request for requeing with error=nil.")
+		return ctrl.Result{Requeue: true}, nil
+	}
+
+	logger.Info("Reconciliation of coordinators finished without actions needed.")
+
+	// TODO: (andi) unroll loop
+
+	dataInstancesStatus, dataInstancesErr := r.reconcileDataInstances(ctx, memgraphha, &logger)
+	if dataInstancesErr != nil {
+		logger.Info("Error returned from reconciling data instances. Returning empty Result with error.")
+		return ctrl.Result{}, dataInstancesErr
+	}
+
+	if dataInstancesStatus == true {
+		logger.Info("One of data instances has been created. Returning Result with the request for requeing with error=nil.")
+		return ctrl.Result{Requeue: true}, nil
 	}
 
 	// The resource doesn't need to be reconciled anymore
 	return ctrl.Result{}, nil
 }
 
-func (r *MemgraphHAReconciler) createStatefulSetForCoord(memgraphha *memgraphv1.MemgraphHA, coordId int32) *appsv1.StatefulSet {
-	labels := createCoordLabels(coordId)
-	coordName := fmt.Sprintf("memgraph-coordinator-%d", coordId)
+func (r *MemgraphHAReconciler) reconcileDataInstances(ctx context.Context, memgraphha *memgraphv1.MemgraphHA, logger *logr.Logger) (bool, error) {
+	logger.Info("Started reconciling data instances")
+	status := false
+
+	for dataInstanceId := 0; dataInstanceId <= 1; dataInstanceId++ {
+		dataInstanceStatefulSet := &appsv1.StatefulSet{}
+		name := fmt.Sprintf("memgraph-data-%d", dataInstanceId)
+		logger.Info("Started reconciling", name)
+		err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: memgraphha.Namespace}, dataInstanceStatefulSet)
+		if err != nil {
+			if errors.IsNotFound(err) {
+				dataInstance := r.createStatefulSetForDataInstance(memgraphha, dataInstanceId)
+				logger.Info("Creating a new StatefulSet", "StatefulSet.Namespace", dataInstance.Namespace, "StatefulSet.Name", dataInstance.Name)
+				err := r.Create(ctx, dataInstance)
+				if err != nil {
+					logger.Error(err, "Failed to create new StatefulSet", "StatefulSet.Namespace", dataInstance.Namespace, "StatefulSet.Name", dataInstance.Name)
+					return false, err
+				}
+				status = true
+				logger.Info("StatefulSet for", name, "is created. Setting status flag to true and continuing to reconcile other data instances. Caller should requeue.")
+			} else {
+				logger.Error(err, "Failed to fetch StatefulSet for", name, "Reconciliation loop is terminated.")
+				return false, err
+			}
+		} else {
+			logger.Info("StatefulSet for", name, "already exists. Keeping status flag as it was and continuing to reconcile other data instances.")
+
+		}
+	}
+
+	return status, nil
+}
+
+func (r *MemgraphHAReconciler) createStatefulSetForDataInstance(memgraphha *memgraphv1.MemgraphHA, dataInstanceId int) *appsv1.StatefulSet {
+	dataInstanceName := fmt.Sprintf("memgraph-data-%d", dataInstanceId)
+	labels := createDataInstanceLabels(dataInstanceName)
 	replicas := int32(1)
-	containerName := "memgraph-coordinator"
+	containerName := "memgraph-data"
 	image := "memgraph/memgraph:2.18.1"
 	boltPort := 7687
-	coordPort := 12000
+	replicationPort := 12000
 	mgmtPort := 10000
 	args := []string{
-		fmt.Sprintf("--coordinator-id=%d", coordId),
-		fmt.Sprintf("--coordinator-port=%d", coordPort),
 		fmt.Sprintf("--management-port=%d", mgmtPort),
 		fmt.Sprintf("--bolt-port=%d", boltPort),
-		fmt.Sprintf("--coordinator-hostname=memgraph-coordinator-%d.default.svc.cluster.local", coordId),
 		"--experimental-enabled=high-availability",
 		"--also-log-to-stderr",
 		"--log-level=TRACE",
 		"--log-file=/var/log/memgraph/memgraph.log",
-		"--nuraft-log-file=/var/log/memgraph/memgraph.log",
 	}
 	license := "<TODO> add"
 	organization := "testing-k8"
-	volumeLibName := fmt.Sprintf("memgraph-coordinator-%d-lib-storage", coordId)
+	volumeLibName := fmt.Sprintf("%s-lib-storage", dataInstanceName)
 	volumeLibSize := "1Gi"
-	volumeLogName := fmt.Sprintf("memgraph-coordinator-%d-log-storage", coordId)
+	volumeLogName := fmt.Sprintf("%s-log-storage", dataInstanceName)
 	volumeLogSize := "256Mi"
 	initContainerName := "init"
 	initContainerCommand := []string{
@@ -160,9 +197,206 @@ func (r *MemgraphHAReconciler) createStatefulSetForCoord(memgraphha *memgraphv1.
 	/*
 		add serviceName
 		env
-		volumeMounts
-		initContainers
-		volumeClaimTemplates
+	*/
+
+	data := &appsv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      dataInstanceName,
+			Namespace: memgraphha.Namespace,
+		},
+		Spec: appsv1.StatefulSetSpec{
+			Replicas: &replicas,
+			Selector: &metav1.LabelSelector{
+				MatchLabels: labels,
+			},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: labels,
+				},
+				Spec: corev1.PodSpec{
+					InitContainers: []corev1.Container{
+						{
+							Name:  initContainerName,
+							Image: image,
+							VolumeMounts: []corev1.VolumeMount{
+								{
+									Name:      volumeLibName,
+									MountPath: "/var/lib/memgraph",
+								},
+								{
+									Name:      volumeLogName,
+									MountPath: "/var/log/memgraph",
+								},
+							},
+							Command: initContainerCommand,
+							Args:    initContainerArgs,
+							SecurityContext: &corev1.SecurityContext{
+								Privileged:             &initContainerPrivileged,
+								ReadOnlyRootFilesystem: &initContainerReadOnlyRootFilesystem,
+								RunAsNonRoot:           &initContainerRunAsNonRoot,
+								RunAsUser:              &initContainerRunAsUser,
+								Capabilities: &corev1.Capabilities{
+									Drop: []corev1.Capability{"all"},
+									Add:  []corev1.Capability{"CHOWN"},
+								},
+							},
+						},
+					},
+
+					Containers: []corev1.Container{{
+						Name:            containerName,
+						Image:           image,
+						ImagePullPolicy: corev1.PullIfNotPresent,
+						Ports: []corev1.ContainerPort{
+							{
+								ContainerPort: int32(boltPort),
+								Name:          "boltPort",
+							},
+							{
+								ContainerPort: int32(mgmtPort),
+								Name:          "managementPort",
+							},
+							{
+								ContainerPort: int32(replicationPort),
+								Name:          "replicationPort",
+							},
+						},
+						Args: args,
+						Env: []corev1.EnvVar{
+							{
+								Name:  "MEMGRAPH_ENTERPRISE_LICENSE",
+								Value: license,
+							},
+							{
+								Name:  "MEMGRAPH_ORGANIZATION_NAME",
+								Value: organization,
+							},
+						},
+						VolumeMounts: []corev1.VolumeMount{
+							{
+								Name:      volumeLibName,
+								MountPath: "/var/lib/memgraph",
+							},
+							{
+								Name:      volumeLogName,
+								MountPath: "/var/log/memgraph",
+							},
+						},
+					}},
+				},
+			},
+			VolumeClaimTemplates: []corev1.PersistentVolumeClaim{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: volumeLibName,
+					},
+					Spec: corev1.PersistentVolumeClaimSpec{
+						AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+						Resources: corev1.VolumeResourceRequirements{
+							Requests: corev1.ResourceList{
+								corev1.ResourceEphemeralStorage: resource.MustParse(volumeLibSize),
+							},
+						},
+					},
+				},
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: volumeLogName,
+					},
+					Spec: corev1.PersistentVolumeClaimSpec{
+						AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+						Resources: corev1.VolumeResourceRequirements{
+							Requests: corev1.ResourceList{
+								corev1.ResourceEphemeralStorage: resource.MustParse(volumeLogSize),
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	ctrl.SetControllerReference(memgraphha, data, r.Scheme)
+	return data
+}
+
+/*
+Returns bool, error tuple. If error exists, the caller should return with error and status will always be set to false.
+If there is no error, we must look at bool status which when true will say that some coordinator was created (or all of them) and we need to requeue
+or we need to go to the next step of reconciliation.
+*/
+func (r *MemgraphHAReconciler) reconcileCoordinators(ctx context.Context, memgraphha *memgraphv1.MemgraphHA, logger *logr.Logger) (bool, error) {
+	logger.Info("Started reconciling coordinators")
+	status := false
+	for coordId := 1; coordId <= 3; coordId++ {
+		coordStatefulSet := &appsv1.StatefulSet{}
+		name := fmt.Sprintf("memgraph-coordinator-%d", coordId)
+		logger.Info("Started reconciling", name)
+		err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: memgraphha.Namespace}, coordStatefulSet)
+		if err != nil {
+			if errors.IsNotFound(err) {
+				coord := r.createStatefulSetForCoord(memgraphha, coordId)
+				logger.Info("Creating a new StatefulSet", "StatefulSet.Namespace", coord.Namespace, "StatefulSet.Name", coord.Name)
+				err := r.Create(ctx, coord)
+				if err != nil {
+					logger.Error(err, "Failed to create new StatefulSet", "StatefulSet.Namespace", coord.Namespace, "StatefulSet.Name", coord.Name)
+					return false, err
+				}
+				status = true
+				logger.Info("StatefulSet for", name, "is created. Setting status flag to true and continuing to reconcile other coordinators. Caller should requeue.")
+			} else {
+				logger.Error(err, "Failed to fetch StatefulSet for", name, "Reconciliation loop is terminated.")
+				return false, err
+			}
+		} else {
+			logger.Info("StatefulSet for", name, "already exists. Keeping status flag as it was and continuing to reconcile other coordinators.")
+		}
+	}
+	return status, nil
+}
+
+func (r *MemgraphHAReconciler) createStatefulSetForCoord(memgraphha *memgraphv1.MemgraphHA, coordId int) *appsv1.StatefulSet {
+	coordName := fmt.Sprintf("memgraph-coordinator-%d", coordId)
+	labels := createCoordLabels(coordName)
+	replicas := int32(1)
+	containerName := "memgraph-coordinator"
+	image := "memgraph/memgraph:2.18.1"
+	boltPort := 7687
+	coordPort := 12000
+	mgmtPort := 10000
+	args := []string{
+		fmt.Sprintf("--coordinator-id=%d", coordId),
+		fmt.Sprintf("--coordinator-port=%d", coordPort),
+		fmt.Sprintf("--management-port=%d", mgmtPort),
+		fmt.Sprintf("--bolt-port=%d", boltPort),
+		fmt.Sprintf("--coordinator-hostname=%s.default.svc.cluster.local", coordName),
+		"--experimental-enabled=high-availability",
+		"--also-log-to-stderr",
+		"--log-level=TRACE",
+		"--log-file=/var/log/memgraph/memgraph.log",
+		"--nuraft-log-file=/var/log/memgraph/memgraph.log",
+	}
+	license := "<TODO> add"
+	organization := "testing-k8"
+	volumeLibName := fmt.Sprintf("%s-lib-storage", coordName)
+	volumeLibSize := "1Gi"
+	volumeLogName := fmt.Sprintf("%s-log-storage", coordName)
+	volumeLogSize := "256Mi"
+	initContainerName := "init"
+	initContainerCommand := []string{
+		"/bin/sh",
+		"-c",
+	}
+	initContainerArgs := []string{"chown -R memgraph:memgraph /var/log; chown -R memgraph:memgraph /var/lib"}
+	initContainerPrivileged := true
+	initContainerReadOnlyRootFilesystem := false
+	initContainerRunAsNonRoot := false
+	initContainerRunAsUser := int64(0)
+
+	// TODO:
+	/*
+		add serviceName
+		env
 	*/
 
 	coord := &appsv1.StatefulSet{
@@ -286,8 +520,12 @@ func (r *MemgraphHAReconciler) createStatefulSetForCoord(memgraphha *memgraphv1.
 	return coord
 }
 
-func createCoordLabels(coordId int32) map[string]string {
-	return map[string]string{"app": fmt.Sprintf("memgraph-coordinator-%d", coordId)}
+func createCoordLabels(coordName string) map[string]string {
+	return map[string]string{"app": coordName}
+}
+
+func createDataInstanceLabels(dataInstanceName string) map[string]string {
+	return map[string]string{"app": dataInstanceName}
 }
 
 // SetupWithManager sets up the controller with the Manager.
