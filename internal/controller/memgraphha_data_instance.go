@@ -147,15 +147,15 @@ func (r *MemgraphHAReconciler) createStatefulSetForDataInstance(memgraphha *memg
 						Ports: []corev1.ContainerPort{
 							{
 								ContainerPort: int32(boltPort),
-								Name:          "boltPort",
+								Name:          "bolt",
 							},
 							{
 								ContainerPort: int32(mgmtPort),
-								Name:          "managementPort",
+								Name:          "management",
 							},
 							{
 								ContainerPort: int32(replicationPort),
-								Name:          "replicationPort",
+								Name:          "replication",
 							},
 						},
 						Args: args,
@@ -191,7 +191,7 @@ func (r *MemgraphHAReconciler) createStatefulSetForDataInstance(memgraphha *memg
 						AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
 						Resources: corev1.VolumeResourceRequirements{
 							Requests: corev1.ResourceList{
-								corev1.ResourceEphemeralStorage: resource.MustParse(volumeLibSize),
+								corev1.ResourceStorage: resource.MustParse(volumeLibSize),
 							},
 						},
 					},
@@ -204,7 +204,7 @@ func (r *MemgraphHAReconciler) createStatefulSetForDataInstance(memgraphha *memg
 						AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
 						Resources: corev1.VolumeResourceRequirements{
 							Requests: corev1.ResourceList{
-								corev1.ResourceEphemeralStorage: resource.MustParse(volumeLogSize),
+								corev1.ResourceStorage: resource.MustParse(volumeLogSize),
 							},
 						},
 					},
