@@ -97,13 +97,13 @@ spec:
         storagePVC: true
         storagePVCSize: 1Gi
 
-    env:
+    env: # This can be removed I think
       MEMGRAPH_ENTERPRISE_LICENSE: "${MEMGRAPH_ENTERPRISE_LICENSE}"
       MEMGRAPH_ORGANIZATION_NAME: "${MEMGRAPH_ORGANIZATION_NAME}"
     image:
       pullPolicy: IfNotPresent
       repository: memgraph/memgraph
-      tag: 2.18.0
+      tag: 2.18.1 # I think we should read this value in controller code.
     probes:
       liveness:
         initialDelaySeconds: 30

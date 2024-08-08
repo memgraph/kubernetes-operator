@@ -49,11 +49,9 @@ creating a Kubernetes Secret containing licensing info. You can do this in a fol
 --from-literal=MEMGRAPH_ORGANIZATION_NAME="<YOUR_ORGANIZATION_NAME>"
 ```
 
-Start Memgraph HA cluster with `envsubst < config/samples/memgraph_v1_ha.yaml | kubectl apply -f -`. (The `envsubst command` is a part of the `gettext` package.)
-Instead of using `envsubst` command, you can directly set environment variables in `config/samples/memgraph_v1_ha.yaml`.
+Start Memgraph HA cluster with `kubectl apply -f config/samples/memgraph_v1_ha.yaml`.
 
-
-After approx. 60s, you should be able to see instances in the output of `kubectl get pods -A`:
+After approx. 60s, you should be able to see instances in the output of `kubectl get pods -A`.
 
 
 You can now find URL of any coordinator instances by running e.g `minikube service list` and connect to see the state of the cluster by running
@@ -64,7 +62,8 @@ You can now find URL of any coordinator instances by running e.g `minikube servi
 ## Clear resources
 
 ```bash
-kubectl delete -f config/samples/memgraph_v1_ha.yaml
+kubectl delete -f config/samples/memgraph_v1_ha.yaml # For deleting cluster
 kubectl delete pvc --all  # Or leave them if you want to use persistent storage
-kubectl delete -k config/default
+kubectl delete secret memgraph-secrets
+make undeploy
 ```

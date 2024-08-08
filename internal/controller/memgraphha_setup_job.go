@@ -86,25 +86,13 @@ func (r *MemgraphHAReconciler) createSetupJob(memgraphha *memgraphv1.MemgraphHA)
                                 until nc -z memgraph-coordinator-3.default.svc.cluster.local 7687; do sleep 1; done
                                 until nc -z memgraph-data-0.default.svc.cluster.local 7687; do sleep 1; done
                                 until nc -z memgraph-data-1.default.svc.cluster.local 7687; do sleep 1; done
-                                echo "Pods are available for Bolt connection!"
-                                sleep 5
-                                echo "Running mgconsole commands..."
+                                echo "Pods are available for Bolt connection. Running registration queries!"
 																echo 'ADD COORDINATOR 2 WITH CONFIG {"bolt_server": "memgraph-coordinator-2.default.svc.cluster.local:7687", "management_server":  "memgraph-coordinator-2.default.svc.cluster.local:10000", "coordinator_server":  "memgraph-coordinator-2.default.svc.cluster.local:12000"};' | mgconsole --host memgraph-coordinator-1.default.svc.cluster.local --port 7687
           											echo 'ADD COORDINATOR 3 WITH CONFIG {"bolt_server": "memgraph-coordinator-3.default.svc.cluster.local:7687", "management_server":  "memgraph-coordinator-3.default.svc.cluster.local:10000", "coordinator_server":  "memgraph-coordinator-3.default.svc.cluster.local:12000"};' | mgconsole --host memgraph-coordinator-1.default.svc.cluster.local --port 7687
           											echo 'REGISTER INSTANCE instance_1 WITH CONFIG {"bolt_server": "memgraph-data-0.default.svc.cluster.local:7687", "management_server": "memgraph-data-0.default.svc.cluster.local:10000", "replication_server": "memgraph-data-0.default.svc.cluster.local:20000"};' | mgconsole --host memgraph-coordinator-1.default.svc.cluster.local --port 7687
           											echo 'REGISTER INSTANCE instance_2 WITH CONFIG {"bolt_server": "memgraph-data-1.default.svc.cluster.local:7687", "management_server": "memgraph-data-1.default.svc.cluster.local:10000", "replication_server": "memgraph-data-1.default.svc.cluster.local:20000"};' | mgconsole --host memgraph-coordinator-1.default.svc.cluster.local --port 7687
           											echo 'SET INSTANCE instance_1 TO MAIN;' | mgconsole --host memgraph-coordinator-1.default.svc.cluster.local --port 7687
-          											sleep 3
-          											echo "SHOW INSTANCES on coord1"
-          											echo 'SHOW INSTANCES;' | mgconsole --host memgraph-coordinator-1.default.svc.cluster.local --port 7687
-          											echo "SHOW INSTANCES on coord2"
-          											echo 'SHOW INSTANCES;' | mgconsole --host memgraph-coordinator-2.default.svc.cluster.local --port 7687
-          											echo "SHOW INSTANCES on coord3"
-          											echo 'SHOW INSTANCES;' | mgconsole --host memgraph-coordinator-3.default.svc.cluster.local --port 7687
-          											echo "RETURN 0 on 1st data instance"
-          											echo 'RETURN 0;' | mgconsole --host memgraph-data-0.default.svc.cluster.local --port 7687
-          											echo "RETURN 0 on 2nd data instance"
-          											echo 'RETURN 0;' | mgconsole --host memgraph-data-1.default.svc.cluster.local --port 7687
+																echo "Registration queries done!"
                             `},
 							SecurityContext: &corev1.SecurityContext{
 								RunAsUser: &runAsUser,
