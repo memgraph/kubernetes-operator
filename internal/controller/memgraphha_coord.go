@@ -85,8 +85,6 @@ func (r *MemgraphHAReconciler) createStatefulSetForCoord(memgraphha *memgraphv1.
 		"--log-file=/var/log/memgraph/memgraph.log",
 		"--nuraft-log-file=/var/log/memgraph/memgraph.log",
 	}
-	license := "<TODO> add"
-	organization := "testing-k8"
 	volumeLibName := fmt.Sprintf("%s-lib-storage", coordName)
 	volumeLibSize := "1Gi"
 	volumeLogName := fmt.Sprintf("%s-log-storage", coordName)
@@ -169,12 +167,26 @@ func (r *MemgraphHAReconciler) createStatefulSetForCoord(memgraphha *memgraphv1.
 						Args: args,
 						Env: []corev1.EnvVar{
 							{
-								Name:  "MEMGRAPH_ENTERPRISE_LICENSE",
-								Value: license,
+								Name: "MEMGRAPH_ENTERPRISE_LICENSE",
+								ValueFrom: &corev1.EnvVarSource{
+									SecretKeyRef: &corev1.SecretKeySelector{
+										LocalObjectReference: corev1.LocalObjectReference{
+											Name: "memgraph-secrets",
+										},
+										Key: "MEMGRAPH_ENTERPRISE_LICENSE",
+									},
+								},
 							},
 							{
-								Name:  "MEMGRAPH_ORGANIZATION_NAME",
-								Value: organization,
+								Name: "MEMGRAPH_ORGANIZATION_NAME",
+								ValueFrom: &corev1.EnvVarSource{
+									SecretKeyRef: &corev1.SecretKeySelector{
+										LocalObjectReference: corev1.LocalObjectReference{
+											Name: "memgraph-secrets",
+										},
+										Key: "MEMGRAPH_ORGANIZATION_NAME",
+									},
+								},
 							},
 						},
 						VolumeMounts: []corev1.VolumeMount{
