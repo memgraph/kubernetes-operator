@@ -75,42 +75,42 @@ func (r *MemgraphHAReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, err
 	}
 
-	logger.Info("MemgrahHA namespace", memgraphha.Namespace)
+	logger.Info("MemgrahHA", "namespace", memgraphha.Namespace)
 
 	for coordId := 1; coordId <= 3; coordId++ {
 		// ClusterIP
 		coordClusterIPStatus, coordClusterIPErr := r.reconcileCoordClusterIPService(ctx, memgraphha, &logger, coordId)
 		if coordClusterIPErr != nil {
-			logger.Info("Error returned when reconciling ClusterIP with id", coordId, "Returning empty Result with error.")
+			logger.Info("Error returned when reconciling ClusterIP Returning empty Result with error.", "coordId", coordId)
 			return ctrl.Result{}, coordClusterIPErr
 		}
 
 		if coordClusterIPStatus == true {
-			logger.Info("ClusterIP with id", coordId, "has been created. Returning Result with the request for requeing with error set to nil.")
+			logger.Info("ClusterIP has been created. Returning Result with the request for requeing with error set to nil.", "coordId", coordId)
 			return ctrl.Result{Requeue: true}, nil
 		}
 
 		// NodePort
 		coordNodePortStatus, coordNodePortErr := r.reconcileCoordNodePortService(ctx, memgraphha, &logger, coordId)
 		if coordNodePortErr != nil {
-			logger.Info("Error returned when reconciling NodePort with id", coordId, "Returning empty Result with error.")
+			logger.Info("Error returned when reconciling NodePort. Returning empty Result with error.", "coordId", coordId)
 			return ctrl.Result{}, coordNodePortErr
 		}
 
 		if coordNodePortStatus == true {
-			logger.Info("NodePort with id", coordId, "has been created. Returning Result with the request for requeing with error set to nil.")
+			logger.Info("NodePort has been created. Returning Result with the request for requeing with error set to nil.", "coordId", coordId)
 			return ctrl.Result{Requeue: true}, nil
 		}
 
 		// Coordinator
 		coordStatus, coordErr := r.reconcileCoordinator(ctx, memgraphha, &logger, coordId)
 		if coordErr != nil {
-			logger.Info("Error returned when reconciling coordinator", coordId, "Returning empty Result with error.")
+			logger.Info("Error returned when reconciling coordinator. Returning empty Result with error.", "coordId", coordId)
 			return ctrl.Result{}, coordErr
 		}
 
 		if coordStatus == true {
-			logger.Info("Coordinator", coordId, "has been created. Returning Result with the request for requeing with error set to nil.")
+			logger.Info("Coordinator has been created. Returning Result with the request for requeing with error set to nil.", "coordId", coordId)
 			return ctrl.Result{Requeue: true}, nil
 		}
 	}
@@ -121,36 +121,36 @@ func (r *MemgraphHAReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		// ClusterIP
 		dataInstanceClusterIPStatus, dataInstanceClusterIPErr := r.reconcileDataInstanceClusterIPService(ctx, memgraphha, &logger, dataInstanceId)
 		if dataInstanceClusterIPErr != nil {
-			logger.Info("Error returned when reconciling ClusterIP with id", dataInstanceId, "Returning empty Result with error.")
+			logger.Info("Error returned when reconciling ClusterIP. Returning empty Result with error.", "dataInstanceId", dataInstanceId)
 			return ctrl.Result{}, dataInstanceClusterIPErr
 		}
 
 		if dataInstanceClusterIPStatus == true {
-			logger.Info("ClusterIP with id", dataInstanceId, "has been created. Returning Result with the request for requeing with error set to nil.")
+			logger.Info("ClusterIP has been created. Returning Result with the request for requeing with error set to nil.", "dataInstanceId", dataInstanceId)
 			return ctrl.Result{Requeue: true}, nil
 		}
 
 		// NodePort
 		dataInstanceNodePortStatus, dataInstanceNodePortErr := r.reconcileDataInstanceNodePortService(ctx, memgraphha, &logger, dataInstanceId)
 		if dataInstanceNodePortErr != nil {
-			logger.Info("Error returned when reconciling NodePort with id", dataInstanceId, "Returning empty Result with error.")
+			logger.Info("Error returned when reconciling NodePort. Returning empty Result with error.", "dataInstanceId", dataInstanceId)
 			return ctrl.Result{}, dataInstanceNodePortErr
 		}
 
 		if dataInstanceNodePortStatus == true {
-			logger.Info("NodePort with id", dataInstanceId, "has been created. Returning Result with the request for requeing with error set to nil.")
+			logger.Info("NodePort has been created. Returning Result with the request for requeing with error set to nil.", "dataInstanceId", dataInstanceId)
 			return ctrl.Result{Requeue: true}, nil
 		}
 
 		// Data instance
 		dataInstancesStatus, dataInstancesErr := r.reconcileDataInstance(ctx, memgraphha, &logger, dataInstanceId)
 		if dataInstancesErr != nil {
-			logger.Info("Error returned when reconciling data instance", dataInstanceId, "Returning empty Result with error.")
+			logger.Info("Error returned when reconciling data instance. Returning empty Result with error.", "dataInstanceId", dataInstanceId)
 			return ctrl.Result{}, dataInstancesErr
 		}
 
 		if dataInstancesStatus == true {
-			logger.Info("Data instance", dataInstanceId, "has been created. Returning Result with the request for requeing with error=nil.")
+			logger.Info("Data instance has been created. Returning Result with the request for requeing with error=nil.", "dataInstanceId", dataInstanceId)
 			return ctrl.Result{Requeue: true}, nil
 		}
 	}

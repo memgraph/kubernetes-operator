@@ -17,7 +17,13 @@ spec:
   - name: v1
     schema:
       openAPIV3Schema:
-        description: MemgraphHA is the Schema for the memgraphhas API
+        description: |-
+          MemgraphHA is the Schema for the memgraphhas API
+
+
+          Every Kind needs to have two structures: metav1.TypeMeta and metav1.ObjectMeta.
+          TypeMeta structure contains information about the GVK of the Kind.
+          ObjectMeta contains metadata for the Kind.
         properties:
           apiVersion:
             description: |-

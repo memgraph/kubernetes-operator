@@ -32,13 +32,13 @@ import (
 
 func (r *MemgraphHAReconciler) reconcileDataInstanceNodePortService(ctx context.Context, memgraphha *memgraphv1.MemgraphHA, logger *logr.Logger, dataInstanceId int) (bool, error) {
 	serviceName := fmt.Sprintf("memgraph-data-%d-external", dataInstanceId)
-	logger.Info("Started reconciling NodePort service", serviceName)
+	logger.Info("Started reconciling NodePort service", "NodePort", serviceName)
 
 	dataInstanceNodePortService := &corev1.Service{}
 	err := r.Get(ctx, types.NamespacedName{Name: serviceName, Namespace: memgraphha.Namespace}, dataInstanceNodePortService)
 
 	if err == nil {
-		logger.Info("NodePort", serviceName, "already exists.")
+		logger.Info("NodePort already exists.", "NodePort", serviceName)
 		return false, nil
 	}
 
@@ -50,11 +50,11 @@ func (r *MemgraphHAReconciler) reconcileDataInstanceNodePortService(ctx context.
 			logger.Error(err, "Failed to create new NodePort", "NodePort.Namespace", nodePort.Namespace, "NodePort.Name", nodePort.Name)
 			return true, err
 		}
-		logger.Info("NodePort", serviceName, "is created.")
+		logger.Info("NodePort is created.", "NodePort", serviceName)
 		return true, nil
 	}
 
-	logger.Error(err, "Failed to fetch NodePort", serviceName)
+	logger.Error(err, "Failed to fetch NodePort", "NodePort", serviceName)
 	return true, err
 
 }
@@ -90,13 +90,13 @@ func (r *MemgraphHAReconciler) createDataInstanceNodePort(memgraphha *memgraphv1
 
 func (r *MemgraphHAReconciler) reconcileDataInstanceClusterIPService(ctx context.Context, memgraphha *memgraphv1.MemgraphHA, logger *logr.Logger, dataInstanceId int) (bool, error) {
 	serviceName := fmt.Sprintf("memgraph-data-%d", dataInstanceId)
-	logger.Info("Started reconciling ClusterIP service", serviceName)
+	logger.Info("Started reconciling ClusterIP service", "ClusterIP", serviceName)
 
 	dataInstanceClusterIPService := &corev1.Service{}
 	err := r.Get(ctx, types.NamespacedName{Name: serviceName, Namespace: memgraphha.Namespace}, dataInstanceClusterIPService)
 
 	if err == nil {
-		logger.Info("ClusterIP", serviceName, "already exists.")
+		logger.Info("ClusterIP already exists.", "ClusterIP", serviceName)
 		return false, nil
 	}
 
@@ -108,11 +108,11 @@ func (r *MemgraphHAReconciler) reconcileDataInstanceClusterIPService(ctx context
 			logger.Error(err, "Failed to create new ClusterIP", "ClusterIP.Namespace", clusterIP.Namespace, "ClusterIP.Name", clusterIP.Name)
 			return true, err
 		}
-		logger.Info("ClusterIP", serviceName, "is created.")
+		logger.Info("ClusterIP is created.", "ClusterIP", serviceName)
 		return true, nil
 	}
 
-	logger.Error(err, "Failed to fetch ClusterIP", serviceName)
+	logger.Error(err, "Failed to fetch ClusterIP", "ClusterIP", serviceName)
 	return true, err
 
 }

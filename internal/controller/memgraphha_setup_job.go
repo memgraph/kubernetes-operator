@@ -32,12 +32,12 @@ import (
 
 func (r *MemgraphHAReconciler) reconcileSetupJob(ctx context.Context, memgraphha *memgraphv1.MemgraphHA, logger *logr.Logger) (bool, error) {
 	name := fmt.Sprintf("memgraph-setup")
-	logger.Info("Started reconciling", name)
+	logger.Info("Started reconciling", "Job", name)
 	setupJob := &batchv1.Job{}
 	err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: memgraphha.Namespace}, setupJob)
 
 	if err == nil {
-		logger.Info("SetupJob", name, "already exists.")
+		logger.Info("SetupJob already exists.", "Job", name)
 		return false, nil
 	}
 
@@ -49,11 +49,11 @@ func (r *MemgraphHAReconciler) reconcileSetupJob(ctx context.Context, memgraphha
 			logger.Error(err, "Failed to create new SetupJob", "SetupJob.Namespace", job.Namespace, "SetupJob.Name", job.Name)
 			return true, err
 		}
-		logger.Info("SetupJob", name, "is created.")
+		logger.Info("SetupJob is created.", "Job", name)
 		return true, nil
 	}
 
-	logger.Error(err, "Failed to fetch SetupJob", name)
+	logger.Error(err, "Failed to fetch SetupJob", "Job", name)
 	return true, err
 
 }

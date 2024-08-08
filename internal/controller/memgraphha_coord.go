@@ -38,12 +38,12 @@ or that nothing was done and we can continue with the next step of reconciliatio
 */
 func (r *MemgraphHAReconciler) reconcileCoordinator(ctx context.Context, memgraphha *memgraphv1.MemgraphHA, logger *logr.Logger, coordId int) (bool, error) {
 	name := fmt.Sprintf("memgraph-coordinator-%d", coordId)
-	logger.Info("Started reconciling", name)
+	logger.Info("Started reconciling", "StatefulSet", name)
 	coordStatefulSet := &appsv1.StatefulSet{}
 	err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: memgraphha.Namespace}, coordStatefulSet)
 
 	if err == nil {
-		logger.Info("StatefulSet", name, "already exists.")
+		logger.Info("StatefulSet already exists.", "StatefulSet", name)
 		return false, nil
 	}
 
@@ -55,11 +55,11 @@ func (r *MemgraphHAReconciler) reconcileCoordinator(ctx context.Context, memgrap
 			logger.Error(err, "Failed to create new StatefulSet", "StatefulSet.Namespace", coord.Namespace, "StatefulSet.Name", coord.Name)
 			return true, err
 		}
-		logger.Info("StatefulSet", name, "is created.")
+		logger.Info("StatefulSet is created.", "StatefulSet", name)
 		return true, nil
 	}
 
-	logger.Error(err, "Failed to fetch StatefulSet", name)
+	logger.Error(err, "Failed to fetch StatefulSet", "StatefulSet", name)
 	return true, err
 }
 
@@ -151,7 +151,7 @@ func (r *MemgraphHAReconciler) createStatefulSetForCoord(memgraphha *memgraphv1.
 					Containers: []corev1.Container{{
 						Name:            containerName,
 						Image:           image,
-						ImagePullPolicy: corev1.PullIfNotPresent,
+						ImagePullPolicy: corev1.PullAlways,
 						Ports: []corev1.ContainerPort{
 							{
 								ContainerPort: int32(boltPort),
