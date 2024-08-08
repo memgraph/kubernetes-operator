@@ -65,17 +65,14 @@ func (r *MemgraphHAReconciler) reconcileCoordinator(ctx context.Context, memgrap
 
 func (r *MemgraphHAReconciler) createStatefulSetForCoord(memgraphha *memgraphv1.MemgraphHA, coordId int) *appsv1.StatefulSet {
 	coordName := fmt.Sprintf("memgraph-coordinator-%d", coordId)
-	serviceName := coordName
+	serviceName := coordName // service has the same name as the coordinator
 	labels := createCoordLabels(coordName)
 	replicas := int32(1)
 	containerName := "memgraph-coordinator"
 	image := "memgraph/memgraph:2.18.1"
-	boltPort := 7687
-	coordPort := 12000
-	mgmtPort := 10000
 	args := []string{
 		fmt.Sprintf("--coordinator-id=%d", coordId),
-		fmt.Sprintf("--coordinator-port=%d", coordPort),
+		fmt.Sprintf("--coordinator-port=%d", coordinatorPort),
 		fmt.Sprintf("--management-port=%d", mgmtPort),
 		fmt.Sprintf("--bolt-port=%d", boltPort),
 		fmt.Sprintf("--coordinator-hostname=%s.default.svc.cluster.local", coordName),
@@ -100,7 +97,6 @@ func (r *MemgraphHAReconciler) createStatefulSetForCoord(memgraphha *memgraphv1.
 	initContainerRunAsNonRoot := false
 	initContainerRunAsUser := int64(0)
 
-	// TODO (andi): How to handle license and organization name?
 	coord := &appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      coordName,
@@ -160,7 +156,7 @@ func (r *MemgraphHAReconciler) createStatefulSetForCoord(memgraphha *memgraphv1.
 								Name:          "management",
 							},
 							{
-								ContainerPort: int32(coordPort),
+								ContainerPort: int32(coordinatorPort),
 								Name:          "coordinator",
 							},
 						},

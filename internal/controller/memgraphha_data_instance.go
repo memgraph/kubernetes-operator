@@ -66,9 +66,6 @@ func (r *MemgraphHAReconciler) createStatefulSetForDataInstance(memgraphha *memg
 	replicas := int32(1)
 	containerName := "memgraph-data"
 	image := "memgraph/memgraph:2.18.1"
-	boltPort := 7687
-	replicationPort := 12000
-	mgmtPort := 10000
 	args := []string{
 		fmt.Sprintf("--management-port=%d", mgmtPort),
 		fmt.Sprintf("--bolt-port=%d", boltPort),
@@ -77,8 +74,6 @@ func (r *MemgraphHAReconciler) createStatefulSetForDataInstance(memgraphha *memg
 		"--log-level=TRACE",
 		"--log-file=/var/log/memgraph/memgraph.log",
 	}
-	license := "<TODO> add"
-	organization := "testing-k8"
 	volumeLibName := fmt.Sprintf("%s-lib-storage", dataInstanceName)
 	volumeLibSize := "1Gi"
 	volumeLogName := fmt.Sprintf("%s-log-storage", dataInstanceName)
@@ -94,7 +89,6 @@ func (r *MemgraphHAReconciler) createStatefulSetForDataInstance(memgraphha *memg
 	initContainerRunAsNonRoot := false
 	initContainerRunAsUser := int64(0)
 
-	// TODO: (andi) How handle licensing info?
 	data := &appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      dataInstanceName,
@@ -161,12 +155,26 @@ func (r *MemgraphHAReconciler) createStatefulSetForDataInstance(memgraphha *memg
 						Args: args,
 						Env: []corev1.EnvVar{
 							{
-								Name:  "MEMGRAPH_ENTERPRISE_LICENSE",
-								Value: license,
+								Name: "MEMGRAPH_ENTERPRISE_LICENSE",
+								ValueFrom: &corev1.EnvVarSource{
+									SecretKeyRef: &corev1.SecretKeySelector{
+										LocalObjectReference: corev1.LocalObjectReference{
+											Name: "memgraph-secrets",
+										},
+										Key: "MEMGRAPH_ENTERPRISE_LICENSE",
+									},
+								},
 							},
 							{
-								Name:  "MEMGRAPH_ORGANIZATION_NAME",
-								Value: organization,
+								Name: "MEMGRAPH_ORGANIZATION_NAME",
+								ValueFrom: &corev1.EnvVarSource{
+									SecretKeyRef: &corev1.SecretKeySelector{
+										LocalObjectReference: corev1.LocalObjectReference{
+											Name: "memgraph-secrets",
+										},
+										Key: "MEMGRAPH_ORGANIZATION_NAME",
+									},
+								},
 							},
 						},
 						VolumeMounts: []corev1.VolumeMount{

@@ -62,8 +62,6 @@ func (r *MemgraphHAReconciler) reconcileDataInstanceNodePortService(ctx context.
 func (r *MemgraphHAReconciler) createDataInstanceNodePort(memgraphha *memgraphv1.MemgraphHA, dataInstanceId int) *corev1.Service {
 	serviceName := fmt.Sprintf("memgraph-data-%d-external", dataInstanceId)
 	dataInstanceName := fmt.Sprintf("memgraph-data-%d", dataInstanceId)
-	// TODO: (andi) Extract somehow configuration and move into separate files.
-	boltPort := 7687
 
 	dataInstanceNodePort := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
@@ -120,10 +118,6 @@ func (r *MemgraphHAReconciler) reconcileDataInstanceClusterIPService(ctx context
 func (r *MemgraphHAReconciler) createDataInstanceClusterIP(memgraphha *memgraphv1.MemgraphHA, dataInstanceId int) *corev1.Service {
 	serviceName := fmt.Sprintf("memgraph-data-%d", dataInstanceId)
 	dataInstanceName := serviceName
-	// TODO: (andi) Extract somehow configuration and move into separate files.
-	boltPort := 7687
-	replicationPort := 20000
-	mgmtPort := 10000
 
 	dataInstanceClusterIP := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{

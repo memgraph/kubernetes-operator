@@ -63,8 +63,6 @@ func (r *MemgraphHAReconciler) reconcileCoordNodePortService(ctx context.Context
 func (r *MemgraphHAReconciler) createCoordNodePort(memgraphha *memgraphv1.MemgraphHA, coordId int) *corev1.Service {
 	serviceName := fmt.Sprintf("memgraph-coordinator-%d-external", coordId)
 	coordName := fmt.Sprintf("memgraph-coordinator-%d", coordId)
-	// TODO: (andi) Extract somehow configuration and move into separate files.
-	boltPort := 7687
 
 	coordNodePort := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
@@ -121,10 +119,6 @@ func (r *MemgraphHAReconciler) reconcileCoordClusterIPService(ctx context.Contex
 func (r *MemgraphHAReconciler) createCoordClusterIP(memgraphha *memgraphv1.MemgraphHA, coordId int) *corev1.Service {
 	serviceName := fmt.Sprintf("memgraph-coordinator-%d", coordId)
 	coordName := serviceName
-	// TODO: (andi) Extract somehow configuration and move into separate files.
-	boltPort := 7687
-	coordinatorPort := 12000
-	mgmtPort := 10000
 
 	coordClusterIP := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{

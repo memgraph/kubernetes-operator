@@ -16,33 +16,6 @@ limitations under the License.
 
 package controller
 
-/*
-apimachinery package contains code to help developers serialize data in various formats
-between Go structures and objects written in the JSON(or YAML or Protobuf)
-The library is generic in the sense that it doesn't include any Kubernetes API resource
-definitions.
-*/
-
-/*
-API library is a collection of Go structures that are needed to work in Go with the resources
-defined by the Kubernetes API. k8s.io/api is the prefix.
-*/
-
-/*
-Kubernetes API
-apis/memgraph/v1/...
-`kubectl get pods --namespace project1 --watch -o json`
-`kubectl proxy`
-`HOST=http://127.0.0.1:8001`
-e.g create a pod:
-curl $HOST/api/v1/namespaces/project1/pods -H "Content-Type: application/yaml" --data-binary @pod.yaml
-curl -X GET $HOST/api/v1/namespaces/project1/pods/nginx
-*/
-
-/*
-The ResourceList type will have to be used to define the limits and requests of resources.
-*/
-
 import (
 	"context"
 
@@ -65,13 +38,11 @@ func (r *MemgraphHAReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	memgraphha := &memgraphv1.MemgraphHA{}
 	err := r.Get(ctx, req.NamespacedName, memgraphha)
 	if err != nil {
-		// Handle specifically not found error
 		if errors.IsNotFound(err) {
 			logger.Info("MemgraphHA resource not found. Ignoring since object must be deleted.")
 			return ctrl.Result{}, nil
 		}
 		logger.Error(err, "Failed to get MemgraphHA")
-		// Requeue
 		return ctrl.Result{}, err
 	}
 
