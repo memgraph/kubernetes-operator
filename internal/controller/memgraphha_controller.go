@@ -46,7 +46,7 @@ func (r *MemgraphHAReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, err
 	}
 
-	logger.Info("MemgrahHA", "namespace", memgraphha.Namespace)
+	logger.Info("Started reconciliation MemgrahHA")
 
 	for coordId := 1; coordId <= 3; coordId++ {
 		// ClusterIP
@@ -134,11 +134,12 @@ func (r *MemgraphHAReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, setupJobErr
 	}
 
+	// Since it is currently the last step, we don't need to requeue
 	if setupJobStatus == true {
-		logger.Info("SetupJob has been created. Returning Result with the request for requeing with error set to nil.")
-		return ctrl.Result{Requeue: true}, nil
+		logger.Info("SetupJob has been created.")
 	}
 
+	logger.Info("Reconciliation of MemgraphHA finished.")
 	// The resource doesn't need to be reconciled anymore
 	return ctrl.Result{}, nil
 }

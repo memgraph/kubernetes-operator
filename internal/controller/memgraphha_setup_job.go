@@ -59,7 +59,6 @@ func (r *MemgraphHAReconciler) reconcileSetupJob(ctx context.Context, memgraphha
 }
 
 func (r *MemgraphHAReconciler) createSetupJob(memgraphha *memgraphv1.MemgraphHA) *batchv1.Job {
-	image := "memgraph/memgraph:2.18.1"
 	containerName := "memgraph-setup"
 	runAsUser := int64(0)
 	backoffLimit := int32(4)
@@ -80,19 +79,24 @@ func (r *MemgraphHAReconciler) createSetupJob(memgraphha *memgraphv1.MemgraphHA)
 							Args: []string{`
                               	echo "Installing netcat..."
                                 apt-get update && apt-get install -y netcat-openbsd
-                                echo "Waiting for pods to become available for Bolt connection..."
+                                echo "Waiting for pods to become available for Bolt connection. Time: $(date +'%H:%M:%S')"
                                 until nc -z memgraph-coordinator-1.default.svc.cluster.local 7687; do sleep 1; done
                                 until nc -z memgraph-coordinator-2.default.svc.cluster.local 7687; do sleep 1; done
                                 until nc -z memgraph-coordinator-3.default.svc.cluster.local 7687; do sleep 1; done
                                 until nc -z memgraph-data-0.default.svc.cluster.local 7687; do sleep 1; done
                                 until nc -z memgraph-data-1.default.svc.cluster.local 7687; do sleep 1; done
-                                echo "Pods are available for Bolt connection. Running registration queries!"
+                                echo "Pods are available for Bolt connection. Running registration queries! Time: $(date +'%H:%M:%S')"
 																echo 'ADD COORDINATOR 2 WITH CONFIG {"bolt_server": "memgraph-coordinator-2.default.svc.cluster.local:7687", "management_server":  "memgraph-coordinator-2.default.svc.cluster.local:10000", "coordinator_server":  "memgraph-coordinator-2.default.svc.cluster.local:12000"};' | mgconsole --host memgraph-coordinator-1.default.svc.cluster.local --port 7687
+																echo "Coordinator 2 added. Time: $(date +'%H:%M:%S')"
           											echo 'ADD COORDINATOR 3 WITH CONFIG {"bolt_server": "memgraph-coordinator-3.default.svc.cluster.local:7687", "management_server":  "memgraph-coordinator-3.default.svc.cluster.local:10000", "coordinator_server":  "memgraph-coordinator-3.default.svc.cluster.local:12000"};' | mgconsole --host memgraph-coordinator-1.default.svc.cluster.local --port 7687
+																echo "Coordinator 3 added. Time: $(date +'%H:%M:%S')"
           											echo 'REGISTER INSTANCE instance_1 WITH CONFIG {"bolt_server": "memgraph-data-0.default.svc.cluster.local:7687", "management_server": "memgraph-data-0.default.svc.cluster.local:10000", "replication_server": "memgraph-data-0.default.svc.cluster.local:20000"};' | mgconsole --host memgraph-coordinator-1.default.svc.cluster.local --port 7687
+																echo "Instance 1 added. Time: $(date +'%H:%M:%S')"
           											echo 'REGISTER INSTANCE instance_2 WITH CONFIG {"bolt_server": "memgraph-data-1.default.svc.cluster.local:7687", "management_server": "memgraph-data-1.default.svc.cluster.local:10000", "replication_server": "memgraph-data-1.default.svc.cluster.local:20000"};' | mgconsole --host memgraph-coordinator-1.default.svc.cluster.local --port 7687
+																echo "Instance 2 added. Time: $(date +'%H:%M:%S')"
           											echo 'SET INSTANCE instance_1 TO MAIN;' | mgconsole --host memgraph-coordinator-1.default.svc.cluster.local --port 7687
-																echo "Registration queries done!"
+																echo "Instance 1 set to main. Time: $(date +'%H:%M:%S')"
+																echo "Setup finished!"
                             `},
 							SecurityContext: &corev1.SecurityContext{
 								RunAsUser: &runAsUser,

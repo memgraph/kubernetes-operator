@@ -69,7 +69,6 @@ func (r *MemgraphHAReconciler) createStatefulSetForCoord(memgraphha *memgraphv1.
 	labels := createCoordLabels(coordName)
 	replicas := int32(1)
 	containerName := "memgraph-coordinator"
-	image := "memgraph/memgraph:2.18.1"
 	args := []string{
 		fmt.Sprintf("--coordinator-id=%d", coordId),
 		fmt.Sprintf("--coordinator-port=%d", coordinatorPort),
@@ -80,7 +79,6 @@ func (r *MemgraphHAReconciler) createStatefulSetForCoord(memgraphha *memgraphv1.
 		"--also-log-to-stderr",
 		"--log-level=TRACE",
 		"--log-file=/var/log/memgraph/memgraph.log",
-		"--nuraft-log-file=/var/log/memgraph/memgraph.log",
 	}
 	volumeLibName := fmt.Sprintf("%s-lib-storage", coordName)
 	volumeLibSize := "1Gi"

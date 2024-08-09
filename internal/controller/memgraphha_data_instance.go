@@ -65,7 +65,6 @@ func (r *MemgraphHAReconciler) createStatefulSetForDataInstance(memgraphha *memg
 	labels := createDataInstanceLabels(dataInstanceName)
 	replicas := int32(1)
 	containerName := "memgraph-data"
-	image := "memgraph/memgraph:2.18.1"
 	args := []string{
 		fmt.Sprintf("--management-port=%d", mgmtPort),
 		fmt.Sprintf("--bolt-port=%d", boltPort),

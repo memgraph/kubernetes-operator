@@ -18,7 +18,6 @@ spec:
     - --log-level=TRACE
     - --coordinator-hostname=memgraph-coordinator-1.default.svc.cluster.local
     - --log-file=/var/log/memgraph/memgraph.log
-    - --nuraft-log-file=/var/log/memgraph/memgraph.log
 
   - id: "2"
     boltPort: 7687
@@ -35,7 +34,6 @@ spec:
     - --log-level=TRACE
     - --coordinator-hostname=memgraph-coordinator-2.default.svc.cluster.local
     - --log-file=/var/log/memgraph/memgraph.log
-    - --nuraft-log-file=/var/log/memgraph/memgraph.log
 
   - id: "3"
     boltPort: 7687
@@ -51,7 +49,6 @@ spec:
     - --log-level=TRACE
     - --coordinator-hostname=memgraph-coordinator-3.default.svc.cluster.local
     - --log-file=/var/log/memgraph/memgraph.log
-    - --nuraft-log-file=/var/log/memgraph/memgraph.log
 
 
   data:
