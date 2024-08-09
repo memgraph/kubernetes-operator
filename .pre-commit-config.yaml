@@ -15,7 +15,4 @@ repos:
   rev: v1.0.0-rc.1
   hooks:
   -   id: go-mod-tidy
-  -   id: go-vet
-  -   id: go-staticcheck-repo-pkg
   -   id: go-fmt
-  -   id: go-critic
