@@ -12,7 +12,7 @@ git clone --recurse-submodules git@github.com:memgraph/kubernetes-operator.git
 ## Install K8 resources
 
 ```bash
-kubectl apply -k config/default
+make deploy
 ```
 
 This command will use operator's image from Memgraph's DockerHub and create all necessary Kubernetes resources for running an operator.
@@ -28,6 +28,7 @@ kubectl get clusterrolebindings -n memgraph-operator-system
 kubectl get clusterroles -n memgraph-operator-system
 kubectl get deployments -n memgraph-operator-system
 kubectl get pods -n memgraph-operator-system
+kubectl get services -n memgraph-operator-system
 ```
 
 CustomResourceDefinition `memgraphhas.memgraph.com`, whose job is to monitor CustomResource `MemgraphHA`, will also get created and you can verify
@@ -39,19 +40,18 @@ kubectl get crds -A
 
 ## Start Memgraph High Availability Cluster
 
-We already provide sample cluster in `config/samples/memgraph_v1_ha.yaml`. You only need to set your license information by setting
-environment variables `MEMGRAPH_ORGANIZATION_NAME` and `MEMGRAPH_ENTERPRISE_LICENSE` in your local environment with:
+We already provide sample cluster in `config/samples/memgraph_v1_ha.yaml`. You only need to set your license information by
+creating a Kubernetes Secret containing licensing info. You can do this in a following way:
 
 ```bash
-export MEMGRAPH_ORGANIZATION_NAME="<YOUR_ORGANIZATION_NAME>"
-export MEMGRAPH_ENTERPRISE_LICENSE="<MEMGRAPH_ENTERPRISE_LICENSE>"
+ kubectl create secret generic memgraph-secrets \
+--from-literal=MEMGRAPH_ENTERPRISE_LICENSE="<YOUR_LICENSE_INFO>" \
+--from-literal=MEMGRAPH_ORGANIZATION_NAME="<YOUR_ORGANIZATION_NAME>"
 ```
 
-Start Memgraph HA cluster with `envsubst < config/samples/memgraph_v1_ha.yaml | kubectl apply -f -`. (The `envsubst command` is a part of the `gettext` package.)
-Instead of using `envsubst` command, you can directly set environment variables in `config/samples/memgraph_v1_ha.yaml`.
+Start Memgraph HA cluster with `kubectl apply -f config/samples/memgraph_v1_ha.yaml`.
 
-
-After ~40s, you should be able to see instances in the output of `kubectl get pods -A`:
+After approx. 60s, you should be able to see instances in the output of `kubectl get pods -A`.
 
 
 You can now find URL of any coordinator instances by running e.g `minikube service list` and connect to see the state of the cluster by running
@@ -62,7 +62,8 @@ You can now find URL of any coordinator instances by running e.g `minikube servi
 ## Clear resources
 
 ```bash
-kubectl delete -f config/samples/memgraph_v1_ha.yaml
+kubectl delete -f config/samples/memgraph_v1_ha.yaml # For deleting cluster
 kubectl delete pvc --all  # Or leave them if you want to use persistent storage
-kubectl delete -k config/default
+kubectl delete secret memgraph-secrets
+make undeploy
 ```
