@@ -143,7 +143,7 @@ func (r *MemgraphHAReconciler) createStatefulSetForCoord(memgraphha *memgraphv1.
 					Containers: []corev1.Container{{
 						Name:            containerName,
 						Image:           image,
-						ImagePullPolicy: corev1.PullAlways,
+						ImagePullPolicy: corev1.PullAlways, // set to PullIfNotPresent when testing with local image
 						Ports: []corev1.ContainerPort{
 							{
 								ContainerPort: int32(boltPort),
