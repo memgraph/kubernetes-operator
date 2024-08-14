@@ -128,5 +128,8 @@ type MemgraphHAList struct {
 }
 
 func init() {
+	// A Scheme is an abstraction used to register the API objects
+	// as Group-Version-Kinds, convert between API Objects of various
+	// versions and serialize/deserialize API Objects
 	SchemeBuilder.Register(&MemgraphHA{}, &MemgraphHAList{})
 }

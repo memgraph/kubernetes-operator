@@ -25,7 +25,7 @@ spec:
         runAsNonRoot: true
       containers:
       - args:
-        image: memgraph/kubernetes-operator:0.0.4
+        image: memgraph/kubernetes-operator:1.0.0
         name: manager
         securityContext:
           readOnlyRootFilesystem: true
