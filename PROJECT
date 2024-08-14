@@ -4,17 +4,20 @@
 # More info: https://book.kubebuilder.io/reference/project-config.html
 domain: com
 layout:
-- helm.sdk.operatorframework.io/v1
+- go.kubebuilder.io/v4
 plugins:
   manifests.sdk.operatorframework.io/v2: {}
   scorecard.sdk.operatorframework.io/v2: {}
 projectName: kubernetes-operator
+repo: github.com/memgraph/kubernetes-operator
 resources:
 - api:
     crdVersion: v1
     namespaced: true
+  controller: true
   domain: com
   group: memgraph
   kind: MemgraphHA
+  path: github.com/memgraph/kubernetes-operator/api/v1
   version: v1
 version: "3"

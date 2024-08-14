@@ -1,42 +1,16 @@
+---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   name: memgraph-kubernetes-operator
 rules:
-##
-## Base operator rules
-##
-# We need to get namespaces so the operator can read namespaces to ensure they exist
 - apiGroups:
   - ""
   resources:
-  - namespaces
-  verbs:
-  - get
-# We need to manage Helm release secrets
-- apiGroups:
-  - ""
-  resources:
+  - pods
+  - services
+  - configmaps
   - secrets
-  verbs:
-  - "*"
-# We need to create events on CRs about things happening during reconciliation
-- apiGroups:
-  - ""
-  resources:
-  - events
-  verbs:
-  - create
-
-##
-## Rules for memgraph.com/v1, Kind: MemgraphHA
-##
-- apiGroups:
-  - memgraph.com
-  resources:
-  - memgraphhas
-  - memgraphhas/status
-  - memgraphhas/finalizers
   verbs:
   - create
   - delete
@@ -45,23 +19,53 @@ rules:
   - patch
   - update
   - watch
-- verbs:
-  - "*"
-  apiGroups:
-  - "apps"
+- apiGroups:
+  - apps
   resources:
-  - "statefulsets"
-- verbs:
-  - "*"
-  apiGroups:
-  - "batch"
+  - statefulsets
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - batch
   resources:
-  - "jobs"
-- verbs:
-  - "*"
-  apiGroups:
-  - ""
+  - jobs
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - memgraph.com
   resources:
-  - "services"
-
-#+kubebuilder:scaffold:rules
+  - memgraphhas
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - memgraph.com
+  resources:
+  - memgraphhas/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - memgraph.com
+  resources:
+  - memgraphhas/status
+  verbs:
+  - get
+  - patch
+  - update

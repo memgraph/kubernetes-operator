@@ -1,6 +1,0 @@
-# Use the 'create api' subcommand to add watches to this file.
-- group: memgraph.com  # The group of the Custom Resource that will be watched
-  version: v1  # The version of the Custom Resource that will be watched
-  kind: MemgraphHA  # The kind of the Custom Resource that will be watched
-  chart: helm-charts/charts/memgraph-high-availability  # Path to the chart that will be used when reconciling
-#+kubebuilder:scaffold:watch

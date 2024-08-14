@@ -18,7 +18,6 @@ spec:
     - --log-level=TRACE
     - --coordinator-hostname=memgraph-coordinator-1.default.svc.cluster.local
     - --log-file=/var/log/memgraph/memgraph.log
-    - --nuraft-log-file=/var/log/memgraph/memgraph.log
 
   - id: "2"
     boltPort: 7687
@@ -28,13 +27,13 @@ spec:
     - --experimental-enabled=high-availability
     - --coordinator-id=2
     - --coordinator-port=12000
+
     - --management-port=10000
     - --bolt-port=7687
     - --also-log-to-stderr
     - --log-level=TRACE
     - --coordinator-hostname=memgraph-coordinator-2.default.svc.cluster.local
     - --log-file=/var/log/memgraph/memgraph.log
-    - --nuraft-log-file=/var/log/memgraph/memgraph.log
 
   - id: "3"
     boltPort: 7687
@@ -50,7 +49,6 @@ spec:
     - --log-level=TRACE
     - --coordinator-hostname=memgraph-coordinator-3.default.svc.cluster.local
     - --log-file=/var/log/memgraph/memgraph.log
-    - --nuraft-log-file=/var/log/memgraph/memgraph.log
 
 
   data:
@@ -81,12 +79,12 @@ spec:
   memgraph:
     data:
       volumeClaim:
-        storagePVCClassName: ""
-        storagePVC: true
-        storagePVCSize: 1Gi
         logPVCClassName: ""
         logPVC: true
         logPVCSize: 256Mi
+        storagePVCClassName: ""
+        storagePVC: true
+        storagePVCSize: 1Gi
     coordinators:
       volumeClaim:
         logPVCClassName: ""
@@ -96,13 +94,13 @@ spec:
         storagePVC: true
         storagePVCSize: 1Gi
 
-    env:
+    env: # This can be removed I think
       MEMGRAPH_ENTERPRISE_LICENSE: "${MEMGRAPH_ENTERPRISE_LICENSE}"
       MEMGRAPH_ORGANIZATION_NAME: "${MEMGRAPH_ORGANIZATION_NAME}"
     image:
       pullPolicy: IfNotPresent
       repository: memgraph/memgraph
-      tag: 2.18.1
+      tag: 2.18.1 # I think we should read this value in controller code.
     probes:
       liveness:
         initialDelaySeconds: 30
@@ -111,5 +109,6 @@ spec:
         initialDelaySeconds: 5
         periodSeconds: 5
       startup:
+        initialDelaySeconds: 5
         failureThreshold: 30
         periodSeconds: 10
