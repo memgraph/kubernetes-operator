@@ -2,14 +2,13 @@
 
 All described installation options will run the Operator inside the cluster.
 
-
 Make sure to clone this repository with its submodule (helm-charts).
 
 ```bash
 git clone --recurse-submodules git@github.com:memgraph/kubernetes-operator.git
 ```
 
-## Install K8 resources
+## Install K8 Resources
 
 ```bash
 make deploy
@@ -17,10 +16,9 @@ make deploy
 
 This command will use operator's image from Memgraph's DockerHub and create all necessary Kubernetes resources for running an operator.
 
-## Verify installation
+## Verify Installation
 
-Installation using any of options described above will cause creating Kubernetes ServiceAccount, RoleBinding, Role, Deployment and Pods all in newly created all in newly created all in newly created
-namespace `memgraph-operator-system`. You can check your resources with:
+Installation using any of the options described above will create a Kubernetes ServiceAccount, RoleBinding, Role, Deployment, and Pods all in the newly created namespace `memgraph-operator-system`. You can check your resources with:
 
 ```bash
 kubectl get serviceaccounts -n memgraph-operator-system
@@ -40,7 +38,7 @@ kubectl get crds -A
 
 ## Start Memgraph High Availability Cluster
 
-We already provide sample cluster in `config/samples/memgraph_v1_ha.yaml`. You only need to set your license information by
+We already provide a sample cluster in `config/samples/memgraph_v1_ha.yaml`. You only need to set your license information by
 creating a Kubernetes Secret containing licensing info. You can do this in a following way:
 
 ```bash
@@ -51,15 +49,13 @@ creating a Kubernetes Secret containing licensing info. You can do this in a fol
 
 Start Memgraph HA cluster with `kubectl apply -f config/samples/memgraph_v1_ha.yaml`.
 
-After approx. 60s, you should be able to see instances in the output of `kubectl get pods -A`.
+After approximately 60 seconds, you should be able to see instances in the output of `kubectl get pods -A`.
 
-
-You can now find URL of any coordinator instances by running e.g `minikube service list` and connect to see the state of the cluster by running
+You can now find the URL of any coordinator instances by running e.g `minikube service list` and connect to see the state of the cluster by running
 `show instances;`:
 ![image](https://github.com/memgraph/kubernetes-operator/assets/53269502/c68d52e2-19f7-4e45-8ff0-fc2ee662c64b)
 
-
-## Clear resources
+## Clear Resources
 
 ```bash
 kubectl delete -f config/samples/memgraph_v1_ha.yaml # For deleting cluster
