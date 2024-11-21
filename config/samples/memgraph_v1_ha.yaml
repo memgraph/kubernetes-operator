@@ -100,7 +100,7 @@ spec:
     image:
       pullPolicy: IfNotPresent
       repository: memgraph/memgraph
-      tag: 2.18.1 # I think we should read this value in controller code.
+      tag: 2.22.0 # I think we should read this value in controller code.
     probes:
       liveness:
         initialDelaySeconds: 30

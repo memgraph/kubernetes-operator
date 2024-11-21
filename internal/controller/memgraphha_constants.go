@@ -20,4 +20,4 @@ var boltPort int = 7687
 var coordinatorPort int = 12000
 var mgmtPort int = 10000
 var replicationPort int = 20000
-var image string = "memgraph/memgraph:2.18.1"
+var image string = "memgraph/memgraph:2.22.0"
