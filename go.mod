@@ -1,11 +1,10 @@
 module github.com/memgraph/kubernetes-operator
 
-go 1.22.0
-
-toolchain go1.22.5
+go 1.24
 
 require (
 	github.com/go-logr/logr v1.4.2
+	github.com/neo4j/neo4j-go-driver/v5 v5.28.1
 	github.com/onsi/ginkgo/v2 v2.19.0
 	github.com/onsi/gomega v1.33.1
 	k8s.io/api v0.30.3

@@ -18,7 +18,9 @@ package controller
 
 import (
 	"context"
+	"os"
 
+	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -55,6 +57,45 @@ func (r *MemgraphMoveReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 	log.Info("Reading values", "foo", move.Spec.Foo, "databases", move.Spec.Databases)
+
+	// If just testing, use port foward on the host.
+	dbUri := "bolt://localhost:7687"
+	// If running under cluster, ClusterIP service could be used.
+	// dbUri := "bolt://mydb-memgraph.default.svc.cluster.local:7687"
+	dbUser := ""
+	dbPassword := ""
+	query := "SHOW VERSION;"
+	driver, err := neo4j.NewDriverWithContext(
+		dbUri,
+		neo4j.BasicAuth(dbUser, dbPassword, ""))
+	if err != nil {
+		log.Error(err, "failed to create the database driver")
+		os.Exit(1)
+	}
+	defer driver.Close(ctx)
+	err = driver.VerifyConnectivity(ctx)
+	if err != nil {
+		log.Error(err, "unable to connect to the database")
+		os.Exit(1)
+	}
+	log.Info("connected to the database")
+	session := driver.NewSession(ctx, neo4j.SessionConfig{})
+	defer session.Close(ctx)
+	result, err := session.Run(ctx, query, nil)
+	if err != nil {
+		log.Error(err, "unable to run the query")
+		os.Exit(1)
+	}
+	for result.Next(ctx) {
+		record := result.Record()
+		version, _ := record.Get("version")
+		log.Info("database version", "vesion", version)
+	}
+	_, err = result.Consume(ctx)
+	if err != nil {
+		log.Error(err, "unable to consume all the query results")
+		os.Exit(1)
+	}
 
 	return ctrl.Result{}, nil
 }
