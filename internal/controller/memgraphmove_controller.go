@@ -54,7 +54,7 @@ func (r *MemgraphMoveReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		log.Error(err, "unable to fetch MemgraphMove")
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
-	log.Info("Reading new value", "foo", move.Spec.Foo)
+	log.Info("Reading values", "foo", move.Spec.Foo, "databases", move.Spec.Databases)
 
 	return ctrl.Result{}, nil
 }

@@ -8,3 +8,6 @@ metadata:
 spec:
   # TODO(user): Add fields here
   foo: initial_foo_value
+  databases:
+    - "db1"
+    - "db2"

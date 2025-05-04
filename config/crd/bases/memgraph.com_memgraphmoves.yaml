@@ -39,6 +39,10 @@ spec:
           spec:
             description: MemgraphMoveSpec defines the desired state of MemgraphMove.
             properties:
+              databases:
+                items:
+                  type: string
+                type: array
               foo:
                 description: Foo is an example field of MemgraphMove. Edit memgraphmove_types.go
                   to remove/update

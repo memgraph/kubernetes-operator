@@ -29,7 +29,8 @@ type MemgraphMoveSpec struct {
 	// Important: Run "make" to regenerate code after modifying this file
 
 	// Foo is an example field of MemgraphMove. Edit memgraphmove_types.go to remove/update
-	Foo string `json:"foo,omitempty"`
+	Foo       string   `json:"foo,omitempty"`
+	Databases []string `json:"databases,omitempty"`
 }
 
 // MemgraphMoveStatus defines the observed state of MemgraphMove.
