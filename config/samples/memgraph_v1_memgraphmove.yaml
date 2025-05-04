@@ -1,0 +1,10 @@
+apiVersion: memgraph.com/v1
+kind: MemgraphMove
+metadata:
+  labels:
+    app.kubernetes.io/name: kubernetes-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: memgraphmove-sample
+spec:
+  # TODO(user): Add fields here
+  foo: initial_foo_value

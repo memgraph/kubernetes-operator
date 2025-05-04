@@ -2,3 +2,11 @@ resources:
 - service_account.yaml
 - role.yaml
 - role_binding.yaml
+# For each CRD, "Admin", "Editor" and "Viewer" roles are scaffolded by
+# default, aiding admins in cluster management. Those roles are
+# not used by the {{ .ProjectName }} itself. You can comment the following lines
+# if you do not want those helpers be installed with your Project.
+- memgraphmove_admin_role.yaml
+- memgraphmove_editor_role.yaml
+- memgraphmove_viewer_role.yaml
+
