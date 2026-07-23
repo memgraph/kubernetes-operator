@@ -5,4 +5,15 @@ metadata:
     app.kubernetes.io/name: kubernetes-operator
     app.kubernetes.io/managed-by: kustomize
   name: memgraphcluster-sample
-spec: {}
+spec:
+  coordinators: 3
+  dataInstances: 2
+  image:
+    repository: docker.io/memgraph/memgraph
+    tag: 3.12.0-relwithdebinfo
+  # References an existing Secret holding the enterprise license; the CR
+  # carries no secret material itself.
+  secrets:
+    name: memgraph-secrets
+    licenseKey: MEMGRAPH_ENTERPRISE_LICENSE
+    organizationKey: MEMGRAPH_ORGANIZATION_NAME

@@ -40,6 +40,66 @@ spec:
             type: object
           spec:
             description: spec defines the desired state of MemgraphCluster
+            properties:
+              coordinators:
+                default: 3
+                description: coordinators is the number of Raft coordinator instances.
+                format: int32
+                minimum: 1
+                type: integer
+              dataInstances:
+                default: 2
+                description: dataInstances is the number of data instances.
+                format: int32
+                minimum: 1
+                type: integer
+              image:
+                default: {}
+                description: image selects the Memgraph container image run by all
+                  cluster pods.
+                properties:
+                  pullPolicy:
+                    default: IfNotPresent
+                    description: pullPolicy is the image pull policy applied to all
+                      cluster pods.
+                    enum:
+                    - Always
+                    - IfNotPresent
+                    - Never
+                    type: string
+                  repository:
+                    default: docker.io/memgraph/memgraph
+                    description: repository is the Memgraph container image repository.
+                    type: string
+                  tag:
+                    default: 3.12.0-relwithdebinfo
+                    description: |-
+                      tag is the Memgraph container image tag. Prefer pinning a specific
+                      Memgraph version over mutable tags such as "latest".
+                    type: string
+                type: object
+              secrets:
+                default: {}
+                description: |-
+                  secrets references the Secret holding the enterprise license and
+                  organization name.
+                properties:
+                  licenseKey:
+                    default: MEMGRAPH_ENTERPRISE_LICENSE
+                    description: licenseKey is the key within the Secret holding the
+                      enterprise license.
+                    type: string
+                  name:
+                    default: memgraph-secrets
+                    description: name is the name of the Secret in the cluster's namespace.
+                    type: string
+                  organizationKey:
+                    default: MEMGRAPH_ORGANIZATION_NAME
+                    description: |-
+                      organizationKey is the key within the Secret holding the organization
+                      name the license was issued to.
+                    type: string
+                type: object
             type: object
           status:
             description: status defines the observed state of MemgraphCluster
