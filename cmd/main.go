@@ -37,6 +37,7 @@ import (
 
 	memgraphcomv1alpha1 "github.com/memgraph/kubernetes-operator/api/v1alpha1"
 	"github.com/memgraph/kubernetes-operator/internal/controller"
+	"github.com/memgraph/kubernetes-operator/internal/memgraph"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -179,8 +180,9 @@ func main() {
 	}
 
 	if err := (&controller.MemgraphClusterReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		Memgraph: memgraph.NewBoltConnector(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "memgraphcluster")
 		os.Exit(1)
