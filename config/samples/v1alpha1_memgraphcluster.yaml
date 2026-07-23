@@ -1,0 +1,8 @@
+apiVersion: memgraph.com/v1alpha1
+kind: MemgraphCluster
+metadata:
+  labels:
+    app.kubernetes.io/name: kubernetes-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: memgraphcluster-sample
+spec: {}
