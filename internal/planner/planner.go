@@ -92,21 +92,24 @@ func (c SetInstanceToMain) String() string {
 // promotion last. Instances the cluster knows but the topology does not
 // declare are left untouched — unregistration is out of scope for v1.
 func Plan(declared Topology, observed []memgraph.Instance) []Command {
-	registered := make(map[string]bool, len(observed))
+	registered := make(map[string]memgraph.Instance, len(observed))
 	hasMain := false
 	for _, instance := range observed {
-		registered[instance.Name] = true
+		registered[instance.Name] = instance
 		hasMain = hasMain || instance.IsMain()
 	}
 
 	var commands []Command
 	for _, coordinator := range declared.Coordinators {
-		if !registered[coordinator.Name()] {
+		// A coordinator reports itself in SHOW INSTANCES with an empty
+		// bolt_server until ADD COORDINATOR is issued for its ID, so presence
+		// alone does not prove registration.
+		if observed, ok := registered[coordinator.Name()]; !ok || observed.BoltServer == "" {
 			commands = append(commands, AddCoordinator{Coordinator: coordinator})
 		}
 	}
 	for _, instance := range declared.DataInstances {
-		if !registered[instance.Name] {
+		if _, ok := registered[instance.Name]; !ok {
 			commands = append(commands, RegisterInstance{Instance: instance})
 		}
 	}

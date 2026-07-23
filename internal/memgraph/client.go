@@ -60,7 +60,7 @@ func (i Instance) IsMain() bool {
 // CoordinatorSpec declares one coordinator to add to the cluster. Servers are
 // "host:port" addresses the rest of the cluster reaches the coordinator at.
 type CoordinatorSpec struct {
-	// ID is the Raft coordinator ID (1-based).
+	// ID is the Raft coordinator ID (1-based; Memgraph treats ID 0 as unset).
 	ID                int32
 	BoltServer        string
 	CoordinatorServer string

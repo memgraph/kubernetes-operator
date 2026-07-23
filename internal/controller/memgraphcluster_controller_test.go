@@ -282,6 +282,8 @@ var _ = Describe("MemgraphCluster Controller", func() {
 				resourceName, ordinal, resourceName, resourceNamespace)
 		}
 
+		// observedCoordinator reports the coordinator with the given 1-based
+		// Raft ID, which runs on the pod with ordinal ID-1.
 		observedCoordinator := func(id int, role string) memgraph.Instance {
 			return memgraph.Instance{
 				Name:       fmt.Sprintf("coordinator_%d", id),
@@ -331,9 +333,9 @@ var _ = Describe("MemgraphCluster Controller", func() {
 				leader + ": ADD COORDINATOR 1",
 				leader + ": ADD COORDINATOR 2",
 				leader + ": ADD COORDINATOR 3",
+				leader + ": REGISTER INSTANCE instance_0",
 				leader + ": REGISTER INSTANCE instance_1",
-				leader + ": REGISTER INSTANCE instance_2",
-				leader + ": SET INSTANCE instance_1 TO MAIN",
+				leader + ": SET INSTANCE instance_0 TO MAIN",
 			}))
 			Expect(result.RequeueAfter).To(BeNumerically(">", 0),
 				"registration was issued, so a follow-up reconcile must verify convergence")
@@ -352,7 +354,7 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			fake.setInstances([]memgraph.Instance{
 				observedCoordinator(1, memgraph.RoleLeader),
 				observedCoordinator(2, memgraph.RoleFollower),
-				observedDataInstance(1, memgraph.RoleMain),
+				observedDataInstance(0, memgraph.RoleMain),
 			})
 
 			reconcileCluster(resourceName)
@@ -362,7 +364,7 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			leader := coordinatorAddress(0)
 			Expect(fake.executedCommands()).To(Equal([]string{
 				leader + ": ADD COORDINATOR 3",
-				leader + ": REGISTER INSTANCE instance_2",
+				leader + ": REGISTER INSTANCE instance_1",
 			}))
 		})
 
@@ -379,9 +381,9 @@ var _ = Describe("MemgraphCluster Controller", func() {
 
 			leader := coordinatorAddress(1)
 			Expect(fake.executedCommands()).To(Equal([]string{
+				leader + ": REGISTER INSTANCE instance_0",
 				leader + ": REGISTER INSTANCE instance_1",
-				leader + ": REGISTER INSTANCE instance_2",
-				leader + ": SET INSTANCE instance_1 TO MAIN",
+				leader + ": SET INSTANCE instance_0 TO MAIN",
 			}))
 		})
 	})

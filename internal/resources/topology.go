@@ -26,10 +26,10 @@ import (
 
 // DeclaredTopology derives the registration topology the planner drives the
 // cluster toward. Identity follows the pod ordinal exactly as the workload
-// pods advertise it: coordinator ordinal N is Raft coordinator N+1, data
-// ordinal N registers as instance_N+1 (both 1-based, matching the
-// memgraph-high-availability Helm chart's naming), and every address is the
-// pod's stable DNS name within its headless Service.
+// pods advertise it: coordinator ordinal N is Raft coordinator N+1 (Memgraph
+// treats coordinator ID 0 as unset, so IDs stay 1-based), data ordinal N
+// registers as instance_N, and every address is the pod's stable DNS name
+// within its headless Service.
 func DeclaredTopology(cluster *memgraphcomv1alpha1.MemgraphCluster) planner.Topology {
 	spec := normalize(cluster.Spec)
 
@@ -49,7 +49,7 @@ func DeclaredTopology(cluster *memgraphcomv1alpha1.MemgraphCluster) planner.Topo
 	for ordinal := range spec.dataInstances {
 		fqdn := podFQDN(cluster, DataName(cluster), ordinal)
 		topology.DataInstances = append(topology.DataInstances, memgraph.DataInstanceSpec{
-			Name:              fmt.Sprintf("instance_%d", ordinal+1),
+			Name:              fmt.Sprintf("instance_%d", ordinal),
 			BoltServer:        hostPort(fqdn, BoltPort),
 			ManagementServer:  hostPort(fqdn, ManagementPort),
 			ReplicationServer: hostPort(fqdn, ReplicationPort),

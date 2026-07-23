@@ -33,12 +33,14 @@ func declaredTopology() planner.Topology {
 	for id := int32(1); id <= 3; id++ {
 		topology.Coordinators = append(topology.Coordinators, coordinatorSpec(id))
 	}
-	for i := 1; i <= 2; i++ {
+	for i := range 2 {
 		topology.DataInstances = append(topology.DataInstances, dataInstanceSpec(i))
 	}
 	return topology
 }
 
+// coordinatorSpec builds the declared coordinator with the given 1-based Raft
+// ID (Memgraph treats ID 0 as unset), hosted on the pod with ordinal ID-1.
 func coordinatorSpec(id int32) memgraph.CoordinatorSpec {
 	host := fmt.Sprintf("example-coordinator-%d.example-coordinator.default.svc.cluster.local", id-1)
 	return memgraph.CoordinatorSpec{
@@ -50,7 +52,7 @@ func coordinatorSpec(id int32) memgraph.CoordinatorSpec {
 }
 
 func dataInstanceSpec(i int) memgraph.DataInstanceSpec {
-	host := fmt.Sprintf("example-data-%d.example-data.default.svc.cluster.local", i-1)
+	host := fmt.Sprintf("example-data-%d.example-data.default.svc.cluster.local", i)
 	return memgraph.DataInstanceSpec{
 		Name:              fmt.Sprintf("instance_%d", i),
 		BoltServer:        host + ":7687",
@@ -97,9 +99,9 @@ func TestPlan(t *testing.T) {
 				planner.AddCoordinator{Coordinator: coordinatorSpec(1)},
 				planner.AddCoordinator{Coordinator: coordinatorSpec(2)},
 				planner.AddCoordinator{Coordinator: coordinatorSpec(3)},
+				planner.RegisterInstance{Instance: dataInstanceSpec(0)},
 				planner.RegisterInstance{Instance: dataInstanceSpec(1)},
-				planner.RegisterInstance{Instance: dataInstanceSpec(2)},
-				planner.SetInstanceToMain{Name: "instance_1"},
+				planner.SetInstanceToMain{Name: "instance_0"},
 			},
 		},
 		{
@@ -107,11 +109,31 @@ func TestPlan(t *testing.T) {
 			observed: []memgraph.Instance{
 				observedCoordinator(1, memgraph.RoleLeader),
 				observedCoordinator(3, memgraph.RoleFollower),
-				observedDataInstance(1, memgraph.RoleMain),
+				observedDataInstance(0, memgraph.RoleMain),
 			},
 			want: []planner.Command{
 				planner.AddCoordinator{Coordinator: coordinatorSpec(2)},
-				planner.RegisterInstance{Instance: dataInstanceSpec(2)},
+				planner.RegisterInstance{Instance: dataInstanceSpec(1)},
+			},
+		},
+		{
+			name: "self-reporting coordinator with empty bolt server is still added",
+			observed: []memgraph.Instance{
+				// The coordinator the client is connected to lists itself in
+				// SHOW INSTANCES with an empty bolt_server until explicitly
+				// added.
+				func() memgraph.Instance {
+					instance := observedCoordinator(2, memgraph.RoleLeader)
+					instance.BoltServer = ""
+					return instance
+				}(),
+				observedCoordinator(1, memgraph.RoleFollower),
+				observedCoordinator(3, memgraph.RoleFollower),
+				observedDataInstance(0, memgraph.RoleMain),
+				observedDataInstance(1, memgraph.RoleReplica),
+			},
+			want: []planner.Command{
+				planner.AddCoordinator{Coordinator: coordinatorSpec(2)},
 			},
 		},
 		{
@@ -120,8 +142,8 @@ func TestPlan(t *testing.T) {
 				observedCoordinator(1, memgraph.RoleLeader),
 				observedCoordinator(2, memgraph.RoleFollower),
 				observedCoordinator(3, memgraph.RoleFollower),
-				observedDataInstance(1, memgraph.RoleMain),
-				observedDataInstance(2, memgraph.RoleReplica),
+				observedDataInstance(0, memgraph.RoleMain),
+				observedDataInstance(1, memgraph.RoleReplica),
 			},
 			want: nil,
 		},
@@ -131,8 +153,8 @@ func TestPlan(t *testing.T) {
 				observedCoordinator(1, memgraph.RoleLeader),
 				observedCoordinator(2, memgraph.RoleFollower),
 				observedCoordinator(3, memgraph.RoleFollower),
-				observedDataInstance(1, memgraph.RoleReplica),
-				observedDataInstance(2, memgraph.RoleMain),
+				observedDataInstance(0, memgraph.RoleReplica),
+				observedDataInstance(1, memgraph.RoleMain),
 			},
 			want: nil,
 		},
@@ -142,11 +164,11 @@ func TestPlan(t *testing.T) {
 				observedCoordinator(1, memgraph.RoleLeader),
 				observedCoordinator(2, memgraph.RoleFollower),
 				observedCoordinator(3, memgraph.RoleFollower),
+				observedDataInstance(0, memgraph.RoleReplica),
 				observedDataInstance(1, memgraph.RoleReplica),
-				observedDataInstance(2, memgraph.RoleReplica),
 			},
 			want: []planner.Command{
-				planner.SetInstanceToMain{Name: "instance_1"},
+				planner.SetInstanceToMain{Name: "instance_0"},
 			},
 		},
 		{
@@ -155,10 +177,10 @@ func TestPlan(t *testing.T) {
 				observedCoordinator(1, memgraph.RoleLeader),
 				observedCoordinator(2, memgraph.RoleFollower),
 				observedCoordinator(3, memgraph.RoleFollower),
-				observedDataInstance(2, memgraph.RoleMain),
+				observedDataInstance(1, memgraph.RoleMain),
 			},
 			want: []planner.Command{
-				planner.RegisterInstance{Instance: dataInstanceSpec(1)},
+				planner.RegisterInstance{Instance: dataInstanceSpec(0)},
 			},
 		},
 		{
@@ -168,9 +190,9 @@ func TestPlan(t *testing.T) {
 				observedCoordinator(2, memgraph.RoleFollower),
 				observedCoordinator(3, memgraph.RoleFollower),
 				observedCoordinator(4, memgraph.RoleFollower),
-				observedDataInstance(1, memgraph.RoleMain),
+				observedDataInstance(0, memgraph.RoleMain),
+				observedDataInstance(1, memgraph.RoleReplica),
 				observedDataInstance(2, memgraph.RoleReplica),
-				observedDataInstance(3, memgraph.RoleReplica),
 			},
 			want: nil,
 		},

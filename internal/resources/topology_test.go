@@ -61,13 +61,13 @@ func TestDeclaredTopologyDefaults(t *testing.T) {
 		},
 		DataInstances: []memgraph.DataInstanceSpec{
 			{
-				Name:              "instance_1",
+				Name:              "instance_0",
 				BoltServer:        dataFQDN(0) + ":7687",
 				ManagementServer:  dataFQDN(0) + ":10000",
 				ReplicationServer: dataFQDN(0) + ":20000",
 			},
 			{
-				Name:              "instance_2",
+				Name:              "instance_1",
 				BoltServer:        dataFQDN(1) + ":7687",
 				ManagementServer:  dataFQDN(1) + ":10000",
 				ReplicationServer: dataFQDN(1) + ":20000",
