@@ -59,13 +59,19 @@ fmt: ## Run go fmt against code.
 vet: ## Run go vet against code.
 	go vet ./...
 
+# Coverage is opt-in (e.g. make test COVER_FLAGS="-coverprofile cover.out"):
+# `go test -cover` needs the covdata tool, whose on-demand build fails when the
+# go command auto-switches toolchains (base Go older than go.mod's version),
+# which would break `make test` on stock distro Go installs.
+COVER_FLAGS ?=
+
 .PHONY: test-unit
 test-unit: manifests generate fmt vet ## Run unit tests (pure packages, no envtest binaries required).
-	go test $$(go list ./... | grep -v /e2e | grep -v /internal/controller) -coverprofile cover-unit.out
+	go test $$(go list ./... | grep -v /e2e | grep -v /internal/controller) $(COVER_FLAGS)
 
 .PHONY: test
 test: manifests generate fmt vet setup-envtest ## Run tests.
-	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test $$(go list ./... | grep -v /e2e) -coverprofile cover.out
+	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test $$(go list ./... | grep -v /e2e) $(COVER_FLAGS)
 
 # TODO(user): To use a different vendor for e2e tests, modify the setup under 'tests/e2e'.
 # The default setup assumes Kind is pre-installed and builds/loads the Manager Docker image locally.
