@@ -4,6 +4,7 @@ go 1.26.0
 
 require (
 	github.com/google/go-cmp v0.7.0
+	github.com/neo4j/neo4j-go-driver/v5 v5.28.4
 	github.com/onsi/ginkgo/v2 v2.27.4
 	github.com/onsi/gomega v1.39.0
 	k8s.io/api v0.36.0
