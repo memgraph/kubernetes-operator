@@ -91,10 +91,11 @@ func DataStatefulSet(cluster *memgraphcomv1alpha1.MemgraphCluster) *appsv1.State
 
 // coordinatorStartScript derives the coordinator's identity from its pod
 // ordinal (the numeric suffix of the pod name): ordinal N becomes coordinator
-// ID N+1 (Raft IDs start at 1) advertised at the pod's stable DNS name within
-// the headless Service.
+// ID N+1 (Memgraph treats coordinator ID 0 as unset and refuses to start, so
+// IDs stay 1-based) advertised at the pod's stable DNS name within the
+// headless Service.
 func coordinatorStartScript(cluster *memgraphcomv1alpha1.MemgraphCluster) string {
-	fqdnSuffix := fmt.Sprintf("%s.%s.svc.%s", CoordinatorName(cluster), cluster.Namespace, clusterDomain)
+	fqdnSuffix := podFQDNSuffix(cluster, CoordinatorName(cluster))
 	return fmt.Sprintf(`ordinal="${POD_NAME##*-}"
 exec %s \
   --coordinator-id="$((ordinal + 1))" \

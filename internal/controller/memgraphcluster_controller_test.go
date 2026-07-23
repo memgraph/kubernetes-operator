@@ -31,6 +31,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	memgraphcomv1alpha1 "github.com/memgraph/kubernetes-operator/api/v1alpha1"
+	"github.com/memgraph/kubernetes-operator/internal/memgraph"
 )
 
 // Name suffixes of the per-role workload objects a reconcile creates.
@@ -44,21 +45,27 @@ var _ = Describe("MemgraphCluster Controller", func() {
 
 	ctx := context.Background()
 
-	var reconciler *MemgraphClusterReconciler
+	var (
+		reconciler *MemgraphClusterReconciler
+		fake       *fakeMemgraph
+	)
 
 	BeforeEach(func() {
+		fake = newFakeMemgraph()
 		reconciler = &MemgraphClusterReconciler{
-			Client: k8sClient,
-			Scheme: k8sClient.Scheme(),
+			Client:   k8sClient,
+			Scheme:   k8sClient.Scheme(),
+			Memgraph: fake,
 		}
 	})
 
-	reconcileCluster := func(name string) {
+	reconcileCluster := func(name string) reconcile.Result {
 		GinkgoHelper()
-		_, err := reconciler.Reconcile(ctx, reconcile.Request{
+		result, err := reconciler.Reconcile(ctx, reconcile.Request{
 			NamespacedName: types.NamespacedName{Name: name, Namespace: resourceNamespace},
 		})
 		Expect(err).NotTo(HaveOccurred())
+		return result
 	}
 
 	get := func(name string, obj client.Object) {
@@ -80,6 +87,22 @@ var _ = Describe("MemgraphCluster Controller", func() {
 				Name: clusterName + suffix, Namespace: resourceNamespace,
 			}}
 			Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, svc))).To(Succeed())
+		}
+	}
+
+	// markWorkloadsReady simulates the kubelet envtest does not run: it
+	// reports every replica of both role StatefulSets as ready, which is what
+	// gates the registration flow.
+	markWorkloadsReady := func(clusterName string) {
+		GinkgoHelper()
+		for _, suffix := range []string{coordinatorSuffix, dataSuffix} {
+			sts := &appsv1.StatefulSet{}
+			get(clusterName+suffix, sts)
+			sts.Status.Replicas = *sts.Spec.Replicas
+			sts.Status.ReadyReplicas = *sts.Spec.Replicas
+			sts.Status.AvailableReplicas = *sts.Spec.Replicas
+			sts.Status.ObservedGeneration = sts.Generation
+			Expect(k8sClient.Status().Update(ctx, sts)).To(Succeed())
 		}
 	}
 
@@ -248,6 +271,120 @@ var _ = Describe("MemgraphCluster Controller", func() {
 				},
 			}
 			Expect(k8sClient.Create(ctx, invalid)).NotTo(Succeed())
+		})
+	})
+
+	Context("when bootstrapping cluster registration", func() {
+		const resourceName = "mgc-bootstrap"
+
+		coordinatorAddress := func(ordinal int) string {
+			return fmt.Sprintf("%s-coordinator-%d.%s-coordinator.%s.svc.cluster.local:7687",
+				resourceName, ordinal, resourceName, resourceNamespace)
+		}
+
+		// observedCoordinator reports the coordinator with the given 1-based
+		// Raft ID, which runs on the pod with ordinal ID-1.
+		observedCoordinator := func(id int, role string) memgraph.Instance {
+			return memgraph.Instance{
+				Name:       fmt.Sprintf("coordinator_%d", id),
+				BoltServer: coordinatorAddress(id - 1),
+				Health:     "up",
+				Role:       role,
+			}
+		}
+
+		observedDataInstance := func(i int, role string) memgraph.Instance {
+			return memgraph.Instance{
+				Name:   fmt.Sprintf("instance_%d", i),
+				Health: "up",
+				Role:   role,
+			}
+		}
+
+		BeforeEach(func() {
+			resource := &memgraphcomv1alpha1.MemgraphCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: resourceNamespace},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+		})
+
+		AfterEach(func() {
+			cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+			get(resourceName, cluster)
+			Expect(k8sClient.Delete(ctx, cluster)).To(Succeed())
+			deleteOwned(resourceName)
+		})
+
+		It("should not touch Memgraph before every pod is ready", func() {
+			result := reconcileCluster(resourceName)
+
+			Expect(result.RequeueAfter).To(BeNumerically(">", 0))
+			Expect(fake.connects()).To(BeZero())
+		})
+
+		It("should bootstrap a fresh cluster to fully registered with one MAIN", func() {
+			reconcileCluster(resourceName)
+			markWorkloadsReady(resourceName)
+
+			result := reconcileCluster(resourceName)
+
+			leader := coordinatorAddress(0)
+			Expect(fake.executedCommands()).To(Equal([]string{
+				leader + ": ADD COORDINATOR 1",
+				leader + ": ADD COORDINATOR 2",
+				leader + ": ADD COORDINATOR 3",
+				leader + ": REGISTER INSTANCE instance_0",
+				leader + ": REGISTER INSTANCE instance_1",
+				leader + ": SET INSTANCE instance_0 TO MAIN",
+			}))
+			Expect(result.RequeueAfter).To(BeNumerically(">", 0),
+				"registration was issued, so a follow-up reconcile must verify convergence")
+
+			result = reconcileCluster(resourceName)
+			Expect(fake.executedCommands()).To(HaveLen(6),
+				"a converged cluster must not receive further commands")
+			Expect(result.RequeueAfter).To(BeZero())
+		})
+
+		It("should resume a partial bootstrap without duplicate registrations or a second MAIN", func() {
+			// The state a crash mid-bootstrap leaves behind: two coordinators
+			// formed, the first data instance registered and promoted. The
+			// fake rejects duplicate registrations and second promotions, so
+			// re-issuing anything fails this test loudly.
+			fake.setInstances([]memgraph.Instance{
+				observedCoordinator(1, memgraph.RoleLeader),
+				observedCoordinator(2, memgraph.RoleFollower),
+				observedDataInstance(0, memgraph.RoleMain),
+			})
+
+			reconcileCluster(resourceName)
+			markWorkloadsReady(resourceName)
+			reconcileCluster(resourceName)
+
+			leader := coordinatorAddress(0)
+			Expect(fake.executedCommands()).To(Equal([]string{
+				leader + ": ADD COORDINATOR 3",
+				leader + ": REGISTER INSTANCE instance_1",
+			}))
+		})
+
+		It("should execute registration on the leader a follower reports", func() {
+			fake.setInstances([]memgraph.Instance{
+				observedCoordinator(1, memgraph.RoleFollower),
+				observedCoordinator(2, memgraph.RoleLeader),
+				observedCoordinator(3, memgraph.RoleFollower),
+			})
+
+			reconcileCluster(resourceName)
+			markWorkloadsReady(resourceName)
+			reconcileCluster(resourceName)
+
+			leader := coordinatorAddress(1)
+			Expect(fake.executedCommands()).To(Equal([]string{
+				leader + ": REGISTER INSTANCE instance_0",
+				leader + ": REGISTER INSTANCE instance_1",
+				leader + ": SET INSTANCE instance_0 TO MAIN",
+			}))
 		})
 	})
 })
