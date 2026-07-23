@@ -17,6 +17,7 @@ limitations under the License.
 package v1alpha1
 
 import (
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 )
@@ -24,11 +25,91 @@ import (
 // EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
 // NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
 
+// Defaults for optional spec fields. They are declared as CRD schema defaults
+// on the field markers below and mirrored here so resource builders behave
+// correctly on specs that never passed admission (e.g. in unit tests).
+const (
+	DefaultCoordinatorCount  int32 = 3
+	DefaultDataInstanceCount int32 = 2
+
+	DefaultImageRepository = "docker.io/memgraph/memgraph"
+	DefaultImageTag        = "3.12.0-relwithdebinfo"
+	DefaultImagePullPolicy = corev1.PullIfNotPresent
+
+	DefaultSecretName            = "memgraph-secrets"
+	DefaultLicenseSecretKey      = "MEMGRAPH_ENTERPRISE_LICENSE"
+	DefaultOrganizationSecretKey = "MEMGRAPH_ORGANIZATION_NAME"
+)
+
+// ImageSpec selects the Memgraph container image run by all cluster pods.
+type ImageSpec struct {
+	// repository is the Memgraph container image repository.
+	// +kubebuilder:default="docker.io/memgraph/memgraph"
+	// +optional
+	Repository string `json:"repository,omitempty"`
+
+	// tag is the Memgraph container image tag. Prefer pinning a specific
+	// Memgraph version over mutable tags such as "latest".
+	// +kubebuilder:default="3.12.0-relwithdebinfo"
+	// +optional
+	Tag string `json:"tag,omitempty"`
+
+	// pullPolicy is the image pull policy applied to all cluster pods.
+	// +kubebuilder:validation:Enum=Always;IfNotPresent;Never
+	// +kubebuilder:default=IfNotPresent
+	// +optional
+	PullPolicy corev1.PullPolicy `json:"pullPolicy,omitempty"`
+}
+
+// SecretsSpec references an existing Kubernetes Secret holding the Memgraph
+// enterprise license and organization name. The block mirrors the
+// memgraph-high-availability Helm chart's secrets vocabulary; secret material
+// is consumed by reference only and never appears in the CR.
+type SecretsSpec struct {
+	// name is the name of the Secret in the cluster's namespace.
+	// +kubebuilder:default="memgraph-secrets"
+	// +optional
+	Name string `json:"name,omitempty"`
+
+	// licenseKey is the key within the Secret holding the enterprise license.
+	// +kubebuilder:default="MEMGRAPH_ENTERPRISE_LICENSE"
+	// +optional
+	LicenseKey string `json:"licenseKey,omitempty"`
+
+	// organizationKey is the key within the Secret holding the organization
+	// name the license was issued to.
+	// +kubebuilder:default="MEMGRAPH_ORGANIZATION_NAME"
+	// +optional
+	OrganizationKey string `json:"organizationKey,omitempty"`
+}
+
 // MemgraphClusterSpec defines the desired state of MemgraphCluster.
 //
-// Topology, image, storage, and pod-tuning fields land in subsequent
-// slices of the operator MVP (see specs/operator-mvp/PRD.md).
+// Storage, port, and pod-tuning fields land in subsequent slices of the
+// operator MVP (see specs/operator-mvp/PRD.md).
 type MemgraphClusterSpec struct {
+	// coordinators is the number of Raft coordinator instances.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:default=3
+	// +optional
+	Coordinators *int32 `json:"coordinators,omitempty"`
+
+	// dataInstances is the number of data instances.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:default=2
+	// +optional
+	DataInstances *int32 `json:"dataInstances,omitempty"`
+
+	// image selects the Memgraph container image run by all cluster pods.
+	// +kubebuilder:default={}
+	// +optional
+	Image ImageSpec `json:"image,omitzero"`
+
+	// secrets references the Secret holding the enterprise license and
+	// organization name.
+	// +kubebuilder:default={}
+	// +optional
+	Secrets SecretsSpec `json:"secrets,omitzero"`
 }
 
 // MemgraphClusterStatus defines the observed state of MemgraphCluster.
