@@ -240,6 +240,11 @@ $(ENVTEST): $(LOCALBIN)
 
 .PHONY: golangci-lint
 golangci-lint: $(GOLANGCI_LINT) ## Download golangci-lint locally if necessary.
+# Build golangci-lint with the project's Go toolchain: `go install pkg@version`
+# ignores go.mod, so under GOTOOLCHAIN=auto it picks golangci-lint's own (older)
+# minimum toolchain, and a golangci-lint built with a lower Go version refuses
+# to lint a project targeting a higher one.
+$(GOLANGCI_LINT): export GOTOOLCHAIN := $(shell go env GOVERSION)
 $(GOLANGCI_LINT): $(LOCALBIN)
 	$(call go-install-tool,$(GOLANGCI_LINT),github.com/golangci/golangci-lint/v2/cmd/golangci-lint,$(GOLANGCI_LINT_VERSION))
 	@test -f .custom-gcl.yml && { \
