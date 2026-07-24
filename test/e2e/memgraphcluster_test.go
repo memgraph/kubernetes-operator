@@ -179,6 +179,34 @@ var _ = Describe("MemgraphCluster", Ordered, func() {
 		By("waiting for the operator to converge the cluster back to fully registered")
 		Eventually(verifyClusterRegistered, 10*time.Minute, 10*time.Second).Should(Succeed())
 	})
+
+	// The coordinator analogue of the data-instance re-registration: a
+	// coordinator removed from the Raft cluster is re-added by the operator's
+	// continuous ADD COORDINATOR reconciliation, with no human action. This
+	// proves the re-registration loop covers coordinators, not just data
+	// instances. Runs after the preceding specs (Ordered) against the same
+	// converged cluster.
+	It("re-adds a coordinator that was removed from the cluster", func() {
+		By("confirming the cluster is converged before removing a coordinator")
+		Eventually(verifyClusterRegistered, 10*time.Minute, 10*time.Second).Should(Succeed())
+
+		By("removing a follower coordinator on the coordinator leader")
+		removed, err := removeCoordinatorRegistration()
+		Expect(err).NotTo(HaveOccurred())
+
+		By("confirming the coordinator really left the cluster view")
+		view, err := leaderView()
+		Expect(err).NotTo(HaveOccurred())
+		names := make([]string, 0, len(view))
+		for _, instance := range view {
+			names = append(names, instance.name)
+		}
+		Expect(names).NotTo(ContainElement(removed),
+			"the removal must actually drop the coordinator for the test to be meaningful")
+
+		By("waiting for the operator to converge the cluster back to fully registered")
+		Eventually(verifyClusterRegistered, 10*time.Minute, 10*time.Second).Should(Succeed())
+	})
 })
 
 // verifyClusterRegistered asserts the coordinator leader reports every declared
@@ -234,6 +262,51 @@ func wipeInstanceRegistration(name string) error {
 		return nil
 	}
 	return fmt.Errorf("no coordinator leader found to unregister %s: %w", name, errors.Join(errs...))
+}
+
+// removeCoordinatorRegistration removes a follower coordinator from the Raft
+// cluster on the coordinator leader, simulating a coordinator that fell out of
+// the cluster view (e.g. rescheduled onto a fresh node). REMOVE COORDINATOR
+// mutates Raft membership, so it must run on the leader — located the same way
+// leaderView does: the coordinator that reports a MAIN. A follower is chosen
+// (never the leader itself) so the leader keeps the authoritative view it needs
+// to accept the removal and observe the operator's re-ADD. It returns the
+// instance name of the coordinator it removed.
+func removeCoordinatorRegistration() (string, error) {
+	var errs []error
+	for ordinal := range coordinatorCount {
+		pod := fmt.Sprintf("%s-coordinator-%d", clusterName, ordinal)
+		view, err := showInstances(pod)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		isLeader := false
+		for _, instance := range view {
+			if instance.role == roleMain {
+				isLeader = true
+				break
+			}
+		}
+		if !isLeader {
+			continue
+		}
+		// The leader hosts coordinator_ordinal+1; remove a different
+		// coordinator so the leader keeps quorum and its authoritative view.
+		leaderID := ordinal + 1
+		removeID := 1
+		if leaderID == 1 {
+			removeID = 2
+		}
+		name := fmt.Sprintf("coordinator_%d", removeID)
+		cmd := exec.Command("kubectl", "exec", pod, "-n", clusterNamespace, "-c", "memgraph", "--",
+			"bash", "-c", fmt.Sprintf("echo 'REMOVE COORDINATOR %d;' | mgconsole", removeID))
+		if _, err := utils.Run(cmd); err != nil {
+			return "", fmt.Errorf("removing coordinator %d on %s: %w", removeID, pod, err)
+		}
+		return name, nil
+	}
+	return "", fmt.Errorf("no coordinator leader found to remove a coordinator: %w", errors.Join(errs...))
 }
 
 // createLicenseSecret applies the Secret the MemgraphCluster references. The
