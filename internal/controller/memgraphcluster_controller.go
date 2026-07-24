@@ -51,6 +51,14 @@ const (
 	// requeueAfterRegistration schedules the follow-up reconcile that
 	// verifies issued registration commands actually converged the cluster.
 	requeueAfterRegistration = 10 * time.Second
+
+	// resyncInterval is how often a converged cluster is re-observed to catch
+	// registration drift. A pod that loses its registration (rescheduled onto
+	// a fresh node, wiped storage) while still running produces no watch event
+	// — its StatefulSet is unchanged — so a lost registration would otherwise
+	// go undetected until an unrelated reconcile. This periodic resync is what
+	// makes re-registration continuous rather than one-shot.
+	resyncInterval = 30 * time.Second
 )
 
 // MemgraphClusterReconciler reconciles a MemgraphCluster object
@@ -77,7 +85,10 @@ type MemgraphClusterReconciler struct {
 // registration: observe SHOW INSTANCES on the coordinator leader, diff
 // against the declared topology, and issue only the missing commands. All
 // interaction is read-before-write and idempotent, so an operator restart
-// mid-bootstrap is harmless. Deletion needs no handling here — every object
+// mid-bootstrap is harmless. Registration reconciliation is continuous, not
+// one-shot: a converged cluster is re-observed on a periodic resync, so a
+// registration a pod loses (rescheduled, wiped storage) is re-issued without
+// human action. Deletion needs no handling here — every object
 // carries a controller owner reference, so garbage collection removes the
 // workloads with the CR.
 func (r *MemgraphClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -142,8 +153,10 @@ func (r *MemgraphClusterReconciler) reconcileRegistration(
 
 	commands := planner.Plan(topology, observed)
 	if len(commands) == 0 {
+		// Converged, but keep re-observing: a registration a pod loses later
+		// produces no watch event, so drift is only caught by resyncing.
 		log.Info("Confirmed cluster registration is converged")
-		return ctrl.Result{}, nil
+		return ctrl.Result{RequeueAfter: resyncInterval}, nil
 	}
 	for _, command := range commands {
 		if err := command.Run(ctx, leader); err != nil {
