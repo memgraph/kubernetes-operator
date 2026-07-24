@@ -343,7 +343,8 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			result = reconcileCluster(resourceName)
 			Expect(fake.executedCommands()).To(HaveLen(6),
 				"a converged cluster must not receive further commands")
-			Expect(result.RequeueAfter).To(BeZero())
+			Expect(result.RequeueAfter).To(Equal(resyncInterval),
+				"a converged cluster must still reschedule a resync to catch registration drift")
 		})
 
 		It("should resume a partial bootstrap without duplicate registrations or a second MAIN", func() {
@@ -385,6 +386,82 @@ var _ = Describe("MemgraphCluster Controller", func() {
 				leader + ": REGISTER INSTANCE instance_1",
 				leader + ": SET INSTANCE instance_0 TO MAIN",
 			}))
+		})
+
+		// convergedCluster is the fully registered view of the default
+		// 3-coordinator, 2-data topology with instance_0 elected MAIN — the
+		// steady state drift is introduced against below.
+		convergedCluster := func() []memgraph.Instance {
+			return []memgraph.Instance{
+				observedCoordinator(1, memgraph.RoleLeader),
+				observedCoordinator(2, memgraph.RoleFollower),
+				observedCoordinator(3, memgraph.RoleFollower),
+				observedDataInstance(0, memgraph.RoleMain),
+				observedDataInstance(1, memgraph.RoleReplica),
+			}
+		}
+
+		It("should re-register a data instance whose registration was lost, leaving MAIN untouched", func() {
+			fake.setInstances(convergedCluster())
+			reconcileCluster(resourceName)
+			markWorkloadsReady(resourceName)
+			reconcileCluster(resourceName)
+			Expect(fake.executedCommands()).To(BeEmpty(), "the cluster started converged")
+
+			// instance_1 loses its registration (pod rescheduled onto a fresh
+			// node): drop it from the observed view and reconcile again.
+			fake.setInstances([]memgraph.Instance{
+				observedCoordinator(1, memgraph.RoleLeader),
+				observedCoordinator(2, memgraph.RoleFollower),
+				observedCoordinator(3, memgraph.RoleFollower),
+				observedDataInstance(0, memgraph.RoleMain),
+			})
+
+			result := reconcileCluster(resourceName)
+
+			leader := coordinatorAddress(0)
+			Expect(fake.executedCommands()).To(Equal([]string{
+				leader + ": REGISTER INSTANCE instance_1",
+			}), "only the lost registration is re-issued; the existing MAIN is not re-promoted")
+			Expect(result.RequeueAfter).To(BeNumerically(">", 0),
+				"re-registration was issued, so a follow-up reconcile must verify convergence")
+		})
+
+		It("should re-add a coordinator whose registration was lost", func() {
+			fake.setInstances(convergedCluster())
+			reconcileCluster(resourceName)
+			markWorkloadsReady(resourceName)
+			reconcileCluster(resourceName)
+			Expect(fake.executedCommands()).To(BeEmpty(), "the cluster started converged")
+
+			// coordinator_3 disappears from the Raft cluster view.
+			fake.setInstances([]memgraph.Instance{
+				observedCoordinator(1, memgraph.RoleLeader),
+				observedCoordinator(2, memgraph.RoleFollower),
+				observedDataInstance(0, memgraph.RoleMain),
+				observedDataInstance(1, memgraph.RoleReplica),
+			})
+
+			reconcileCluster(resourceName)
+
+			leader := coordinatorAddress(0)
+			Expect(fake.executedCommands()).To(Equal([]string{
+				leader + ": ADD COORDINATOR 3",
+			}), "only the missing coordinator is re-added")
+		})
+
+		It("should stay a no-op on a converged cluster across repeated resyncs", func() {
+			fake.setInstances(convergedCluster())
+			reconcileCluster(resourceName)
+			markWorkloadsReady(resourceName)
+
+			for range 3 {
+				result := reconcileCluster(resourceName)
+				Expect(fake.executedCommands()).To(BeEmpty(),
+					"a converged cluster must never receive commands, however often it is resynced")
+				Expect(result.RequeueAfter).To(Equal(resyncInterval),
+					"each converged reconcile reschedules the drift-detection resync")
+			}
 		})
 	})
 })

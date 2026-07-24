@@ -150,26 +150,91 @@ var _ = Describe("MemgraphCluster", Ordered, func() {
 	})
 
 	It("bootstraps every declared instance registered with exactly one MAIN", func() {
-		verifyClusterRegistered := func(g Gomega) {
-			view, err := leaderView()
-			g.Expect(err).NotTo(HaveOccurred())
+		Eventually(verifyClusterRegistered, 10*time.Minute, 10*time.Second).Should(Succeed())
+	})
 
-			names := make([]string, 0, len(view))
-			mains := make([]string, 0, 1)
-			for _, instance := range view {
-				names = append(names, instance.name)
-				g.Expect(instance.health).To(Equal("up"),
-					"instance %s is registered but unhealthy", instance.name)
-				if instance.role == roleMain {
-					mains = append(mains, instance.name)
-				}
-			}
-			g.Expect(names).To(ConsistOf(declaredInstances()))
-			g.Expect(mains).To(HaveLen(1), "expected exactly one MAIN, got %v", mains)
+	// The operator's reason to exist over the chart's one-shot Job: a data
+	// instance that loses its registration is re-registered with no human
+	// action. This runs after the bootstrap spec (Ordered) against the same
+	// converged cluster.
+	It("re-registers a data instance whose registration was wiped", func() {
+		const wiped = "instance_1"
+
+		By("confirming the cluster is converged before wiping a registration")
+		Eventually(verifyClusterRegistered, 10*time.Minute, 10*time.Second).Should(Succeed())
+
+		By("unregistering a data instance on the coordinator leader")
+		Expect(wipeInstanceRegistration(wiped)).To(Succeed())
+
+		By("confirming the instance really left the cluster view")
+		view, err := leaderView()
+		Expect(err).NotTo(HaveOccurred())
+		names := make([]string, 0, len(view))
+		for _, instance := range view {
+			names = append(names, instance.name)
 		}
+		Expect(names).NotTo(ContainElement(wiped),
+			"the wipe must actually remove the registration for the test to be meaningful")
+
+		By("waiting for the operator to converge the cluster back to fully registered")
 		Eventually(verifyClusterRegistered, 10*time.Minute, 10*time.Second).Should(Succeed())
 	})
 })
+
+// verifyClusterRegistered asserts the coordinator leader reports every declared
+// instance registered and healthy with exactly one MAIN — the converged steady
+// state both the bootstrap and re-registration specs check for.
+func verifyClusterRegistered(g Gomega) {
+	view, err := leaderView()
+	g.Expect(err).NotTo(HaveOccurred())
+
+	names := make([]string, 0, len(view))
+	mains := make([]string, 0, 1)
+	for _, instance := range view {
+		names = append(names, instance.name)
+		g.Expect(instance.health).To(Equal("up"),
+			"instance %s is registered but unhealthy", instance.name)
+		if instance.role == roleMain {
+			mains = append(mains, instance.name)
+		}
+	}
+	g.Expect(names).To(ConsistOf(declaredInstances()))
+	g.Expect(mains).To(HaveLen(1), "expected exactly one MAIN, got %v", mains)
+}
+
+// wipeInstanceRegistration unregisters the named data instance on the
+// coordinator leader, simulating registration state a pod loses when it is
+// rescheduled onto a fresh node. UNREGISTER INSTANCE must run on the leader —
+// only it holds the authoritative cluster view — so the leader is located the
+// same way leaderView does: the coordinator that reports a MAIN.
+func wipeInstanceRegistration(name string) error {
+	var errs []error
+	for ordinal := range coordinatorCount {
+		pod := fmt.Sprintf("%s-coordinator-%d", clusterName, ordinal)
+		view, err := showInstances(pod)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		isLeader := false
+		for _, instance := range view {
+			if instance.role == roleMain {
+				isLeader = true
+				break
+			}
+		}
+		if !isLeader {
+			continue
+		}
+		cmd := exec.Command("kubectl", "exec", pod, "-n", clusterNamespace, "-c", "memgraph", "--",
+			"bash", "-c", fmt.Sprintf("echo 'UNREGISTER INSTANCE %s;' | mgconsole", name))
+		if _, err := utils.Run(cmd); err != nil {
+			return fmt.Errorf("unregistering %s on %s: %w", name, pod, err)
+		}
+		return nil
+	}
+	return fmt.Errorf("no coordinator leader found to unregister %s: %w", name, errors.Join(errs...))
+}
 
 // createLicenseSecret applies the Secret the MemgraphCluster references. The
 // manifest is piped over stdin so no secret material ever reaches the logged

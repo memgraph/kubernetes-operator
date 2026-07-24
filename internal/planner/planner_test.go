@@ -184,6 +184,21 @@ func TestPlan(t *testing.T) {
 			},
 		},
 		{
+			name: "multiple lost registrations are all re-issued without a second MAIN",
+			// A coordinator and a data instance both lost their registration
+			// while instance_1 remained MAIN: every missing registration is
+			// re-issued, and no promotion is planned because a MAIN exists.
+			observed: []memgraph.Instance{
+				observedCoordinator(1, memgraph.RoleLeader),
+				observedCoordinator(3, memgraph.RoleFollower),
+				observedDataInstance(1, memgraph.RoleMain),
+			},
+			want: []planner.Command{
+				planner.AddCoordinator{Coordinator: coordinatorSpec(2)},
+				planner.RegisterInstance{Instance: dataInstanceSpec(0)},
+			},
+		},
+		{
 			name: "instances the topology does not declare are left untouched",
 			observed: []memgraph.Instance{
 				observedCoordinator(1, memgraph.RoleLeader),
