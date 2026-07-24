@@ -46,3 +46,32 @@ jobs:
 
       - name: Run tests against envtest
         run: make test
+
+  e2e:
+    permissions:
+      contents: read
+    name: E2E tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: go.mod
+
+      - name: Install Kind
+        run: go install sigs.k8s.io/kind@v0.32.0
+
+      - name: Run e2e tests against Kind
+        env:
+          # Enterprise license for the Memgraph HA cluster the suite boots,
+          # following the HA chart CI's repository-secret practice.
+          MEMGRAPH_ENTERPRISE_LICENSE: ${{ secrets.MEMGRAPH_ENTERPRISE_LICENSE }}
+          MEMGRAPH_ORGANIZATION_NAME: ${{ secrets.MEMGRAPH_ORGANIZATION_NAME }}
+          # The operator has no webhooks in v1, so the suite needs no CertManager.
+          CERT_MANAGER_INSTALL_SKIP: "true"
+        run: make test-e2e

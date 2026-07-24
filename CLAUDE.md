@@ -32,7 +32,7 @@ go test ./api/... -run TestName
 Envtest packages need `KUBEBUILDER_ASSETS`; outside of `make test` set it with:
 `KUBEBUILDER_ASSETS=$(bin/setup-envtest use <k8s-version> --bin-dir bin -p path)`
 
-CI (`.github/workflows/`) runs `make lint-config`, `make lint`, `make test-unit`, and `make test` on every PR — all must be green.
+CI (`.github/workflows/`) runs `make lint-config`, `make lint`, `make test-unit`, `make test`, and `make test-e2e` on every PR — all must be green. The e2e job boots a licensed Memgraph cluster on a multi-node Kind cluster, with the license flowing from the `MEMGRAPH_ENTERPRISE_LICENSE` / `MEMGRAPH_ORGANIZATION_NAME` repository secrets (set the same env vars to run it locally).
 
 ### Toolchain quirks (do not "fix" these)
 

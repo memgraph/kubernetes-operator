@@ -39,6 +39,14 @@ func warnError(err error) {
 	_, _ = fmt.Fprintf(GinkgoWriter, "warning: %v\n", err)
 }
 
+// RunWithInput executes the provided command with the given string fed to its
+// standard input. Only the command line is logged, never the input, so it is
+// safe for manifests carrying secret material (e.g. a license Secret).
+func RunWithInput(cmd *exec.Cmd, input string) (string, error) {
+	cmd.Stdin = strings.NewReader(input)
+	return Run(cmd)
+}
+
 // Run executes the provided command within this context
 func Run(cmd *exec.Cmd) (string, error) {
 	dir, _ := GetProjectDir()
