@@ -300,10 +300,18 @@ func parseInstances(output string) ([]instanceRow, error) {
 	instances := make([]instanceRow, 0, len(records)-1)
 	for _, record := range records[1:] {
 		instances = append(instances, instanceRow{
-			name:   record[columns["name"]],
-			health: record[columns["health"]],
-			role:   record[columns["role"]],
+			name:   unquoteCell(record[columns["name"]]),
+			health: unquoteCell(record[columns["health"]]),
+			role:   unquoteCell(record[columns["role"]]),
 		})
 	}
 	return instances, nil
+}
+
+// unquoteCell strips the residual double quotes mgconsole wraps around string
+// cells in CSV output. mgconsole emits string values already double-quoted, so
+// after the CSV reader unwraps its own layer a value like main still arrives as
+// "main"; the operator and assertions compare against the bare token.
+func unquoteCell(cell string) string {
+	return strings.Trim(strings.TrimSpace(cell), `"`)
 }
