@@ -55,11 +55,11 @@ const (
 	licenseSecretName  = "memgraph-secrets"
 	licenseEnvVar      = "MEMGRAPH_ENTERPRISE_LICENSE"
 	organizationEnvVar = "MEMGRAPH_ORGANIZATION_NAME"
-)
 
-// roleMain is the MAIN data-instance role reported in the SHOW INSTANCES role
-// column.
-const roleMain = "main"
+	// roleMain is the MAIN data-instance role reported in the SHOW INSTANCES role
+	// column.
+	roleMain = "main"
+)
 
 // declaredInstances returns the instance names every coordinator and data
 // instance must appear under in SHOW INSTANCES once the operator has converged
