@@ -36,6 +36,9 @@ type fakeMemgraph struct {
 	// instances is the cluster view every coordinator serves.
 	instances       []memgraph.Instance
 	connectAttempts int
+	// connectErr, when set, makes every Connect fail — the operator's view of a
+	// cluster whose coordinators do not yet answer Bolt.
+	connectErr error
 	// executed records every mutating command as "<bolt address>: <command>".
 	executed []string
 }
@@ -48,7 +51,16 @@ func (f *fakeMemgraph) Connect(_ context.Context, address string) (memgraph.Clie
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.connectAttempts++
+	if f.connectErr != nil {
+		return nil, f.connectErr
+	}
 	return &fakeClient{cluster: f, address: address}, nil
+}
+
+func (f *fakeMemgraph) setConnectErr(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.connectErr = err
 }
 
 func (f *fakeMemgraph) connects() int {

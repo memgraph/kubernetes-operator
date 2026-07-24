@@ -41,6 +41,49 @@ const (
 	DefaultOrganizationSecretKey = "MEMGRAPH_ORGANIZATION_NAME"
 )
 
+// Condition types reported on MemgraphCluster status. Both use normal-True
+// polarity: True is the healthy state. Ready answers "is the cluster serving"
+// (a MAIN is elected and reachable); Converged answers "does registration
+// match the declared topology" (every coordinator and data instance is
+// registered). A cluster can be Ready but not Converged — a MAIN still serves
+// while a lost replica registration is being restored.
+const (
+	// ConditionReady is True when a MAIN data instance is elected and the
+	// coordinator leader is reachable.
+	ConditionReady = "Ready"
+
+	// ConditionConverged is True when the observed cluster matches the declared
+	// topology and no registration commands are pending.
+	ConditionConverged = "Converged"
+)
+
+// Condition reasons reported on MemgraphCluster status. Reasons are CamelCase
+// per Kubernetes API conventions and are stable enough for tooling to gate on.
+const (
+	// ReasonWorkloadsNotReady is set while not every workload pod is ready, so
+	// registration has not been attempted.
+	ReasonWorkloadsNotReady = "WorkloadsNotReady"
+
+	// ReasonCoordinatorUnreachable is set when no coordinator answered
+	// SHOW INSTANCES, so the cluster state cannot be observed.
+	ReasonCoordinatorUnreachable = "CoordinatorUnreachable"
+
+	// ReasonRegistrationInProgress is set while registration commands are being
+	// issued to converge the cluster toward the declared topology.
+	ReasonRegistrationInProgress = "RegistrationInProgress"
+
+	// ReasonAllInstancesRegistered is set when the observed cluster matches the
+	// declared topology.
+	ReasonAllInstancesRegistered = "AllInstancesRegistered"
+
+	// ReasonMainElected is set when a data instance is observed as MAIN.
+	ReasonMainElected = "MainElected"
+
+	// ReasonNoMainElected is set when the cluster is reachable but no data
+	// instance has yet been promoted to MAIN.
+	ReasonNoMainElected = "NoMainElected"
+)
+
 // ImageSpec selects the Memgraph container image run by all cluster pods.
 type ImageSpec struct {
 	// repository is the Memgraph container image repository.
@@ -113,12 +156,16 @@ type MemgraphClusterSpec struct {
 }
 
 // MemgraphClusterStatus defines the observed state of MemgraphCluster.
+//
+// Status is observation only: it carries no secret material and is never read
+// back as reconcile input state.
 type MemgraphClusterStatus struct {
-	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-
-	// For Kubernetes API conventions, see:
-	// https://github.com/kubernetes/community/blob/master/contributors/devel/sig-architecture/api-conventions.md#typical-status-properties
+	// main is the name of the data instance currently observed as MAIN, as
+	// reported by SHOW INSTANCES on the coordinator leader. It is empty before
+	// the initial MAIN is elected and updates when the Raft coordinators fail
+	// over to a different instance.
+	// +optional
+	Main string `json:"main,omitempty"`
 
 	// conditions represent the current state of the MemgraphCluster resource.
 	// Each condition has a unique type and reflects the status of a specific aspect of the resource.
@@ -138,6 +185,12 @@ type MemgraphClusterStatus struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:shortName=mgc
+// +kubebuilder:printcolumn:name="Coordinators",type=integer,JSONPath=`.spec.coordinators`
+// +kubebuilder:printcolumn:name="Data",type=integer,JSONPath=`.spec.dataInstances`
+// +kubebuilder:printcolumn:name="Main",type=string,JSONPath=`.status.main`
+// +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
+// +kubebuilder:printcolumn:name="Converged",type=string,JSONPath=`.status.conditions[?(@.type=="Converged")].status`
+// +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // MemgraphCluster is the Schema for the memgraphclusters API
 type MemgraphCluster struct {

@@ -18,12 +18,14 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
@@ -462,6 +464,168 @@ var _ = Describe("MemgraphCluster Controller", func() {
 				Expect(result.RequeueAfter).To(Equal(resyncInterval),
 					"each converged reconcile reschedules the drift-detection resync")
 			}
+		})
+	})
+
+	Context("when reporting status and conditions", func() {
+		const resourceName = "mgc-status"
+
+		observedCoordinator := func(id int, role string) memgraph.Instance {
+			return memgraph.Instance{
+				Name: fmt.Sprintf("coordinator_%d", id),
+				BoltServer: fmt.Sprintf("%s-coordinator-%d.%s-coordinator.%s.svc.cluster.local:7687",
+					resourceName, id-1, resourceName, resourceNamespace),
+				Health: "up",
+				Role:   role,
+			}
+		}
+		observedDataInstance := func(i int, role string) memgraph.Instance {
+			return memgraph.Instance{Name: fmt.Sprintf("instance_%d", i), Health: "up", Role: role}
+		}
+		convergedCluster := func() []memgraph.Instance {
+			return []memgraph.Instance{
+				observedCoordinator(1, memgraph.RoleLeader),
+				observedCoordinator(2, memgraph.RoleFollower),
+				observedCoordinator(3, memgraph.RoleFollower),
+				observedDataInstance(0, memgraph.RoleMain),
+				observedDataInstance(1, memgraph.RoleReplica),
+			}
+		}
+
+		status := func() memgraphcomv1alpha1.MemgraphClusterStatus {
+			GinkgoHelper()
+			cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+			get(resourceName, cluster)
+			return cluster.Status
+		}
+		condition := func(condType string) *metav1.Condition {
+			GinkgoHelper()
+			s := status()
+			return apimeta.FindStatusCondition(s.Conditions, condType)
+		}
+
+		BeforeEach(func() {
+			resource := &memgraphcomv1alpha1.MemgraphCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: resourceNamespace},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+		})
+
+		AfterEach(func() {
+			cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+			get(resourceName, cluster)
+			Expect(k8sClient.Delete(ctx, cluster)).To(Succeed())
+			deleteOwned(resourceName)
+		})
+
+		It("should report bootstrapping while workload pods are not ready", func() {
+			reconcileCluster(resourceName)
+
+			s := status()
+			Expect(s.Main).To(BeEmpty(), "no MAIN is known before the cluster is observed")
+			ready := condition(memgraphcomv1alpha1.ConditionReady)
+			Expect(ready).NotTo(BeNil())
+			Expect(ready.Status).To(Equal(metav1.ConditionFalse))
+			Expect(ready.Reason).To(Equal(memgraphcomv1alpha1.ReasonWorkloadsNotReady))
+			converged := condition(memgraphcomv1alpha1.ConditionConverged)
+			Expect(converged).NotTo(BeNil())
+			Expect(converged.Status).To(Equal(metav1.ConditionFalse))
+			Expect(converged.Reason).To(Equal(memgraphcomv1alpha1.ReasonWorkloadsNotReady))
+		})
+
+		It("should report degraded when no coordinator is reachable", func() {
+			fake.setConnectErr(errors.New("connection refused"))
+			reconcileCluster(resourceName)
+			markWorkloadsReady(resourceName)
+			reconcileCluster(resourceName)
+
+			ready := condition(memgraphcomv1alpha1.ConditionReady)
+			Expect(ready.Status).To(Equal(metav1.ConditionFalse))
+			Expect(ready.Reason).To(Equal(memgraphcomv1alpha1.ReasonCoordinatorUnreachable))
+			converged := condition(memgraphcomv1alpha1.ConditionConverged)
+			Expect(converged.Status).To(Equal(metav1.ConditionFalse))
+			Expect(converged.Reason).To(Equal(memgraphcomv1alpha1.ReasonCoordinatorUnreachable))
+		})
+
+		It("should report ready and converged once the cluster is bootstrapped", func() {
+			reconcileCluster(resourceName)
+			markWorkloadsReady(resourceName)
+			reconcileCluster(resourceName)
+			// Second reconcile observes the registrations issued by the first.
+			reconcileCluster(resourceName)
+
+			s := status()
+			Expect(s.Main).To(Equal("instance_0"))
+			ready := condition(memgraphcomv1alpha1.ConditionReady)
+			Expect(ready.Status).To(Equal(metav1.ConditionTrue))
+			Expect(ready.Reason).To(Equal(memgraphcomv1alpha1.ReasonMainElected))
+			converged := condition(memgraphcomv1alpha1.ConditionConverged)
+			Expect(converged.Status).To(Equal(metav1.ConditionTrue))
+			Expect(converged.Reason).To(Equal(memgraphcomv1alpha1.ReasonAllInstancesRegistered))
+		})
+
+		It("should stay ready but drop convergence while a lost registration is restored", func() {
+			fake.setInstances(convergedCluster())
+			reconcileCluster(resourceName)
+			markWorkloadsReady(resourceName)
+			reconcileCluster(resourceName)
+			Expect(condition(memgraphcomv1alpha1.ConditionConverged).Status).To(Equal(metav1.ConditionTrue))
+
+			// A replica loses its registration; the MAIN keeps serving.
+			fake.setInstances([]memgraph.Instance{
+				observedCoordinator(1, memgraph.RoleLeader),
+				observedCoordinator(2, memgraph.RoleFollower),
+				observedCoordinator(3, memgraph.RoleFollower),
+				observedDataInstance(0, memgraph.RoleMain),
+			})
+			reconcileCluster(resourceName)
+
+			s := status()
+			Expect(s.Main).To(Equal("instance_0"), "the serving MAIN is unchanged")
+			ready := condition(memgraphcomv1alpha1.ConditionReady)
+			Expect(ready.Status).To(Equal(metav1.ConditionTrue),
+				"a cluster with a MAIN still serves while a replica is re-registered")
+			converged := condition(memgraphcomv1alpha1.ConditionConverged)
+			Expect(converged.Status).To(Equal(metav1.ConditionFalse))
+			Expect(converged.Reason).To(Equal(memgraphcomv1alpha1.ReasonRegistrationInProgress))
+		})
+
+		It("should track MAIN across a coordinator-driven failover", func() {
+			fake.setInstances(convergedCluster())
+			reconcileCluster(resourceName)
+			markWorkloadsReady(resourceName)
+			reconcileCluster(resourceName)
+			Expect(status().Main).To(Equal("instance_0"))
+
+			// The Raft coordinators fail over to instance_1; the operator only
+			// observes the new MAIN, it never promotes one.
+			fake.setInstances([]memgraph.Instance{
+				observedCoordinator(1, memgraph.RoleLeader),
+				observedCoordinator(2, memgraph.RoleFollower),
+				observedCoordinator(3, memgraph.RoleFollower),
+				observedDataInstance(0, memgraph.RoleReplica),
+				observedDataInstance(1, memgraph.RoleMain),
+			})
+			reconcileCluster(resourceName)
+
+			Expect(status().Main).To(Equal("instance_1"))
+			Expect(fake.executedCommands()).To(BeEmpty(),
+				"failover belongs to the coordinators; the operator issues no promotion")
+		})
+
+		It("should update status through the subresource without modifying spec", func() {
+			cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+			get(resourceName, cluster)
+			specBefore := cluster.Spec.DeepCopy()
+
+			fake.setInstances(convergedCluster())
+			reconcileCluster(resourceName)
+			markWorkloadsReady(resourceName)
+			reconcileCluster(resourceName)
+
+			get(resourceName, cluster)
+			Expect(&cluster.Spec).To(Equal(specBefore), "status updates must never mutate spec")
+			Expect(cluster.Status.Conditions).NotTo(BeEmpty())
 		})
 	})
 })

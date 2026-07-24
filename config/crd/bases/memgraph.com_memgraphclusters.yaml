@@ -16,7 +16,26 @@ spec:
     singular: memgraphcluster
   scope: Namespaced
   versions:
-  - name: v1alpha1
+  - additionalPrinterColumns:
+    - jsonPath: .spec.coordinators
+      name: Coordinators
+      type: integer
+    - jsonPath: .spec.dataInstances
+      name: Data
+      type: integer
+    - jsonPath: .status.main
+      name: Main
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: Ready
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Converged")].status
+      name: Converged
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
     schema:
       openAPIV3Schema:
         description: MemgraphCluster is the Schema for the memgraphclusters API
@@ -173,6 +192,13 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              main:
+                description: |-
+                  main is the name of the data instance currently observed as MAIN, as
+                  reported by SHOW INSTANCES on the coordinator leader. It is empty before
+                  the initial MAIN is elected and updates when the Raft coordinators fail
+                  over to a different instance.
+                type: string
             type: object
         required:
         - spec
