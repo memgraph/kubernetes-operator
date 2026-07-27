@@ -118,7 +118,7 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 			Expect(stored.Spec.Secrets.OrganizationKey).To(Equal(memgraphcomv1alpha1.DefaultOrganizationSecretKey))
 		})
 
-		DescribeTable("should accept a topology within the supported range",
+		DescribeTable("should accept any odd coordinator count and any positive data instance count",
 			func(name string, coordinators, dataInstances int32) {
 				createAccepted(name, memgraphcomv1alpha1.MemgraphClusterSpec{
 					Coordinators:  ptr.To(coordinators),
@@ -126,8 +126,8 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 				})
 			},
 			Entry("single coordinator, single data instance", "valid-topology-min", int32(1), int32(1)),
-			Entry("the largest supported quorum", "valid-topology-max",
-				memgraphcomv1alpha1.MaxCoordinatorCount, memgraphcomv1alpha1.MaxDataInstanceCount),
+			Entry("a quorum and replica count beyond the former upper bounds", "valid-topology-large",
+				int32(9), int32(16)),
 		)
 
 		It("should accept a registry host carrying a port", func() {
@@ -145,18 +145,12 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 			Entry("zero coordinators", "invalid-coordinators-zero",
 				memgraphcomv1alpha1.MemgraphClusterSpec{Coordinators: ptr.To(int32(0))},
 				"should be greater than or equal to 1"),
-			Entry("more coordinators than a Raft quorum benefits from", "invalid-coordinators-too-many",
-				memgraphcomv1alpha1.MemgraphClusterSpec{Coordinators: ptr.To(int32(9))},
-				"should be less than or equal to 7"),
 			Entry("an even coordinator count", "invalid-coordinators-even",
 				memgraphcomv1alpha1.MemgraphClusterSpec{Coordinators: ptr.To(int32(2))},
 				"coordinators must be an odd number"),
 			Entry("zero data instances", "invalid-data-zero",
 				memgraphcomv1alpha1.MemgraphClusterSpec{DataInstances: ptr.To(int32(0))},
 				"should be greater than or equal to 1"),
-			Entry("more data instances than supported", "invalid-data-too-many",
-				memgraphcomv1alpha1.MemgraphClusterSpec{DataInstances: ptr.To(int32(16))},
-				"should be less than or equal to 15"),
 			Entry("a tag smuggled into the repository", "invalid-image-repository-tagged",
 				memgraphcomv1alpha1.MemgraphClusterSpec{
 					Image: memgraphcomv1alpha1.ImageSpec{Repository: "memgraph/memgraph:3.12.0"},

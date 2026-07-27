@@ -32,16 +32,6 @@ const (
 	DefaultCoordinatorCount  int32 = 3
 	DefaultDataInstanceCount int32 = 2
 
-	// MaxCoordinatorCount bounds the Raft coordinator quorum. Beyond seven
-	// members a Raft cluster only pays more consensus latency for no extra
-	// fault tolerance, so a larger count is a typo rather than an intent.
-	MaxCoordinatorCount int32 = 7
-
-	// MaxDataInstanceCount bounds the data instances a single cluster
-	// replicates to. The limit exists to catch typos on a field that cannot be
-	// corrected afterwards, not to express a replication limit.
-	MaxDataInstanceCount int32 = 15
-
 	DefaultImageRepository = "docker.io/memgraph/memgraph"
 	DefaultImageTag        = "3.12.0-relwithdebinfo"
 	DefaultImagePullPolicy = corev1.PullIfNotPresent
@@ -168,8 +158,7 @@ type MemgraphClusterSpec struct {
 	// so the Raft quorum cannot split, and it is immutable: scaling is not
 	// supported in v1alpha1.
 	// +kubebuilder:validation:Minimum=1
-	// +kubebuilder:validation:Maximum=7
-	// +kubebuilder:validation:XValidation:rule="self % 2 == 1",message="coordinators must be an odd number (1, 3, 5 or 7) so the Raft quorum cannot split"
+	// +kubebuilder:validation:XValidation:rule="self % 2 == 1",message="coordinators must be an odd number so the Raft quorum cannot split"
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="coordinators is immutable: changing the coordinator count of an existing MemgraphCluster is not supported in v1alpha1"
 	// +kubebuilder:default=3
 	// +optional
@@ -178,7 +167,6 @@ type MemgraphClusterSpec struct {
 	// dataInstances is the number of data instances. It is immutable: scaling
 	// is not supported in v1alpha1.
 	// +kubebuilder:validation:Minimum=1
-	// +kubebuilder:validation:Maximum=15
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="dataInstances is immutable: changing the data instance count of an existing MemgraphCluster is not supported in v1alpha1"
 	// +kubebuilder:default=2
 	// +optional
