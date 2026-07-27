@@ -20,6 +20,10 @@ make manifests generate   # regenerate CRDs/RBAC + DeepCopy after editing *_type
 make build         # build manager binary
 make run           # run controller locally against current kubeconfig
 make test-e2e      # KinD e2e suite — creates/deletes a dedicated Kind cluster; never run against a real cluster
+make chart-sync    # regenerate the install chart's CRDs + RBAC rules from the Go sources
+make chart-verify  # fail if those generated chart files are stale (CI gate)
+make helm-lint     # lint the install chart and render it with defaults and toggles flipped
+make test-chart    # helm install/uninstall the chart on a throwaway Kind cluster
 ```
 
 Run a single test (Ginkgo suites):
@@ -32,7 +36,7 @@ go test ./api/... -run TestName
 Envtest packages need `KUBEBUILDER_ASSETS`; outside of `make test` set it with:
 `KUBEBUILDER_ASSETS=$(bin/setup-envtest use <k8s-version> --bin-dir bin -p path)`
 
-CI (`.github/workflows/`) runs `make lint-config`, `make lint`, `make test-unit`, `make test`, and `make test-e2e` on every PR — all must be green. The e2e job boots a licensed Memgraph cluster on a multi-node Kind cluster, with the license flowing from the `MEMGRAPH_ENTERPRISE_LICENSE` / `MEMGRAPH_ORGANIZATION_NAME` repository secrets (set the same env vars to run it locally).
+CI (`.github/workflows/`) runs `make lint-config`, `make lint`, `make test-unit`, `make test`, `make chart-verify`, `make helm-lint`, `make test-chart`, and `make test-e2e` on every PR — all must be green. The e2e job boots a licensed Memgraph cluster on a multi-node Kind cluster, with the license flowing from the `MEMGRAPH_ENTERPRISE_LICENSE` / `MEMGRAPH_ORGANIZATION_NAME` repository secrets (set the same env vars to run it locally).
 
 ### Toolchain quirks (do not "fix" these)
 
@@ -48,7 +52,7 @@ The PRD defines seven modules with two pure cores and one mock seam. Keep this s
 3. **Memgraph HA client** — a narrow Go interface (show instances, register instance, add coordinator, set main) over the Bolt driver. Everything above depends on the interface, never the driver — this is the mock seam.
 4. **Registration planner** — pure diff: declared topology + observed `SHOW INSTANCES` in, ordered registration commands out (empty when converged). Reconciliation semantics live here: read-before-write, idempotent, re-issue only missing registrations. `SET INSTANCE TO MAIN` is issued exactly once at bootstrap (when no MAIN exists); after that, failover belongs to the Raft coordinators — the operator only observes.
 5. **Controller** (`internal/controller/`) — fetch CR, server-side-apply builder output, gate on pod readiness, run planner against the HA client, write status/conditions.
-6. **Operator install chart** — lives in this repo, cross-published to `memgraph.github.io/helm-charts` at release.
+6. **Operator install chart** (`charts/memgraph-operator/`) — lives in this repo, cross-published to `memgraph.github.io/helm-charts` at release. Its `crds/` and `rbac/manager-rules.yaml` are **generated** (`make chart-sync`, verified by `make chart-verify`): the manager's ClusterRole comes from the `+kubebuilder:rbac` markers, so tightening or widening the controller's permissions means editing the markers, never the chart. The e2e suite installs the operator through this chart, so every scenario runs under the RBAC users get.
 7. **E2E harness** (`test/e2e/`, build tag `e2e`) — multi-node KinD with real Memgraph images.
 
 Test philosophy (from the PRD): assert external behavior, never internal call ordering or private state. Builders get golden tests, planner gets pure topology-diff cases, controller gets envtest with the HA client mocked.

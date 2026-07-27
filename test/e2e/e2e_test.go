@@ -33,17 +33,29 @@ import (
 	"github.com/memgraph/kubernetes-operator/test/utils"
 )
 
-// namespace where the project is deployed in
-const namespace = "kubernetes-operator-system"
+// namespace where the operator is installed
+const namespace = "memgraph-operator-system"
 
-// serviceAccountName created for the project
-const serviceAccountName = "kubernetes-operator-controller-manager"
+// chartDir is the local install chart the suite installs, and releaseName the
+// Helm release it installs it as. Every name below follows from that release
+// name, exactly as it would for a user's installation.
+const chartDir = "charts/memgraph-operator"
+const releaseName = "memgraph-operator"
 
-// metricsServiceName is the name of the metrics service of the project
-const metricsServiceName = "kubernetes-operator-controller-manager-metrics-service"
+// controllerDeploymentName is the name of the operator Deployment the chart creates
+const controllerDeploymentName = releaseName + "-controller-manager"
+
+// serviceAccountName created for the operator
+const serviceAccountName = releaseName + "-controller-manager"
+
+// metricsServiceName is the name of the metrics service of the operator
+const metricsServiceName = releaseName + "-metrics-service"
+
+// metricsReaderRoleName is the ClusterRole the chart creates for scraping metrics
+const metricsReaderRoleName = releaseName + "-metrics-reader"
 
 // metricsRoleBindingName is the name of the RBAC that will be created to allow get the metrics data
-const metricsRoleBindingName = "kubernetes-operator-metrics-binding"
+const metricsRoleBindingName = releaseName + "-metrics-binding"
 
 var _ = Describe("Manager", Ordered, func() {
 	var controllerPodName string
@@ -141,7 +153,7 @@ var _ = Describe("Manager", Ordered, func() {
 		It("should ensure the metrics endpoint is serving metrics", func() {
 			By("creating a ClusterRoleBinding for the service account to allow access to metrics")
 			cmd := exec.Command("kubectl", "create", "clusterrolebinding", metricsRoleBindingName,
-				"--clusterrole=kubernetes-operator-metrics-reader",
+				"--clusterrole="+metricsReaderRoleName,
 				fmt.Sprintf("--serviceaccount=%s:%s", namespace, serviceAccountName),
 			)
 			_, err := utils.Run(cmd)

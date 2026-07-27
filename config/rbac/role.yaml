@@ -10,11 +10,9 @@ rules:
   - services
   verbs:
   - create
-  - delete
   - get
   - list
   - patch
-  - update
   - watch
 - apiGroups:
   - apps
@@ -22,23 +20,17 @@ rules:
   - statefulsets
   verbs:
   - create
-  - delete
   - get
   - list
   - patch
-  - update
   - watch
 - apiGroups:
   - memgraph.com
   resources:
   - memgraphclusters
   verbs:
-  - create
-  - delete
   - get
   - list
-  - patch
-  - update
   - watch
 - apiGroups:
   - memgraph.com
@@ -53,4 +45,3 @@ rules:
   verbs:
   - get
   - patch
-  - update

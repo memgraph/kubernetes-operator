@@ -16,7 +16,23 @@ The operator replaces the `memgraph-high-availability` Helm chart's fire-and-for
 - kubectl version v1.11.3+.
 - Access to a Kubernetes v1.11.3+ cluster.
 
-### To Deploy on the cluster
+### To install the operator
+
+The install chart in [`charts/memgraph-operator`](charts/memgraph-operator/README.md) is the
+complete install story — it ships the `MemgraphCluster` CRD, a least-privilege RBAC set, and the
+controller Deployment:
+
+```sh
+helm install memgraph-operator ./charts/memgraph-operator \
+  --namespace memgraph-operator-system --create-namespace --wait
+```
+
+Uninstall with `helm uninstall memgraph-operator --namespace memgraph-operator-system`. Helm never
+deletes CRDs it installed, so remove the CRD explicitly (`kubectl delete crd
+memgraphclusters.memgraph.com`) once no cluster needs it — see the
+[chart README](charts/memgraph-operator/README.md) for the values and the upgrade caveat.
+
+### To deploy a development build on the cluster
 **Build and push your image to the location specified by `IMG`:**
 
 ```sh
@@ -96,23 +112,23 @@ the project, i.e.:
 kubectl apply -f https://raw.githubusercontent.com/<org>/kubernetes-operator/<tag or branch>/dist/install.yaml
 ```
 
-### By providing a Helm Chart
+### By providing a Helm chart
 
-1. Build the chart using the optional helm plugin
+The install chart is maintained in this repository under
+[`charts/memgraph-operator`](charts/memgraph-operator/README.md), next to the manifests it ships:
+its CRDs and the manager's RBAC rules are generated from the Go types and the
+`+kubebuilder:rbac` markers, so the chart can never drift from the controller version it
+installs.
 
 ```sh
-kubebuilder edit --plugins=helm/v2-alpha
+make chart-sync      # regenerate the chart's CRDs and RBAC rules after changing the API or markers
+make helm-lint       # lint the chart and render it with defaults and with the toggles flipped
+make test-chart      # install/uninstall the chart on a throwaway Kind cluster
 ```
 
-2. See that a chart was generated under 'dist/chart', and users
-can obtain this solution from there.
-
-**NOTE:** If you change the project, you need to update the Helm Chart
-using the same command above to sync the latest changes. Furthermore,
-if you create webhooks, you need to use the above command with
-the '--force' flag and manually ensure that any custom configuration
-previously added to 'dist/chart/values.yaml' or 'dist/chart/manager/manager.yaml'
-is manually re-applied afterwards.
+Releases cross-publish the packaged chart into the existing
+[`memgraph.github.io/helm-charts`](https://memgraph.github.io/helm-charts) index, so users install
+it from the helm repository they already have configured.
 
 ## Contributing
 

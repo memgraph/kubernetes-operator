@@ -47,6 +47,39 @@ jobs:
       - name: Run tests against envtest
         run: make test
 
+  chart:
+    permissions:
+      contents: read
+    name: Install chart
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: go.mod
+
+      # The chart ships the CRDs and the manager's RBAC rules generated from
+      # the Go sources; this fails if the committed copies are stale.
+      - name: Verify the generated chart manifests
+        run: make chart-verify
+
+      - name: Lint the chart
+        run: make helm-lint
+
+      - name: Install Kind
+        run: go install sigs.k8s.io/kind@v0.32.0
+
+      # Install and uninstall the chart on a clean cluster. No license needed:
+      # this asserts the operator runs and reconciles under the chart's RBAC,
+      # while the e2e job below boots a real cluster on the same chart install.
+      - name: Install and uninstall the chart on Kind
+        run: make test-chart
+
   e2e:
     permissions:
       contents: read
