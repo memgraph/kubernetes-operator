@@ -24,6 +24,9 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -136,6 +139,13 @@ func (r *MemgraphClusterReconciler) reconcileRegistration(
 	}
 	if !ready {
 		log.Info("Waited for workload pods to become ready before registration")
+		msg := "Waiting for all workload pods to become ready"
+		if statusErr := r.writeStatus(ctx, cluster, cluster.Status.Main,
+			notReadyCondition(memgraphcomv1alpha1.ReasonWorkloadsNotReady, msg),
+			notConvergedCondition(memgraphcomv1alpha1.ReasonWorkloadsNotReady, msg),
+		); statusErr != nil {
+			return ctrl.Result{}, statusErr
+		}
 		return ctrl.Result{RequeueAfter: requeueWhilePending}, nil
 	}
 
@@ -143,6 +153,13 @@ func (r *MemgraphClusterReconciler) reconcileRegistration(
 	leader, observed, err := r.observeCluster(ctx, topology)
 	if err != nil {
 		log.Info("Deferred registration because no coordinator answered", "reason", err.Error())
+		msg := "No coordinator answered SHOW INSTANCES"
+		if statusErr := r.writeStatus(ctx, cluster, cluster.Status.Main,
+			notReadyCondition(memgraphcomv1alpha1.ReasonCoordinatorUnreachable, msg),
+			notConvergedCondition(memgraphcomv1alpha1.ReasonCoordinatorUnreachable, msg),
+		); statusErr != nil {
+			return ctrl.Result{}, statusErr
+		}
 		return ctrl.Result{RequeueAfter: requeueWhilePending}, nil
 	}
 	defer func() {
@@ -151,13 +168,30 @@ func (r *MemgraphClusterReconciler) reconcileRegistration(
 		}
 	}()
 
+	main := observedMain(observed)
 	commands := planner.Plan(topology, observed)
 	if len(commands) == 0 {
 		// Converged, but keep re-observing: a registration a pod loses later
 		// produces no watch event, so drift is only caught by resyncing.
 		log.Info("Confirmed cluster registration is converged")
+		converged := trueCondition(memgraphcomv1alpha1.ConditionConverged,
+			memgraphcomv1alpha1.ReasonAllInstancesRegistered,
+			fmt.Sprintf("All %d declared instances are registered", len(topology.Coordinators)+len(topology.DataInstances)))
+		if statusErr := r.writeStatus(ctx, cluster, main, readyOrNot(main), converged); statusErr != nil {
+			return ctrl.Result{}, statusErr
+		}
 		return ctrl.Result{RequeueAfter: resyncInterval}, nil
 	}
+
+	// Report the in-progress state before mutating the cluster: a MAIN already
+	// serving stays Ready while a lost registration is restored; a fresh
+	// bootstrap has no MAIN yet, so Ready is False until one is elected.
+	inProgress := notConvergedCondition(memgraphcomv1alpha1.ReasonRegistrationInProgress,
+		fmt.Sprintf("Issuing %d registration command(s) to converge the cluster", len(commands)))
+	if statusErr := r.writeStatus(ctx, cluster, main, readyOrNot(main), inProgress); statusErr != nil {
+		return ctrl.Result{}, statusErr
+	}
+
 	for _, command := range commands {
 		if err := command.Run(ctx, leader); err != nil {
 			return ctrl.Result{}, fmt.Errorf("executing registration command %q: %w", command, err)
@@ -168,6 +202,69 @@ func (r *MemgraphClusterReconciler) reconcileRegistration(
 	// Registration was issued, not yet observed back; verify convergence on a
 	// follow-up reconcile instead of assuming success.
 	return ctrl.Result{RequeueAfter: requeueAfterRegistration}, nil
+}
+
+// observedMain returns the name of the data instance reported as MAIN, or the
+// empty string when none is elected yet.
+func observedMain(observed []memgraph.Instance) string {
+	for _, instance := range observed {
+		if instance.IsMain() {
+			return instance.Name
+		}
+	}
+	return ""
+}
+
+// readyOrNot builds the Ready condition from whether a MAIN is elected: the
+// cluster serves writes exactly when a data instance is MAIN.
+func readyOrNot(main string) metav1.Condition {
+	if main == "" {
+		return notReadyCondition(memgraphcomv1alpha1.ReasonNoMainElected,
+			"No data instance has been promoted to MAIN yet")
+	}
+	return trueCondition(memgraphcomv1alpha1.ConditionReady,
+		memgraphcomv1alpha1.ReasonMainElected, "Data instance "+main+" is MAIN")
+}
+
+func trueCondition(condType, reason, message string) metav1.Condition {
+	return metav1.Condition{Type: condType, Status: metav1.ConditionTrue, Reason: reason, Message: message}
+}
+
+func notReadyCondition(reason, message string) metav1.Condition {
+	return metav1.Condition{
+		Type: memgraphcomv1alpha1.ConditionReady, Status: metav1.ConditionFalse, Reason: reason, Message: message,
+	}
+}
+
+func notConvergedCondition(reason, message string) metav1.Condition {
+	return metav1.Condition{
+		Type: memgraphcomv1alpha1.ConditionConverged, Status: metav1.ConditionFalse, Reason: reason, Message: message,
+	}
+}
+
+// writeStatus patches the status subresource with the observed MAIN and the
+// given conditions. It uses the status subresource exclusively — spec is never
+// touched — and skips the patch when nothing changed, so a converged cluster
+// re-observed on every resync does not churn the resource version.
+func (r *MemgraphClusterReconciler) writeStatus(
+	ctx context.Context,
+	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	main string,
+	conditions ...metav1.Condition,
+) error {
+	base := cluster.DeepCopy()
+	cluster.Status.Main = main
+	for _, condition := range conditions {
+		condition.ObservedGeneration = cluster.Generation
+		apimeta.SetStatusCondition(&cluster.Status.Conditions, condition)
+	}
+	if equality.Semantic.DeepEqual(base.Status, cluster.Status) {
+		return nil
+	}
+	if err := r.Status().Patch(ctx, cluster, client.MergeFrom(base)); err != nil {
+		return fmt.Errorf("patching MemgraphCluster status: %w", err)
+	}
+	return nil
 }
 
 // workloadsReady reports whether both role StatefulSets have all their pods
