@@ -20,3 +20,21 @@ spec:
     name: memgraph-secrets
     licenseKey: MEMGRAPH_ENTERPRISE_LICENSE
     organizationKey: MEMGRAPH_ORGANIZATION_NAME
+  storage:
+    # Retain (the default) leaves the PersistentVolumeClaims behind when this
+    # resource is deleted, so the data survives an accidental delete. Switch to
+    # Delete on dev clusters that should clean up after themselves.
+    retentionPolicy: Retain
+    # Each pod of a role gets a lib claim (Memgraph's data directory) and a log
+    # claim. Leave the storage class names out to use the cluster's default
+    # StorageClass. Claim sizes and classes cannot be changed after creation.
+    coordinators:
+      libPVCSize: 1Gi
+      libStorageAccessMode: ReadWriteOnce
+      logPVCSize: 1Gi
+      logStorageAccessMode: ReadWriteOnce
+    data:
+      libPVCSize: 1Gi
+      libStorageAccessMode: ReadWriteOnce
+      logPVCSize: 1Gi
+      logStorageAccessMode: ReadWriteOnce

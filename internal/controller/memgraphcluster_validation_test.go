@@ -22,6 +22,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
@@ -34,6 +35,17 @@ import (
 // validation and the CEL transition rules that pin the topology counts. They
 // never reconcile: the API server is the unit under test, which is exactly the
 // v1 contract that no admission webhook is involved.
+// defaultRoleStorage is one role's storage block as the CRD schema defaults
+// materialize it.
+func defaultRoleStorage() memgraphcomv1alpha1.RoleStorageSpec {
+	return memgraphcomv1alpha1.RoleStorageSpec{
+		LibPVCSize:           ptr.To(resource.MustParse(memgraphcomv1alpha1.DefaultLibPVCSize)),
+		LibStorageAccessMode: memgraphcomv1alpha1.DefaultStorageAccessMode,
+		LogPVCSize:           ptr.To(resource.MustParse(memgraphcomv1alpha1.DefaultLogPVCSize)),
+		LogStorageAccessMode: memgraphcomv1alpha1.DefaultStorageAccessMode,
+	}
+}
+
 var _ = Describe("MemgraphCluster CRD validation", func() {
 	const resourceNamespace = "default"
 
@@ -103,6 +115,11 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 					LicenseKey:      memgraphcomv1alpha1.DefaultLicenseSecretKey,
 					OrganizationKey: memgraphcomv1alpha1.DefaultOrganizationSecretKey,
 				},
+				Storage: memgraphcomv1alpha1.StorageSpec{
+					RetentionPolicy: memgraphcomv1alpha1.DefaultStorageRetention,
+					Coordinators:    defaultRoleStorage(),
+					Data:            defaultRoleStorage(),
+				},
 			}), "the CRD schema defaults must match the Go constants the builders fall back to")
 		})
 
@@ -110,12 +127,55 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 			stored := createAccepted("valid-partial-blocks", memgraphcomv1alpha1.MemgraphClusterSpec{
 				Image:   memgraphcomv1alpha1.ImageSpec{Tag: customImageTag},
 				Secrets: memgraphcomv1alpha1.SecretsSpec{Name: customSecretName},
+				Storage: memgraphcomv1alpha1.StorageSpec{
+					Data: memgraphcomv1alpha1.RoleStorageSpec{LibPVCSize: ptr.To(resource.MustParse("100Gi"))},
+				},
 			})
 
 			Expect(stored.Spec.Image.Tag).To(Equal(customImageTag))
 			Expect(stored.Spec.Image.Repository).To(Equal(memgraphcomv1alpha1.DefaultImageRepository))
 			Expect(stored.Spec.Secrets.LicenseKey).To(Equal(memgraphcomv1alpha1.DefaultLicenseSecretKey))
 			Expect(stored.Spec.Secrets.OrganizationKey).To(Equal(memgraphcomv1alpha1.DefaultOrganizationSecretKey))
+			Expect(stored.Spec.Storage.Data.LibPVCSize).To(Equal(ptr.To(resource.MustParse("100Gi"))))
+			Expect(stored.Spec.Storage.Data.LogPVCSize).To(
+				Equal(ptr.To(resource.MustParse(memgraphcomv1alpha1.DefaultLogPVCSize))))
+			Expect(stored.Spec.Storage.RetentionPolicy).To(Equal(memgraphcomv1alpha1.DefaultStorageRetention))
+			Expect(stored.Spec.Storage.Coordinators).To(Equal(defaultRoleStorage()))
+		})
+
+		It("should accept an explicit Delete retention policy", func() {
+			stored := createAccepted("valid-retention-delete", memgraphcomv1alpha1.MemgraphClusterSpec{
+				Storage: memgraphcomv1alpha1.StorageSpec{
+					RetentionPolicy: memgraphcomv1alpha1.RetentionPolicyDelete,
+				},
+			})
+
+			Expect(stored.Spec.Storage.RetentionPolicy).To(Equal(memgraphcomv1alpha1.RetentionPolicyDelete))
+		})
+
+		// An unset storage class means "cluster default" and an empty one means
+		// "no dynamic provisioning"; both must survive a round trip through the
+		// API server as distinct values.
+		It("should preserve the difference between an unset and an empty storage class", func() {
+			raw := &unstructured.Unstructured{Object: map[string]any{
+				"apiVersion": memgraphcomv1alpha1.SchemeGroupVersion.String(),
+				"kind":       "MemgraphCluster",
+				"metadata":   map[string]any{"name": "valid-empty-storage-class", "namespace": resourceNamespace},
+				"spec": map[string]any{
+					"storage": map[string]any{
+						"data": map[string]any{"libStorageClassName": ""},
+					},
+				},
+			}}
+			Expect(k8sClient.Create(ctx, raw)).To(Succeed())
+			DeferCleanup(func() { Expect(k8sClient.Delete(ctx, raw)).To(Succeed()) })
+
+			stored := &memgraphcomv1alpha1.MemgraphCluster{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Name: "valid-empty-storage-class", Namespace: resourceNamespace}, stored)).To(Succeed())
+
+			Expect(stored.Spec.Storage.Data.LibStorageClassName).To(Equal(ptr.To("")))
+			Expect(stored.Spec.Storage.Data.LogStorageClassName).To(BeNil())
 		})
 
 		DescribeTable("should accept any odd coordinator count and any positive data instance count",
@@ -181,6 +241,18 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 					},
 				},
 				"licenseKey and organizationKey must name different keys of the Secret"),
+			Entry("a retention policy outside the enum", "invalid-retention-policy",
+				memgraphcomv1alpha1.MemgraphClusterSpec{
+					Storage: memgraphcomv1alpha1.StorageSpec{RetentionPolicy: "Purge"},
+				},
+				`Unsupported value: "Purge"`),
+			Entry("an access mode outside the enum", "invalid-access-mode",
+				memgraphcomv1alpha1.MemgraphClusterSpec{
+					Storage: memgraphcomv1alpha1.StorageSpec{
+						Data: memgraphcomv1alpha1.RoleStorageSpec{LibStorageAccessMode: "ReadWriteSometimes"},
+					},
+				},
+				`Unsupported value: "ReadWriteSometimes"`),
 		)
 
 		// The typed client drops empty strings before they reach the API

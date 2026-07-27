@@ -163,6 +163,155 @@ spec:
                     of the Secret
                   rule: '!has(self.licenseKey) || !has(self.organizationKey) || self.licenseKey
                     != self.organizationKey'
+              storage:
+                default: {}
+                description: |-
+                  storage configures the persistent volumes backing both roles and their
+                  retention on cluster deletion.
+                properties:
+                  coordinators:
+                    default: {}
+                    description: coordinators configures the storage of every coordinator
+                      pod.
+                    properties:
+                      libPVCSize:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        default: 1Gi
+                        description: |-
+                          libPVCSize is the requested size of the lib storage claim, which backs
+                          Memgraph's data directory (snapshots, WAL, and durability metadata).
+                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                        x-kubernetes-int-or-string: true
+                      libStorageAccessMode:
+                        default: ReadWriteOnce
+                        description: |-
+                          libStorageAccessMode is the access mode requested for the lib storage
+                          claim.
+                        enum:
+                        - ReadWriteOnce
+                        - ReadOnlyMany
+                        - ReadWriteMany
+                        - ReadWriteOncePod
+                        type: string
+                      libStorageClassName:
+                        description: |-
+                          libStorageClassName is the StorageClass backing the lib storage claim.
+                          Leave it unset to use the cluster's default StorageClass; set it to the
+                          empty string to disable dynamic provisioning and bind a pre-created
+                          PersistentVolume.
+                        maxLength: 253
+                        type: string
+                      logPVCSize:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        default: 1Gi
+                        description: |-
+                          logPVCSize is the requested size of the log storage claim, which backs
+                          Memgraph's log file.
+                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                        x-kubernetes-int-or-string: true
+                      logStorageAccessMode:
+                        default: ReadWriteOnce
+                        description: |-
+                          logStorageAccessMode is the access mode requested for the log storage
+                          claim.
+                        enum:
+                        - ReadWriteOnce
+                        - ReadOnlyMany
+                        - ReadWriteMany
+                        - ReadWriteOncePod
+                        type: string
+                      logStorageClassName:
+                        description: |-
+                          logStorageClassName is the StorageClass backing the log storage claim.
+                          Leave it unset to use the cluster's default StorageClass; set it to the
+                          empty string to disable dynamic provisioning and bind a pre-created
+                          PersistentVolume.
+                        maxLength: 253
+                        type: string
+                    type: object
+                  data:
+                    default: {}
+                    description: data configures the storage of every data instance
+                      pod.
+                    properties:
+                      libPVCSize:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        default: 1Gi
+                        description: |-
+                          libPVCSize is the requested size of the lib storage claim, which backs
+                          Memgraph's data directory (snapshots, WAL, and durability metadata).
+                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                        x-kubernetes-int-or-string: true
+                      libStorageAccessMode:
+                        default: ReadWriteOnce
+                        description: |-
+                          libStorageAccessMode is the access mode requested for the lib storage
+                          claim.
+                        enum:
+                        - ReadWriteOnce
+                        - ReadOnlyMany
+                        - ReadWriteMany
+                        - ReadWriteOncePod
+                        type: string
+                      libStorageClassName:
+                        description: |-
+                          libStorageClassName is the StorageClass backing the lib storage claim.
+                          Leave it unset to use the cluster's default StorageClass; set it to the
+                          empty string to disable dynamic provisioning and bind a pre-created
+                          PersistentVolume.
+                        maxLength: 253
+                        type: string
+                      logPVCSize:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        default: 1Gi
+                        description: |-
+                          logPVCSize is the requested size of the log storage claim, which backs
+                          Memgraph's log file.
+                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                        x-kubernetes-int-or-string: true
+                      logStorageAccessMode:
+                        default: ReadWriteOnce
+                        description: |-
+                          logStorageAccessMode is the access mode requested for the log storage
+                          claim.
+                        enum:
+                        - ReadWriteOnce
+                        - ReadOnlyMany
+                        - ReadWriteMany
+                        - ReadWriteOncePod
+                        type: string
+                      logStorageClassName:
+                        description: |-
+                          logStorageClassName is the StorageClass backing the log storage claim.
+                          Leave it unset to use the cluster's default StorageClass; set it to the
+                          empty string to disable dynamic provisioning and bind a pre-created
+                          PersistentVolume.
+                        maxLength: 253
+                        type: string
+                    type: object
+                  retentionPolicy:
+                    default: Retain
+                    description: |-
+                      retentionPolicy decides whether the cluster's PersistentVolumeClaims
+                      survive deletion of the MemgraphCluster. It maps directly onto the
+                      StatefulSets' persistentVolumeClaimRetentionPolicy.whenDeleted, so the
+                      StatefulSet controller is the only thing that ever deletes storage — the
+                      operator owns no finalizer and runs no cleanup of its own. The default
+                      keeps production data safe from an accidental delete; dev clusters can
+                      opt into self-cleanup.
+                    enum:
+                    - Retain
+                    - Delete
+                    type: string
+                type: object
             type: object
           status:
             description: status defines the observed state of MemgraphCluster
