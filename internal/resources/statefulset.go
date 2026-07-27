@@ -38,12 +38,21 @@ const (
 	libMountPath = "/var/lib/memgraph"
 	logMountPath = "/var/log/memgraph"
 	tmpMountPath = "/tmp"
+	// coreDumpsMountPath is not configurable: it is only ever written to by the
+	// kernel and read by the uploader, both of which the operator points at it,
+	// so a knob would only create ways for the two to disagree.
+	coreDumpsMountPath = "/var/core/memgraph"
 
 	// Volume names double as the StatefulSet volumeClaimTemplate names, so the
 	// provisioned claims are <volume>-<pod>, e.g. lib-storage-example-data-0.
-	libVolumeName = "lib-storage"
-	logVolumeName = "log-storage"
-	tmpVolumeName = "tmp"
+	libVolumeName       = "lib-storage"
+	logVolumeName       = "log-storage"
+	coreDumpsVolumeName = "core-dumps"
+	tmpVolumeName       = "tmp"
+
+	// Container names of the two optional containers core dumps bring along.
+	corePatternContainerName = "init-core-pattern"
+	uploaderContainerName    = "core-dumps-uploader"
 )
 
 // CoordinatorStatefulSet builds the single StatefulSet running all
@@ -182,31 +191,120 @@ func memgraphContainer(spec normalizedSpec, role normalizedRole) corev1.Containe
 				},
 			},
 		}, role.env...),
-		VolumeMounts: volumeMounts(role.storage),
+		VolumeMounts:    volumeMounts(role),
+		SecurityContext: restrictedSecurityContext(),
+	}
+}
+
+// restrictedSecurityContext is what every container the operator builds runs
+// under: no privilege escalation, no capabilities, a read-only root filesystem
+// and the default seccomp profile. The core pattern init container is the one
+// exception — it cannot do its job under this.
+func restrictedSecurityContext() *corev1.SecurityContext {
+	return &corev1.SecurityContext{
+		AllowPrivilegeEscalation: ptr.To(false),
+		Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
+		ReadOnlyRootFilesystem:   ptr.To(true),
+		RunAsNonRoot:             ptr.To(true),
+		SeccompProfile:           &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
+	}
+}
+
+// corePatternInitContainer points the node's kernel at the role's core dumps
+// directory. It runs the cluster's own Memgraph image — already pulled on the
+// node, so core dumps need no second image to be configured or mirrored — and
+// is the only container the operator builds that breaks the restricted security
+// posture: /proc/sys is mounted read-only in an unprivileged container, so
+// writing core_pattern needs privileged plus root. Nothing else about the pod
+// is relaxed, and a namespace that forbids privileged pods can turn this off
+// and have the platform manage core_pattern on the node instead.
+func corePatternInitContainer(spec normalizedSpec) corev1.Container {
+	// %e.%p.%t.%s expand to the crashing executable, its pid, the time and the
+	// signal.
+	pattern := coreDumpsMountPath + "/core.%e.%p.%t.%s"
+	return corev1.Container{
+		Name:            corePatternContainerName,
+		Image:           spec.image,
+		ImagePullPolicy: spec.pullPolicy,
+		// tee rather than a plain redirect so the pattern that was set is
+		// visible in the init container's logs.
+		Command: []string{"/bin/sh", "-ec", fmt.Sprintf("echo '%s' | tee /proc/sys/kernel/core_pattern", pattern)},
 		SecurityContext: &corev1.SecurityContext{
-			AllowPrivilegeEscalation: ptr.To(false),
-			Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
+			Privileged: ptr.To(true),
+			// Kubernetes rejects a privileged container that also forbids
+			// privilege escalation, so this one cannot be false.
+			AllowPrivilegeEscalation: ptr.To(true),
 			ReadOnlyRootFilesystem:   ptr.To(true),
-			RunAsNonRoot:             ptr.To(true),
+			RunAsUser:                ptr.To(int64(0)),
+			RunAsNonRoot:             ptr.To(false),
 			SeccompProfile:           &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
 		},
 	}
 }
 
-// volumeMounts are the role's container mounts: lib storage, the scratch
-// directory the read-only root filesystem needs, and log storage unless the
-// role opted out of it.
-func volumeMounts(storage normalizedStorage) []corev1.VolumeMount {
+// uploaderSidecar builds the optional container that ships collected dumps off
+// the volume. The operator owns the wiring a sidecar must not get wrong: the
+// dumps are mounted read-only (an uploader has no business writing them), the
+// mount path arrives as CORE_DUMPS_DIR so the path is stated once, and the
+// pod's scratch volume is mounted at /tmp so the sidecar has somewhere to write
+// without a writable root filesystem.
+func uploaderSidecar(coreDumps normalizedCoreDumps) corev1.Container {
+	uploader := coreDumps.uploader
+	pullPolicy := uploader.PullPolicy
+	if pullPolicy == "" {
+		pullPolicy = memgraphcomv1alpha1.DefaultImagePullPolicy
+	}
+	env := append([]corev1.EnvVar{{
+		Name: memgraphcomv1alpha1.EnvCoreDumpsDir, Value: coreDumpsMountPath,
+	}}, normalizeEnv(uploader.Env)...)
+
+	envFrom := make([]corev1.EnvFromSource, 0, len(uploader.EnvFromSecrets))
+	for _, secret := range uploader.EnvFromSecrets {
+		envFrom = append(envFrom, corev1.EnvFromSource{
+			SecretRef: &corev1.SecretEnvSource{
+				LocalObjectReference: corev1.LocalObjectReference{Name: secret},
+			},
+		})
+	}
+
+	return corev1.Container{
+		Name:            uploaderContainerName,
+		Image:           uploader.Image,
+		ImagePullPolicy: pullPolicy,
+		Command:         uploader.Command,
+		Args:            uploader.Args,
+		Env:             env,
+		EnvFrom:         envFrom,
+		Resources:       uploader.Resources,
+		VolumeMounts: []corev1.VolumeMount{
+			{Name: coreDumpsVolumeName, MountPath: coreDumpsMountPath, ReadOnly: true},
+			{Name: tmpVolumeName, MountPath: tmpMountPath},
+		},
+		SecurityContext: restrictedSecurityContext(),
+	}
+}
+
+// volumeMounts are the Memgraph container's mounts: lib storage, the scratch
+// directory the read-only root filesystem needs, log storage unless the role
+// opted out of it, and the core dumps directory when the role collects dumps.
+func volumeMounts(role normalizedRole) []corev1.VolumeMount {
 	mounts := []corev1.VolumeMount{{Name: libVolumeName, MountPath: libMountPath}}
-	if storage.createLogClaim {
+	if role.storage.createLogClaim {
 		mounts = append(mounts, corev1.VolumeMount{Name: logVolumeName, MountPath: logMountPath})
 	}
-	return append(mounts, corev1.VolumeMount{Name: tmpVolumeName, MountPath: tmpMountPath})
+	mounts = append(mounts, corev1.VolumeMount{Name: tmpVolumeName, MountPath: tmpMountPath})
+	if role.coreDumps.enabled {
+		mounts = append(mounts,
+			corev1.VolumeMount{Name: coreDumpsVolumeName, MountPath: coreDumpsMountPath})
+	}
+	return mounts
 }
 
 // volumeClaimTemplates are the per-pod claims of the role: lib storage always,
-// log storage unless the role opted out of it.
-func volumeClaimTemplates(storage normalizedStorage) []corev1.PersistentVolumeClaim {
+// log storage unless the role opted out of it, and core dumps when enabled. All
+// three follow the cluster's single retention policy.
+func volumeClaimTemplates(role normalizedRole) []corev1.PersistentVolumeClaim {
+	storage := role.storage
 	claims := []corev1.PersistentVolumeClaim{
 		volumeClaimTemplate(libVolumeName, storage.libSize, storage.libAccessMode, storage.libClass),
 	}
@@ -214,7 +312,34 @@ func volumeClaimTemplates(storage normalizedStorage) []corev1.PersistentVolumeCl
 		claims = append(claims,
 			volumeClaimTemplate(logVolumeName, storage.logSize, storage.logAccessMode, storage.logClass))
 	}
+	if role.coreDumps.enabled {
+		// Dumps are written by one node's kernel into one pod's directory, so
+		// the access mode is not a knob: ReadWriteOnce is the only one that
+		// describes it.
+		claims = append(claims, volumeClaimTemplate(coreDumpsVolumeName,
+			role.coreDumps.size, corev1.ReadWriteOnce, role.coreDumps.class))
+	}
 	return claims
+}
+
+// podContainers is the Memgraph container plus the uploader sidecar when the
+// role has one. Memgraph stays first, so `kubectl logs` without -c keeps
+// showing the database.
+func podContainers(memgraph corev1.Container, role normalizedRole) []corev1.Container {
+	containers := []corev1.Container{memgraph}
+	if role.coreDumps.enabled && role.coreDumps.uploader != nil {
+		containers = append(containers, uploaderSidecar(role.coreDumps))
+	}
+	return containers
+}
+
+// podInitContainers is empty unless the role asked the operator to configure
+// the node's core pattern.
+func podInitContainers(spec normalizedSpec, role normalizedRole) []corev1.Container {
+	if !role.coreDumps.enabled || !role.coreDumps.configurePattern {
+		return nil
+	}
+	return []corev1.Container{corePatternInitContainer(spec)}
 }
 
 func statefulSet(
@@ -225,7 +350,6 @@ func statefulSet(
 	replicas int32,
 	container corev1.Container,
 ) *appsv1.StatefulSet {
-	storage := role.storage
 	return &appsv1.StatefulSet{
 		// TypeMeta is set explicitly because the controller server-side
 		// applies builder output, and apply patches must carry the GVK.
@@ -249,13 +373,14 @@ func statefulSet(
 				WhenDeleted: retentionType(spec.retentionPolicy),
 				WhenScaled:  appsv1.RetainPersistentVolumeClaimRetentionPolicyType,
 			},
-			VolumeClaimTemplates: volumeClaimTemplates(storage),
+			VolumeClaimTemplates: volumeClaimTemplates(role),
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: labels(cluster, component, role.podLabels),
 				},
 				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{container},
+					InitContainers: podInitContainers(spec, role),
+					Containers:     podContainers(container, role),
 					SecurityContext: &corev1.PodSecurityContext{
 						RunAsUser:      ptr.To(memgraphUserID),
 						RunAsGroup:     ptr.To(memgraphGroupID),

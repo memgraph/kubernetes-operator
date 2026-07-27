@@ -115,6 +115,7 @@ type normalizedPorts struct {
 // normalizedRole is everything the builders need that is configured per role.
 type normalizedRole struct {
 	storage           normalizedStorage
+	coreDumps         normalizedCoreDumps
 	startupProbe      normalizedProbe
 	readinessProbe    normalizedProbe
 	livenessProbe     normalizedProbe
@@ -124,6 +125,18 @@ type normalizedRole struct {
 	serviceLabels     map[string]string
 	env               []corev1.EnvVar
 	extraArgs         []string
+}
+
+// normalizedCoreDumps is one role's core dump configuration with every optional
+// field resolved to its CRD schema default. Everything hangs off enabled: with
+// it false the rest is unused, and no claim, mount, init container or sidecar
+// reaches the role's pods.
+type normalizedCoreDumps struct {
+	enabled          bool
+	size             resource.Quantity
+	class            *string
+	configurePattern bool
+	uploader         *memgraphcomv1alpha1.CoreDumpsUploaderSpec
 }
 
 // normalizedProbe is one probe's timings; the probe type is always a TCP-socket
@@ -164,6 +177,7 @@ func normalize(spec memgraphcomv1alpha1.MemgraphClusterSpec) normalizedSpec {
 		retentionPolicy: spec.Storage.RetentionPolicy,
 		coordinatorRole: normalizeRole(roleSpec{
 			storage:   spec.Storage.Coordinators,
+			coreDumps: normalizeCoreDumps(spec.CoreDumps, spec.CoreDumps.Coordinators),
 			probes:    spec.Probes.Coordinators,
 			resources: spec.Resources.Coordinators,
 			labels:    spec.Labels.Coordinators,
@@ -174,6 +188,7 @@ func normalize(spec memgraphcomv1alpha1.MemgraphClusterSpec) normalizedSpec {
 		}),
 		dataRole: normalizeRole(roleSpec{
 			storage:   spec.Storage.Data,
+			coreDumps: normalizeCoreDumps(spec.CoreDumps, spec.CoreDumps.Data),
 			probes:    spec.Probes.Data,
 			resources: spec.Resources.Data,
 			labels:    spec.Labels.Data,
@@ -217,7 +232,11 @@ func normalize(spec memgraphcomv1alpha1.MemgraphClusterSpec) normalizedSpec {
 // CR, so normalization is written once and both roles resolve their defaults
 // the same way.
 type roleSpec struct {
-	storage   memgraphcomv1alpha1.RoleStorageSpec
+	storage memgraphcomv1alpha1.RoleStorageSpec
+	// coreDumps arrives already normalized: unlike the other entries it is
+	// folded from two spec blocks (the cluster-wide settings and the role's
+	// own), which the caller does before handing it over.
+	coreDumps normalizedCoreDumps
 	probes    memgraphcomv1alpha1.RoleProbesSpec
 	resources corev1.ResourceRequirements
 	labels    memgraphcomv1alpha1.RoleLabelsSpec
@@ -232,6 +251,7 @@ type roleSpec struct {
 func normalizeRole(role roleSpec) normalizedRole {
 	return normalizedRole{
 		storage:           normalizeStorage(role.storage),
+		coreDumps:         role.coreDumps,
 		startupProbe:      normalizeProbe(role.probes.StartupProbe, role.startupFailureThreshold),
 		readinessProbe:    normalizeProbe(role.probes.ReadinessProbe, memgraphcomv1alpha1.DefaultProbeFailureThreshold),
 		livenessProbe:     normalizeProbe(role.probes.LivenessProbe, memgraphcomv1alpha1.DefaultProbeFailureThreshold),
@@ -312,6 +332,30 @@ func normalizeStorage(spec memgraphcomv1alpha1.RoleStorageSpec) normalizedStorag
 	}
 	if n.logAccessMode == "" {
 		n.logAccessMode = memgraphcomv1alpha1.DefaultStorageAccessMode
+	}
+	return n
+}
+
+// normalizeCoreDumps folds the cluster-wide core dump settings together with
+// the role's own into the single view the builders work from. Nothing is
+// resolved eagerly for a disabled role beyond its defaults: the builders check
+// enabled before reading the rest.
+func normalizeCoreDumps(
+	shared memgraphcomv1alpha1.CoreDumpsSpec,
+	role memgraphcomv1alpha1.RoleCoreDumpsSpec,
+) normalizedCoreDumps {
+	n := normalizedCoreDumps{
+		enabled:          role.Enabled,
+		size:             resource.MustParse(memgraphcomv1alpha1.DefaultCoreDumpsSize),
+		class:            shared.StorageClassName,
+		configurePattern: memgraphcomv1alpha1.DefaultConfigureCorePattern,
+		uploader:         shared.Uploader,
+	}
+	if role.Size != nil {
+		n.size = *role.Size
+	}
+	if shared.ConfigureCorePattern != nil {
+		n.configurePattern = *shared.ConfigureCorePattern
 	}
 	return n
 }

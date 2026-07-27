@@ -48,6 +48,24 @@ func defaultRoleStorage() memgraphcomv1alpha1.RoleStorageSpec {
 	}
 }
 
+// defaultRoleCoreDumps is one role's core dumps block as the CRD schema
+// defaults materialize it: off, but with the size it would ask for.
+func defaultRoleCoreDumps() memgraphcomv1alpha1.RoleCoreDumpsSpec {
+	return memgraphcomv1alpha1.RoleCoreDumpsSpec{
+		Size: ptr.To(resource.MustParse(memgraphcomv1alpha1.DefaultCoreDumpsSize)),
+	}
+}
+
+// defaultCoreDumps is the whole core dumps block as the CRD schema defaults
+// materialize it.
+func defaultCoreDumps() memgraphcomv1alpha1.CoreDumpsSpec {
+	return memgraphcomv1alpha1.CoreDumpsSpec{
+		Coordinators:         defaultRoleCoreDumps(),
+		Data:                 defaultRoleCoreDumps(),
+		ConfigureCorePattern: ptr.To(memgraphcomv1alpha1.DefaultConfigureCorePattern),
+	}
+}
+
 // defaultPorts are the internal ports as the CRD schema defaults materialize
 // them.
 func defaultPorts() memgraphcomv1alpha1.PortsSpec {
@@ -133,6 +151,7 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 					Coordinators:    defaultRoleStorage(),
 					Data:            defaultRoleStorage(),
 				},
+				CoreDumps:     defaultCoreDumps(),
 				ClusterDomain: memgraphcomv1alpha1.DefaultClusterDomain,
 				Ports:         defaultPorts(),
 				// Probes, resources, labels and the env/args passthrough have no
@@ -258,6 +277,31 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 			Expect(stored.Spec.Ports.CoordinatorPort).To(HaveValue(Equal(memgraphcomv1alpha1.DefaultCoordinatorPort)))
 		})
 
+		It("should accept core dumps with an uploader and default what it leaves out", func() {
+			stored := createAccepted("valid-core-dumps-uploader", memgraphcomv1alpha1.MemgraphClusterSpec{
+				CoreDumps: memgraphcomv1alpha1.CoreDumpsSpec{
+					Data: memgraphcomv1alpha1.RoleCoreDumpsSpec{
+						Enabled: true,
+						Size:    ptr.To(resource.MustParse("200Gi")),
+					},
+					Uploader: &memgraphcomv1alpha1.CoreDumpsUploaderSpec{
+						Image:          uploaderImage,
+						Env:            []memgraphcomv1alpha1.EnvVar{{Name: "S3_BUCKET", Value: "dumps"}},
+						EnvFromSecrets: []string{"aws-s3-credentials"},
+					},
+				},
+			})
+
+			dumps := stored.Spec.CoreDumps
+			Expect(dumps.Data.Enabled).To(BeTrue())
+			Expect(dumps.Data.Size).To(HaveValue(Equal(resource.MustParse("200Gi"))))
+			Expect(dumps.ConfigureCorePattern).To(HaveValue(BeTrue()))
+			Expect(dumps.Uploader.PullPolicy).To(Equal(memgraphcomv1alpha1.DefaultImagePullPolicy))
+			// Whether a role collects at all, and how much room it needs, stays
+			// its own decision: the coordinators asked for neither.
+			Expect(dumps.Coordinators).To(Equal(defaultRoleCoreDumps()))
+		})
+
 		It("should accept a registry host carrying a port", func() {
 			stored := createAccepted("valid-registry-port", memgraphcomv1alpha1.MemgraphClusterSpec{
 				Image: memgraphcomv1alpha1.ImageSpec{Repository: "registry.example.com:5000/memgraph"},
@@ -341,6 +385,37 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 			Entry("a cluster domain that is not a DNS name", "invalid-cluster-domain",
 				memgraphcomv1alpha1.MemgraphClusterSpec{ClusterDomain: "Cluster_Local"},
 				"in body should match"),
+			// An uploader with no volume to read would poll an empty directory
+			// forever, so the dependency the Helm chart leaves implicit between
+			// its two blocks is enforced here.
+			Entry("an uploader with no role collecting dumps", "invalid-uploader-without-dumps",
+				memgraphcomv1alpha1.MemgraphClusterSpec{
+					CoreDumps: memgraphcomv1alpha1.CoreDumpsSpec{
+						Uploader: &memgraphcomv1alpha1.CoreDumpsUploaderSpec{Image: uploaderImage},
+					},
+				},
+				"uploader requires core dumps enabled for at least one role"),
+			Entry("an uploader without an image", "invalid-uploader-no-image",
+				memgraphcomv1alpha1.MemgraphClusterSpec{
+					CoreDumps: memgraphcomv1alpha1.CoreDumpsSpec{
+						Data:     memgraphcomv1alpha1.RoleCoreDumpsSpec{Enabled: true},
+						Uploader: &memgraphcomv1alpha1.CoreDumpsUploaderSpec{},
+					},
+				},
+				"should be at least 1 chars long"),
+			Entry("an uploader shadowing the core dumps path variable", "invalid-uploader-env",
+				memgraphcomv1alpha1.MemgraphClusterSpec{
+					CoreDumps: memgraphcomv1alpha1.CoreDumpsSpec{
+						Coordinators: memgraphcomv1alpha1.RoleCoreDumpsSpec{Enabled: true},
+						Uploader: &memgraphcomv1alpha1.CoreDumpsUploaderSpec{
+							Image: uploaderImage,
+							Env: []memgraphcomv1alpha1.EnvVar{{
+								Name: memgraphcomv1alpha1.EnvCoreDumpsDir, Value: "/elsewhere",
+							}},
+						},
+					},
+				},
+				"env must not set CORE_DUMPS_DIR"),
 			Entry("an env var name that is not a shell identifier", "invalid-env-name",
 				memgraphcomv1alpha1.MemgraphClusterSpec{
 					ExtraEnv: memgraphcomv1alpha1.ExtraEnvSpec{

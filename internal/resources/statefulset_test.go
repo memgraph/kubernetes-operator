@@ -53,6 +53,12 @@ const (
 	statefulSetKind = "StatefulSet"
 	serviceKind     = "Service"
 
+	tmpVolume       = "tmp"
+	shell           = "/bin/sh"
+	defaultImageRef = "docker.io/memgraph/memgraph:3.12.0-relwithdebinfo"
+	coreDumpsVolume = "core-dumps"
+	coreDumpsPath   = "/var/core/memgraph"
+
 	// The operator's identity labels, which custom labels may never override.
 	nameLabel      = "app.kubernetes.io/name"
 	instanceLabel  = "app.kubernetes.io/instance"
@@ -235,7 +241,7 @@ func expectedVolumeMounts() []corev1.VolumeMount {
 	return []corev1.VolumeMount{
 		{Name: "lib-storage", MountPath: "/var/lib/memgraph"},
 		{Name: "log-storage", MountPath: "/var/log/memgraph"},
-		{Name: "tmp", MountPath: "/tmp"},
+		{Name: tmpVolume, MountPath: "/tmp"},
 	}
 }
 
@@ -249,14 +255,14 @@ func expectedVolumeMountsWithoutLog() []corev1.VolumeMount {
 
 // expectedCommand wraps a coordinator start script the way the builder does.
 func expectedCommand(script string) []string {
-	return []string{"/bin/sh", "-ec", script}
+	return []string{shell, "-ec", script}
 }
 
 // expectedVolumes covers only the ephemeral scratch volume: lib and log
 // storage are provisioned through volumeClaimTemplates.
 func expectedVolumes() []corev1.Volume {
 	return []corev1.Volume{
-		{Name: "tmp", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+		{Name: tmpVolume, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
 	}
 }
 
@@ -352,7 +358,7 @@ func TestCoordinatorStatefulSetDefaults(t *testing.T) {
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{{
 						Name:            memgraphName,
-						Image:           "docker.io/memgraph/memgraph:3.12.0-relwithdebinfo",
+						Image:           defaultImageRef,
 						ImagePullPolicy: corev1.PullIfNotPresent,
 						Command:         expectedCommand(expectedCoordinatorScript),
 						Env: append([]corev1.EnvVar{{
@@ -406,7 +412,7 @@ func TestDataStatefulSetDefaults(t *testing.T) {
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{{
 						Name:            memgraphName,
-						Image:           "docker.io/memgraph/memgraph:3.12.0-relwithdebinfo",
+						Image:           defaultImageRef,
 						ImagePullPolicy: corev1.PullIfNotPresent,
 						Args: []string{
 							"--bolt-port=7687",
@@ -591,6 +597,194 @@ exec /usr/lib/memgraph/memgraph \
 			t.Errorf("args = %v, want the log file the role still has storage for", container.Args)
 		}
 	})
+}
+
+// TestStatefulSetCoreDumpsDisabledByDefault pins that a spec which never
+// mentions core dumps carries no trace of the feature: no claim, no mount, no
+// init container, no sidecar.
+func TestStatefulSetCoreDumpsDisabledByDefault(t *testing.T) {
+	for _, sts := range []*appsv1.StatefulSet{
+		resources.CoordinatorStatefulSet(minimalCluster()),
+		resources.DataStatefulSet(minimalCluster()),
+	} {
+		t.Run(sts.Name, func(t *testing.T) {
+			for _, claim := range sts.Spec.VolumeClaimTemplates {
+				if claim.Name == coreDumpsVolume {
+					t.Errorf("claim %s exists without core dumps being enabled", claim.Name)
+				}
+			}
+			podSpec := sts.Spec.Template.Spec
+			if len(podSpec.InitContainers) != 0 {
+				t.Errorf("init containers = %v, want none", podSpec.InitContainers)
+			}
+			if len(podSpec.Containers) != 1 {
+				t.Errorf("containers = %d, want only Memgraph's", len(podSpec.Containers))
+			}
+		})
+	}
+}
+
+// TestStatefulSetCoreDumps covers the enabled path end to end for one role
+// while the other stays untouched: the claim, the Memgraph container's mount,
+// and the privileged init container that points the node's kernel at it.
+func TestStatefulSetCoreDumps(t *testing.T) {
+	cluster := minimalCluster()
+	cluster.Spec.CoreDumps = memgraphcomv1alpha1.CoreDumpsSpec{
+		Data: memgraphcomv1alpha1.RoleCoreDumpsSpec{
+			Enabled: true,
+			Size:    ptr.To(resource.MustParse("20Gi")),
+		},
+		StorageClassName: ptr.To("cheap-hdd"),
+	}
+
+	t.Run(dataComponent, func(t *testing.T) {
+		sts := resources.DataStatefulSet(cluster)
+
+		wantClaims := append(expectedClaimTemplates(),
+			expectedClaimTemplate(coreDumpsVolume, "20Gi", corev1.ReadWriteOnce, ptr.To("cheap-hdd")))
+		if diff := cmp.Diff(wantClaims, sts.Spec.VolumeClaimTemplates); diff != "" {
+			t.Errorf("volume claim templates mismatch (-want +got):\n%s", diff)
+		}
+
+		podSpec := sts.Spec.Template.Spec
+		wantMounts := append(expectedVolumeMounts(),
+			corev1.VolumeMount{Name: coreDumpsVolume, MountPath: coreDumpsPath})
+		if diff := cmp.Diff(wantMounts, podSpec.Containers[0].VolumeMounts); diff != "" {
+			t.Errorf("volume mounts mismatch (-want +got):\n%s", diff)
+		}
+
+		// The init container has to be privileged root to write a kernel sysctl,
+		// and it reuses the cluster's Memgraph image so nothing else is pulled.
+		wantInit := []corev1.Container{{
+			Name:            "init-core-pattern",
+			Image:           defaultImageRef,
+			ImagePullPolicy: corev1.PullIfNotPresent,
+			Command: expectedCommand(
+				"echo '/var/core/memgraph/core.%e.%p.%t.%s' | tee /proc/sys/kernel/core_pattern"),
+			SecurityContext: &corev1.SecurityContext{
+				Privileged:               ptr.To(true),
+				AllowPrivilegeEscalation: ptr.To(true),
+				ReadOnlyRootFilesystem:   ptr.To(true),
+				RunAsUser:                ptr.To(int64(0)),
+				RunAsNonRoot:             ptr.To(false),
+				SeccompProfile:           &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
+			},
+		}}
+		if diff := cmp.Diff(wantInit, podSpec.InitContainers); diff != "" {
+			t.Errorf("init containers mismatch (-want +got):\n%s", diff)
+		}
+		if len(podSpec.Containers) != 1 {
+			t.Errorf("containers = %d, want only Memgraph's without an uploader", len(podSpec.Containers))
+		}
+	})
+
+	// The knob is per role: coordinators asked for nothing and get nothing.
+	t.Run(coordinatorComponent, func(t *testing.T) {
+		sts := resources.CoordinatorStatefulSet(cluster)
+
+		if diff := cmp.Diff(expectedClaimTemplates(), sts.Spec.VolumeClaimTemplates); diff != "" {
+			t.Errorf("volume claim templates mismatch (-want +got):\n%s", diff)
+		}
+		if got := sts.Spec.Template.Spec.InitContainers; len(got) != 0 {
+			t.Errorf("init containers = %v, want none", got)
+		}
+	})
+}
+
+// TestStatefulSetCoreDumpsWithoutCorePattern covers the restricted-namespace
+// path: the volume is provisioned and mounted, but the operator runs no
+// privileged container and trusts the node's own core pattern.
+func TestStatefulSetCoreDumpsWithoutCorePattern(t *testing.T) {
+	cluster := minimalCluster()
+	cluster.Spec.CoreDumps = memgraphcomv1alpha1.CoreDumpsSpec{
+		Data:                 memgraphcomv1alpha1.RoleCoreDumpsSpec{Enabled: true},
+		ConfigureCorePattern: ptr.To(false),
+	}
+
+	sts := resources.DataStatefulSet(cluster)
+	podSpec := sts.Spec.Template.Spec
+
+	if got := podSpec.InitContainers; len(got) != 0 {
+		t.Errorf("init containers = %v, want none when the node owns the core pattern", got)
+	}
+	wantMount := corev1.VolumeMount{Name: coreDumpsVolume, MountPath: coreDumpsPath}
+	if got := podSpec.Containers[0].VolumeMounts; !slices.Contains(got, wantMount) {
+		t.Errorf("volume mounts = %v, want the core dumps volume mounted anyway", got)
+	}
+	claims := sts.Spec.VolumeClaimTemplates
+	if diff := cmp.Diff(
+		expectedClaimTemplate(coreDumpsVolume, "10Gi", corev1.ReadWriteOnce, nil),
+		claims[len(claims)-1],
+	); diff != "" {
+		t.Errorf("core dumps claim mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestStatefulSetCoreDumpsUploader pins the wiring the operator owns on behalf
+// of the sidecar: a read-only view of the dumps, the path as CORE_DUMPS_DIR, a
+// writable /tmp, credentials by Secret reference, and the same locked-down
+// security context the Memgraph container runs under.
+func TestStatefulSetCoreDumpsUploader(t *testing.T) {
+	cluster := minimalCluster()
+	// The uploader is declared once for the cluster; only the role that
+	// collects dumps gets it.
+	cluster.Spec.CoreDumps = memgraphcomv1alpha1.CoreDumpsSpec{
+		Data: memgraphcomv1alpha1.RoleCoreDumpsSpec{Enabled: true},
+		Uploader: &memgraphcomv1alpha1.CoreDumpsUploaderSpec{
+			Image:          "amazon/aws-cli:2.33.28",
+			Command:        []string{shell, "-c"},
+			Args:           []string{"upload-loop"},
+			Env:            []memgraphcomv1alpha1.EnvVar{{Name: "S3_BUCKET", Value: "dumps"}},
+			EnvFromSecrets: []string{"aws-s3-credentials"},
+			Resources: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("64Mi")},
+			},
+		},
+	}
+
+	containers := resources.DataStatefulSet(cluster).Spec.Template.Spec.Containers
+	if len(containers) != 2 {
+		t.Fatalf("containers = %d, want Memgraph plus the uploader", len(containers))
+	}
+	if containers[0].Name != memgraphName {
+		t.Errorf("first container = %q, want Memgraph to stay first", containers[0].Name)
+	}
+
+	want := corev1.Container{
+		Name:            "core-dumps-uploader",
+		Image:           "amazon/aws-cli:2.33.28",
+		ImagePullPolicy: corev1.PullIfNotPresent,
+		Command:         []string{shell, "-c"},
+		Args:            []string{"upload-loop"},
+		Env: []corev1.EnvVar{
+			{Name: "CORE_DUMPS_DIR", Value: coreDumpsPath},
+			{Name: "S3_BUCKET", Value: "dumps"},
+		},
+		EnvFrom: []corev1.EnvFromSource{{
+			SecretRef: &corev1.SecretEnvSource{
+				LocalObjectReference: corev1.LocalObjectReference{Name: "aws-s3-credentials"},
+			},
+		}},
+		Resources: corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("64Mi")},
+		},
+		VolumeMounts: []corev1.VolumeMount{
+			{Name: coreDumpsVolume, MountPath: coreDumpsPath, ReadOnly: true},
+			{Name: tmpVolume, MountPath: "/tmp"},
+		},
+		SecurityContext: expectedContainerSecurityContext(),
+	}
+	if diff := cmp.Diff(want, containers[1]); diff != "" {
+		t.Errorf("uploader sidecar mismatch (-want +got):\n%s", diff)
+	}
+
+	// Coordinators collect no dumps, so the shared uploader has nothing to read
+	// in their pods and must not be injected there.
+	coordinators := resources.CoordinatorStatefulSet(cluster).Spec.Template.Spec.Containers
+	if len(coordinators) != 1 {
+		t.Errorf("coordinator containers = %d, want only Memgraph's: the role collects no dumps",
+			len(coordinators))
+	}
 }
 
 // TestStatefulSetRetentionPolicy pins the mapping from the spec's retention

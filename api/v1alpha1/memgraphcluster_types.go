@@ -41,6 +41,9 @@ const (
 	DefaultLicenseSecretKey      = "MEMGRAPH_ENTERPRISE_LICENSE"
 	DefaultOrganizationSecretKey = "MEMGRAPH_ORGANIZATION_NAME"
 
+	DefaultCoreDumpsSize        = "10Gi"
+	DefaultConfigureCorePattern = true
+
 	DefaultLibPVCSize            = "1Gi"
 	DefaultLogPVCSize            = "1Gi"
 	DefaultCreateLogStorageClaim = true
@@ -86,6 +89,11 @@ const (
 	// EnvPodName carries the pod's own name, from which a coordinator derives
 	// its ordinal-dependent identity at startup.
 	EnvPodName = "POD_NAME"
+
+	// EnvCoreDumpsDir carries the core dumps mount path into the uploader
+	// sidecar, which therefore may not set it itself. It is the only variable
+	// the operator sets on a container other than Memgraph's.
+	EnvCoreDumpsDir = "CORE_DUMPS_DIR"
 )
 
 // StorageRetentionPolicy decides what happens to the cluster's
@@ -312,6 +320,152 @@ type StorageSpec struct {
 	// +kubebuilder:default={}
 	// +optional
 	Data RoleStorageSpec `json:"data,omitzero"`
+}
+
+// RoleCoreDumpsSpec is the part of core dump collection that genuinely differs
+// between the roles: whether they collect at all, and how much room a dump
+// needs. Everything else — the storage class, the kernel setup, the uploader —
+// is the same decision for both and lives on CoreDumpsSpec.
+type RoleCoreDumpsSpec struct {
+	// enabled provisions a core dumps volume for every pod of the role and
+	// mounts it at /var/core/memgraph. It is off by default: a crashing Memgraph
+	// is not the normal case, and the volume costs a third
+	// PersistentVolumeClaim per pod.
+	// +kubebuilder:default=false
+	// +optional
+	Enabled bool `json:"enabled,omitempty"`
+
+	// size is the requested size of the role's core dumps claim. A dump is
+	// roughly as large as the crashing process' resident memory, which is why
+	// this is per role: a data instance holds the graph, a coordinator holds
+	// Raft state. Size it against the role's memory limit, not its data.
+	// +kubebuilder:default="10Gi"
+	// +optional
+	Size *resource.Quantity `json:"size,omitempty"`
+}
+
+// CoreDumpsUploaderSpec is a sidecar that reads the core dumps volume. It is
+// deliberately not a full core/v1 Container: the narrow shape keeps the
+// operator's pod security posture non-negotiable (no privileged sidecar, no
+// extra volume mounts, no valueFrom smuggling secret material into the CR) and
+// keeps the CRD small enough to apply client-side, which one inlined Container
+// per role does not.
+//
+// +kubebuilder:validation:XValidation:rule="!has(self.env) || self.env.all(e, e.name != 'CORE_DUMPS_DIR')",message="env must not set CORE_DUMPS_DIR: the operator passes the core dumps mount path in it"
+type CoreDumpsUploaderSpec struct {
+	// image is the full sidecar image reference including its tag, for example
+	// "amazon/aws-cli:2.33.28". Unlike the Memgraph image the operator has no
+	// default for it, so a tag belongs here rather than in a separate field.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=383
+	Image string `json:"image"`
+
+	// pullPolicy is the image pull policy of the sidecar.
+	// +kubebuilder:validation:Enum=Always;IfNotPresent;Never
+	// +kubebuilder:default=IfNotPresent
+	// +optional
+	PullPolicy corev1.PullPolicy `json:"pullPolicy,omitempty"`
+
+	// command overrides the image's entrypoint.
+	// +optional
+	Command []string `json:"command,omitempty"`
+
+	// args are the arguments passed to the sidecar's entrypoint.
+	// +optional
+	Args []string `json:"args,omitempty"`
+
+	// env passes literal, non-secret environment variables to the sidecar —
+	// bucket names, prefixes, regions. Credentials belong in envFromSecrets.
+	// +listType=map
+	// +listMapKey=name
+	// +optional
+	Env []EnvVar `json:"env,omitempty"`
+
+	// envFromSecrets names Secrets in the cluster's namespace whose keys become
+	// environment variables of the sidecar. This is how credentials reach it:
+	// by reference, so no secret material ever appears in this resource.
+	// +listType=set
+	// +optional
+	EnvFromSecrets []string `json:"envFromSecrets,omitempty"`
+
+	// resources sets the sidecar's compute resources. Leave it unset and the
+	// sidecar schedules without requests or limits.
+	// +optional
+	Resources corev1.ResourceRequirements `json:"resources,omitzero"`
+}
+
+// CoreDumpsSpec configures core dump collection: what the two roles decide for
+// themselves below, and above that the settings that are one decision for the
+// whole cluster — where the volumes come from, whether the operator configures
+// the node, and what ships the dumps away.
+//
+// The memgraph-high-availability Helm chart spreads the same feature across
+// storage.<role>.coreDumps* and a separate top-level coreDumpUploader block
+// that silently does nothing unless the per-role claim is enabled too. Here the
+// dependency is structural: an uploader with no role collecting dumps is
+// rejected, not ignored.
+//
+// Dumps are for debugging a crash, not for the cluster to run: nothing in the
+// operator reads them, and the claims follow the same storage.retentionPolicy
+// as the rest of the cluster's volumes.
+//
+// The has() guards keep the rule evaluable against the block's empty object
+// default, which the API server checks before nested field defaults apply.
+//
+// +kubebuilder:validation:XValidation:rule="!has(self.uploader) || (has(self.coordinators) && has(self.coordinators.enabled) && self.coordinators.enabled) || (has(self.data) && has(self.data.enabled) && self.data.enabled)",message="uploader requires core dumps enabled for at least one role — there would be no volume for it to read"
+type CoreDumpsSpec struct {
+	// coordinators decides whether every coordinator pod collects dumps, and
+	// how much room it gets for them.
+	// +kubebuilder:default={}
+	// +optional
+	Coordinators RoleCoreDumpsSpec `json:"coordinators,omitzero"`
+
+	// data decides whether every data instance pod collects dumps, and how much
+	// room it gets for them.
+	// +kubebuilder:default={}
+	// +optional
+	Data RoleCoreDumpsSpec `json:"data,omitzero"`
+
+	// storageClassName is the StorageClass backing every core dumps claim of
+	// this cluster. Leave it unset to use the cluster's default StorageClass;
+	// set it to the empty string to disable dynamic provisioning and bind
+	// pre-created PersistentVolumes.
+	// +kubebuilder:validation:MaxLength=253
+	// +optional
+	StorageClassName *string `json:"storageClassName,omitempty"`
+
+	// configureCorePattern lets the operator point the kernel at
+	// /var/core/memgraph by running a privileged init container that writes
+	// /proc/sys/kernel/core_pattern. It uses the cluster's own Memgraph image,
+	// so no second image has to be pulled.
+	//
+	// It is cluster-wide rather than per role for two reasons: core_pattern is a
+	// property of the **node**, so it applies to every process that crashes
+	// there regardless of which role asked for it, and what really decides this
+	// is whether the namespace tolerates a privileged container at all.
+	// PodSecurity "restricted" does not — set this to false there, or wherever
+	// the platform manages core_pattern itself, and the operator only provisions
+	// and mounts the volumes, trusting the node to already point at them.
+	// +kubebuilder:default=true
+	// +optional
+	ConfigureCorePattern *bool `json:"configureCorePattern,omitempty"`
+
+	// uploader is an optional sidecar that ships collected dumps off the volume
+	// — to object storage, a debug host, wherever. Any image and destination
+	// works, so no provider or credential vocabulary has to live in this API:
+	// the operator mounts the core dumps volume into the sidecar read-only,
+	// passes the directory as CORE_DUMPS_DIR, and gives it the same locked-down
+	// security context as the Memgraph container. See
+	// config/samples/v1alpha1_memgraphcluster.yaml for an S3 uploader
+	// equivalent to the Helm chart's.
+	//
+	// One definition serves both roles — the destination and credentials do not
+	// differ between them, and the pods are already distinguishable by hostname
+	// — and it joins the pods of every role that collects dumps. It counts
+	// toward pod readiness, so a sidecar that crash-loops keeps those roles from
+	// ever being registered.
+	// +optional
+	Uploader *CoreDumpsUploaderSpec `json:"uploader,omitempty"`
 }
 
 // PortsSpec configures the internal ports Memgraph listens on. The knob names
@@ -561,6 +715,12 @@ type MemgraphClusterSpec struct {
 	// +kubebuilder:default={}
 	// +optional
 	Storage StorageSpec `json:"storage,omitzero"`
+
+	// coreDumps optionally collects crash dumps of either role onto a volume of
+	// its own.
+	// +kubebuilder:default={}
+	// +optional
+	CoreDumps CoreDumpsSpec `json:"coreDumps,omitzero"`
 
 	// clusterDomain is the Kubernetes cluster domain the advertised FQDN
 	// addresses are built from: <pod>.<service>.<namespace>.svc.<clusterDomain>.

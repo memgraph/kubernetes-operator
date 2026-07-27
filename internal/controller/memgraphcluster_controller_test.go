@@ -49,6 +49,7 @@ const (
 	customImageTag         = "3.13.0"
 	customSecretName       = "my-license"
 	customStorageClassName = "fast-ssd"
+	uploaderImage          = "amazon/aws-cli:2.33.28"
 )
 
 // libClaim returns the lib storage claim template of a provisioned

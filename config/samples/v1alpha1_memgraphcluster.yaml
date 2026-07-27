@@ -58,6 +58,59 @@ spec:
       logPVCSize: 1Gi
       logStorageAccessMode: ReadWriteOnce
       # logStorageClassName: standard
+  # Core dumps are off by default. Enabling them for a role provisions a third
+  # claim per pod, mounts it at /var/core/memgraph — a fixed path, since only
+  # the kernel writes it and only the uploader reads it, and the operator points
+  # both at it — and, unless configureCorePattern is false, runs a privileged
+  # init container that sets the node's core pattern. Two things that catch
+  # people: core_pattern is a property of the node, so it applies to everything
+  # that crashes there, and the privileged init container is rejected in a
+  # namespace running PodSecurity "restricted". Set configureCorePattern: false
+  # there and have the platform point core_pattern at that directory itself.
+  coreDumps:
+    # Per role, because only these two answers differ between them: whether the
+    # role collects dumps at all, and how much room one needs — a dump is about
+    # as large as the crashing process' memory, and a data instance holds the
+    # graph while a coordinator holds Raft state.
+    coordinators:
+      enabled: false
+      size: 10Gi
+    data:
+      enabled: false
+      size: 10Gi
+    # The rest is one decision for the cluster, so it is stated once.
+    # storageClassName: standard
+    configureCorePattern: true
+    # An optional sidecar that ships the dumps somewhere durable, joining the
+    # pods of every role that collects them. The operator mounts the dumps into
+    # it read-only, passes the directory as CORE_DUMPS_DIR, mounts a writable
+    # /tmp, and runs it with the same locked-down security context as Memgraph
+    # (non-root uid 101, read-only root filesystem, no capabilities) — so pick an
+    # image that tolerates that. Credentials come from envFromSecrets, never from
+    # this resource. This is the operator's equivalent of the HA chart's
+    # coreDumpUploader, with the destination left entirely to you:
+    #
+    # uploader:
+    #   image: amazon/aws-cli:2.33.28
+    #   envFromSecrets:
+    #     - aws-s3-credentials      # AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY
+    #   env:
+    #     - name: HOME              # aws-cli needs a writable HOME
+    #       value: /tmp
+    #     - name: S3_TARGET
+    #       value: s3://memgraph-ha-cluster/core-dumps
+    #     - name: AWS_REGION
+    #       value: eu-west-1
+    #   command: [/bin/sh, -c]
+    #   args:
+    #     - |
+    #       while true; do
+    #         aws s3 sync "$CORE_DUMPS_DIR" "$S3_TARGET/$HOSTNAME" --region "$AWS_REGION"
+    #         sleep 30
+    #       done
+    #   resources:
+    #     requests:
+    #       memory: 64Mi
   # The cluster domain and the internal ports are part of every advertised
   # address the operator registers with the cluster, so they reach the
   # container ports, the Services and the registration commands together.

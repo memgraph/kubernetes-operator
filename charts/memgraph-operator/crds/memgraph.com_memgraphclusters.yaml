@@ -88,6 +88,246 @@ spec:
                 - message: 'coordinators is immutable: changing the coordinator count
                     of an existing MemgraphCluster is not supported in v1alpha1'
                   rule: self == oldSelf
+              coreDumps:
+                default: {}
+                description: |-
+                  coreDumps optionally collects crash dumps of either role onto a volume of
+                  its own.
+                properties:
+                  configureCorePattern:
+                    default: true
+                    description: |-
+                      configureCorePattern lets the operator point the kernel at
+                      /var/core/memgraph by running a privileged init container that writes
+                      /proc/sys/kernel/core_pattern. It uses the cluster's own Memgraph image,
+                      so no second image has to be pulled.
+
+                      It is cluster-wide rather than per role for two reasons: core_pattern is a
+                      property of the **node**, so it applies to every process that crashes
+                      there regardless of which role asked for it, and what really decides this
+                      is whether the namespace tolerates a privileged container at all.
+                      PodSecurity "restricted" does not — set this to false there, or wherever
+                      the platform manages core_pattern itself, and the operator only provisions
+                      and mounts the volumes, trusting the node to already point at them.
+                    type: boolean
+                  coordinators:
+                    default: {}
+                    description: |-
+                      coordinators decides whether every coordinator pod collects dumps, and
+                      how much room it gets for them.
+                    properties:
+                      enabled:
+                        default: false
+                        description: |-
+                          enabled provisions a core dumps volume for every pod of the role and
+                          mounts it at /var/core/memgraph. It is off by default: a crashing Memgraph
+                          is not the normal case, and the volume costs a third
+                          PersistentVolumeClaim per pod.
+                        type: boolean
+                      size:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        default: 10Gi
+                        description: |-
+                          size is the requested size of the role's core dumps claim. A dump is
+                          roughly as large as the crashing process' resident memory, which is why
+                          this is per role: a data instance holds the graph, a coordinator holds
+                          Raft state. Size it against the role's memory limit, not its data.
+                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                        x-kubernetes-int-or-string: true
+                    type: object
+                  data:
+                    default: {}
+                    description: |-
+                      data decides whether every data instance pod collects dumps, and how much
+                      room it gets for them.
+                    properties:
+                      enabled:
+                        default: false
+                        description: |-
+                          enabled provisions a core dumps volume for every pod of the role and
+                          mounts it at /var/core/memgraph. It is off by default: a crashing Memgraph
+                          is not the normal case, and the volume costs a third
+                          PersistentVolumeClaim per pod.
+                        type: boolean
+                      size:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        default: 10Gi
+                        description: |-
+                          size is the requested size of the role's core dumps claim. A dump is
+                          roughly as large as the crashing process' resident memory, which is why
+                          this is per role: a data instance holds the graph, a coordinator holds
+                          Raft state. Size it against the role's memory limit, not its data.
+                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                        x-kubernetes-int-or-string: true
+                    type: object
+                  storageClassName:
+                    description: |-
+                      storageClassName is the StorageClass backing every core dumps claim of
+                      this cluster. Leave it unset to use the cluster's default StorageClass;
+                      set it to the empty string to disable dynamic provisioning and bind
+                      pre-created PersistentVolumes.
+                    maxLength: 253
+                    type: string
+                  uploader:
+                    description: |-
+                      uploader is an optional sidecar that ships collected dumps off the volume
+                      — to object storage, a debug host, wherever. Any image and destination
+                      works, so no provider or credential vocabulary has to live in this API:
+                      the operator mounts the core dumps volume into the sidecar read-only,
+                      passes the directory as CORE_DUMPS_DIR, and gives it the same locked-down
+                      security context as the Memgraph container. See
+                      config/samples/v1alpha1_memgraphcluster.yaml for an S3 uploader
+                      equivalent to the Helm chart's.
+
+                      One definition serves both roles — the destination and credentials do not
+                      differ between them, and the pods are already distinguishable by hostname
+                      — and it joins the pods of every role that collects dumps. It counts
+                      toward pod readiness, so a sidecar that crash-loops keeps those roles from
+                      ever being registered.
+                    properties:
+                      args:
+                        description: args are the arguments passed to the sidecar's
+                          entrypoint.
+                        items:
+                          type: string
+                        type: array
+                      command:
+                        description: command overrides the image's entrypoint.
+                        items:
+                          type: string
+                        type: array
+                      env:
+                        description: |-
+                          env passes literal, non-secret environment variables to the sidecar —
+                          bucket names, prefixes, regions. Credentials belong in envFromSecrets.
+                        items:
+                          description: |-
+                            EnvVar is one non-secret environment variable set on a role's Memgraph
+                            container. Only literal values are supported — there is deliberately no
+                            valueFrom — so secret material stays confined to the secrets block and the CR
+                            remains safe to commit.
+                          properties:
+                            name:
+                              description: name is the environment variable's name.
+                              maxLength: 253
+                              minLength: 1
+                              pattern: ^[A-Za-z_][A-Za-z0-9_]*$
+                              type: string
+                            value:
+                              description: value is the literal, non-secret value.
+                              maxLength: 4096
+                              type: string
+                          required:
+                          - name
+                          type: object
+                        type: array
+                        x-kubernetes-list-map-keys:
+                        - name
+                        x-kubernetes-list-type: map
+                      envFromSecrets:
+                        description: |-
+                          envFromSecrets names Secrets in the cluster's namespace whose keys become
+                          environment variables of the sidecar. This is how credentials reach it:
+                          by reference, so no secret material ever appears in this resource.
+                        items:
+                          type: string
+                        type: array
+                        x-kubernetes-list-type: set
+                      image:
+                        description: |-
+                          image is the full sidecar image reference including its tag, for example
+                          "amazon/aws-cli:2.33.28". Unlike the Memgraph image the operator has no
+                          default for it, so a tag belongs here rather than in a separate field.
+                        maxLength: 383
+                        minLength: 1
+                        type: string
+                      pullPolicy:
+                        default: IfNotPresent
+                        description: pullPolicy is the image pull policy of the sidecar.
+                        enum:
+                        - Always
+                        - IfNotPresent
+                        - Never
+                        type: string
+                      resources:
+                        description: |-
+                          resources sets the sidecar's compute resources. Leave it unset and the
+                          sidecar schedules without requests or limits.
+                        properties:
+                          claims:
+                            description: |-
+                              Claims lists the names of resources, defined in spec.resourceClaims,
+                              that are used by this container.
+
+                              This field depends on the
+                              DynamicResourceAllocation feature gate.
+
+                              This field is immutable. It can only be set for containers.
+                            items:
+                              description: ResourceClaim references one entry in PodSpec.ResourceClaims.
+                              properties:
+                                name:
+                                  description: |-
+                                    Name must match the name of one entry in pod.spec.resourceClaims of
+                                    the Pod where this field is used. It makes that resource available
+                                    inside a container.
+                                  type: string
+                                request:
+                                  description: |-
+                                    Request is the name chosen for a request in the referenced claim.
+                                    If empty, everything from the claim is made available, otherwise
+                                    only the result of this request.
+                                  type: string
+                              required:
+                              - name
+                              type: object
+                            type: array
+                            x-kubernetes-list-map-keys:
+                            - name
+                            x-kubernetes-list-type: map
+                          limits:
+                            additionalProperties:
+                              anyOf:
+                              - type: integer
+                              - type: string
+                              pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                              x-kubernetes-int-or-string: true
+                            description: |-
+                              Limits describes the maximum amount of compute resources allowed.
+                              More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                            type: object
+                          requests:
+                            additionalProperties:
+                              anyOf:
+                              - type: integer
+                              - type: string
+                              pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                              x-kubernetes-int-or-string: true
+                            description: |-
+                              Requests describes the minimum amount of compute resources required.
+                              If Requests is omitted for a container, it defaults to Limits if that is explicitly specified,
+                              otherwise to an implementation-defined value. Requests cannot exceed Limits.
+                              More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                            type: object
+                        type: object
+                    required:
+                    - image
+                    type: object
+                    x-kubernetes-validations:
+                    - message: 'env must not set CORE_DUMPS_DIR: the operator passes
+                        the core dumps mount path in it'
+                      rule: '!has(self.env) || self.env.all(e, e.name != ''CORE_DUMPS_DIR'')'
+                type: object
+                x-kubernetes-validations:
+                - message: uploader requires core dumps enabled for at least one role
+                    — there would be no volume for it to read
+                  rule: '!has(self.uploader) || (has(self.coordinators) && has(self.coordinators.enabled)
+                    && self.coordinators.enabled) || (has(self.data) && has(self.data.enabled)
+                    && self.data.enabled)'
               dataInstances:
                 default: 2
                 description: |-
