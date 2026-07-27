@@ -26,33 +26,32 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"sigs.k8s.io/yaml"
 
+	memgraphcomv1alpha1 "github.com/memgraph/kubernetes-operator/api/v1alpha1"
 	"github.com/memgraph/kubernetes-operator/test/utils"
 )
 
-// The declared topology of the e2e cluster and the identities the operator
-// derives from it: coordinator ordinal N registers as coordinator_N+1, data
-// ordinal N as instance_N.
 const (
 	clusterNamespace = "memgraph-e2e"
-	clusterName      = "memgraph"
 
-	coordinatorCount  = 3
-	dataInstanceCount = 2
+	// exampleManifest is the quickstart manifest the README walks a newcomer
+	// through, applied here verbatim (only the namespace is supplied on the
+	// command line). Everything the suite needs to know about the cluster —
+	// its name, its topology, its image — is read out of the file below, so
+	// the example cannot drift from what CI proves works.
+	exampleManifest = "examples/minimal-cluster.yaml"
 
-	memgraphImageRepository = "docker.io/memgraph/memgraph"
-	memgraphImageTag        = "3.12.0"
-
-	// licenseSecretName and the env var names below follow the HA Helm chart's
-	// CI convention: repository secrets of the same names are exported into the
-	// job environment and materialize as one Kubernetes Secret the CR
-	// references.
-	licenseSecretName  = "memgraph-secrets"
+	// The env vars carrying the enterprise license into the suite follow the
+	// HA Helm chart's CI convention: repository secrets of these names are
+	// exported into the job environment and materialize as the one Kubernetes
+	// Secret the example references.
 	licenseEnvVar      = "MEMGRAPH_ENTERPRISE_LICENSE"
 	organizationEnvVar = "MEMGRAPH_ORGANIZATION_NAME"
 
@@ -61,9 +60,54 @@ const (
 	roleMain = "main"
 )
 
+// example is the parsed quickstart manifest and the source of truth for the
+// topology the specs assert on.
+var example = loadExample()
+
+// The declared topology of the e2e cluster, as the example declares it.
+var (
+	clusterName       = example.Name
+	coordinatorCount  = declaredCount("coordinators", example.Spec.Coordinators)
+	dataInstanceCount = declaredCount("dataInstances", example.Spec.DataInstances)
+
+	memgraphImage = example.Spec.Image.Repository + ":" + example.Spec.Image.Tag
+
+	licenseSecretName = example.Spec.Secrets.Name
+)
+
+// declaredCount reads a replica count the example must state outright: the
+// counts drive the assertions, and a count left to the CRD's default would
+// leave the suite asserting on a topology the file never declared.
+func declaredCount(field string, count *int32) int32 {
+	if count == nil {
+		panic(fmt.Sprintf("%s must declare spec.%s", exampleManifest, field))
+	}
+	return *count
+}
+
+// loadExample reads and decodes the quickstart manifest. Decoding is strict,
+// so a field the example misspells fails the suite instead of being silently
+// defaulted away by the API server.
+func loadExample() *memgraphcomv1alpha1.MemgraphCluster {
+	projectDir, err := utils.GetProjectDir()
+	if err != nil {
+		panic(fmt.Sprintf("locating the project directory: %v", err))
+	}
+	manifest, err := os.ReadFile(filepath.Join(projectDir, exampleManifest))
+	if err != nil {
+		panic(fmt.Sprintf("reading %s: %v", exampleManifest, err))
+	}
+	cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+	if err := yaml.UnmarshalStrict(manifest, cluster); err != nil {
+		panic(fmt.Sprintf("decoding %s: %v", exampleManifest, err))
+	}
+	return cluster
+}
+
 // declaredInstances returns the instance names every coordinator and data
 // instance must appear under in SHOW INSTANCES once the operator has converged
-// registration.
+// registration: coordinator ordinal N registers as coordinator_N+1, data
+// ordinal N as instance_N.
 func declaredInstances() []string {
 	names := make([]string, 0, coordinatorCount+dataInstanceCount)
 	for ordinal := range coordinatorCount {
@@ -95,7 +139,6 @@ var _ = Describe("MemgraphCluster", Ordered, func() {
 			"%s must be set: the e2e suite boots a licensed Memgraph HA cluster", organizationEnvVar)
 
 		By("preloading the Memgraph image into the Kind cluster")
-		memgraphImage := memgraphImageRepository + ":" + memgraphImageTag
 		cmd := exec.Command("docker", "pull", memgraphImage)
 		_, err := utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred(), "Failed to pull the Memgraph image")
@@ -219,7 +262,7 @@ var _ = Describe("MemgraphCluster", Ordered, func() {
 		before, err := listPVCs(clusterNamespace)
 		Expect(err).NotTo(HaveOccurred())
 		// Two claims (lib and log) per coordinator and data instance pod.
-		Expect(before).To(HaveLen(2 * (coordinatorCount + dataInstanceCount)))
+		Expect(before).To(HaveLen(int(2 * (coordinatorCount + dataInstanceCount))))
 
 		By("deleting the MemgraphCluster")
 		cmd := exec.Command("kubectl", "delete", "memgraphcluster", clusterName,
@@ -286,7 +329,8 @@ spec:
     tag: %s
   storage:
     retentionPolicy: Delete
-`, retentionCluster, retentionNamespace, memgraphImageRepository, memgraphImageTag)
+`, retentionCluster, retentionNamespace,
+			example.Spec.Image.Repository, example.Spec.Image.Tag)
 		cmd := exec.Command("kubectl", "apply", "-f", "-")
 		_, err := utils.RunWithInput(cmd, manifest)
 		Expect(err).NotTo(HaveOccurred(), "Failed to apply the MemgraphCluster")
@@ -443,9 +487,9 @@ func removeCoordinatorRegistration() (string, error) {
 	return "", fmt.Errorf("no coordinator leader found to remove a coordinator: %w", errors.Join(errs...))
 }
 
-// createLicenseSecret applies the Secret the MemgraphCluster references. The
-// manifest is piped over stdin so no secret material ever reaches the logged
-// command line.
+// createLicenseSecret applies the Secret the MemgraphCluster references, under
+// the name and keys the example points at. The manifest is piped over stdin so
+// no secret material ever reaches the logged command line.
 func createLicenseSecret(license, organization string) {
 	secret := map[string]any{
 		"apiVersion": "v1",
@@ -455,8 +499,8 @@ func createLicenseSecret(license, organization string) {
 			"namespace": clusterNamespace,
 		},
 		"stringData": map[string]string{
-			licenseEnvVar:      license,
-			organizationEnvVar: organization,
+			example.Spec.Secrets.LicenseKey:      license,
+			example.Spec.Secrets.OrganizationKey: organization,
 		},
 	}
 	manifest, err := json.Marshal(secret)
@@ -467,30 +511,13 @@ func createLicenseSecret(license, organization string) {
 	Expect(err).NotTo(HaveOccurred(), "Failed to apply the license Secret")
 }
 
-// applyMemgraphCluster applies the CR under test: the minimal spec of the PRD's
-// first-contact story — image, counts, and a license secret reference.
+// applyMemgraphCluster applies the CR under test: the README's quickstart
+// manifest, unmodified, which is the minimal spec of the PRD's first-contact
+// story — image, counts, and a license secret reference. The manifest declares
+// no namespace, exactly as a newcomer applies it into their own.
 func applyMemgraphCluster() {
-	manifest := fmt.Sprintf(`apiVersion: memgraph.com/v1alpha1
-kind: MemgraphCluster
-metadata:
-  name: %s
-  namespace: %s
-spec:
-  coordinators: %d
-  dataInstances: %d
-  image:
-    repository: %s
-    tag: %s
-  secrets:
-    name: %s
-    licenseKey: %s
-    organizationKey: %s
-`, clusterName, clusterNamespace, coordinatorCount, dataInstanceCount,
-		memgraphImageRepository, memgraphImageTag,
-		licenseSecretName, licenseEnvVar, organizationEnvVar)
-
-	cmd := exec.Command("kubectl", "apply", "-f", "-")
-	_, err := utils.RunWithInput(cmd, manifest)
+	cmd := exec.Command("kubectl", "apply", "-n", clusterNamespace, "-f", exampleManifest)
+	_, err := utils.Run(cmd)
 	Expect(err).NotTo(HaveOccurred(), "Failed to apply the MemgraphCluster")
 }
 
