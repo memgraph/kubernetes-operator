@@ -6,6 +6,9 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
   name: memgraphcluster-sample
 spec:
+  # Both counts are immutable: v1alpha1 provisions and bootstraps a fixed
+  # topology, and admission rejects any later change. The coordinator count
+  # must be odd so the Raft quorum cannot split.
   coordinators: 3
   dataInstances: 2
   image:

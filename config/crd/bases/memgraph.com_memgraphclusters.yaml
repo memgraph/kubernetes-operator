@@ -62,16 +62,32 @@ spec:
             properties:
               coordinators:
                 default: 3
-                description: coordinators is the number of Raft coordinator instances.
+                description: |-
+                  coordinators is the number of Raft coordinator instances. It must be odd
+                  so the Raft quorum cannot split, and it is immutable: scaling is not
+                  supported in v1alpha1.
                 format: int32
                 minimum: 1
                 type: integer
+                x-kubernetes-validations:
+                - message: coordinators must be an odd number so the Raft quorum cannot
+                    split
+                  rule: self % 2 == 1
+                - message: 'coordinators is immutable: changing the coordinator count
+                    of an existing MemgraphCluster is not supported in v1alpha1'
+                  rule: self == oldSelf
               dataInstances:
                 default: 2
-                description: dataInstances is the number of data instances.
+                description: |-
+                  dataInstances is the number of data instances. It is immutable: scaling
+                  is not supported in v1alpha1.
                 format: int32
                 minimum: 1
                 type: integer
+                x-kubernetes-validations:
+                - message: 'dataInstances is immutable: changing the data instance
+                    count of an existing MemgraphCluster is not supported in v1alpha1'
+                  rule: self == oldSelf
               image:
                 default: {}
                 description: image selects the Memgraph container image run by all
@@ -88,13 +104,27 @@ spec:
                     type: string
                   repository:
                     default: docker.io/memgraph/memgraph
-                    description: repository is the Memgraph container image repository.
+                    description: |-
+                      repository is the Memgraph container image repository. It carries the
+                      optional registry host and the image path only; the version belongs in
+                      tag.
+                    maxLength: 255
+                    minLength: 1
                     type: string
+                    x-kubernetes-validations:
+                    - message: repository must not contain a digest; pin the image
+                        with tag instead
+                      rule: '!self.contains(''@'')'
+                    - message: repository must not contain a tag; set image.tag instead
+                      rule: '!self.substring(self.lastIndexOf(''/'') + 1).contains('':'')'
                   tag:
                     default: 3.12.0-relwithdebinfo
                     description: |-
                       tag is the Memgraph container image tag. Prefer pinning a specific
                       Memgraph version over mutable tags such as "latest".
+                    maxLength: 128
+                    minLength: 1
+                    pattern: ^[a-zA-Z0-9_][a-zA-Z0-9._-]*$
                     type: string
                 type: object
               secrets:
@@ -107,18 +137,32 @@ spec:
                     default: MEMGRAPH_ENTERPRISE_LICENSE
                     description: licenseKey is the key within the Secret holding the
                       enterprise license.
+                    maxLength: 253
+                    minLength: 1
+                    pattern: ^[-._a-zA-Z0-9]+$
                     type: string
                   name:
                     default: memgraph-secrets
                     description: name is the name of the Secret in the cluster's namespace.
+                    maxLength: 253
+                    minLength: 1
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
                     type: string
                   organizationKey:
                     default: MEMGRAPH_ORGANIZATION_NAME
                     description: |-
                       organizationKey is the key within the Secret holding the organization
                       name the license was issued to.
+                    maxLength: 253
+                    minLength: 1
+                    pattern: ^[-._a-zA-Z0-9]+$
                     type: string
                 type: object
+                x-kubernetes-validations:
+                - message: licenseKey and organizationKey must name different keys
+                    of the Secret
+                  rule: '!has(self.licenseKey) || !has(self.organizationKey) || self.licenseKey
+                    != self.organizationKey'
             type: object
           status:
             description: status defines the observed state of MemgraphCluster

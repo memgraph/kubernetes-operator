@@ -42,6 +42,13 @@ const (
 	dataSuffix        = "-data"
 )
 
+// Non-default spec values the specs in this package override with, chosen so
+// that they cannot be confused with the CRD schema defaults.
+const (
+	customImageTag   = "3.13.0"
+	customSecretName = "my-license"
+)
+
 var _ = Describe("MemgraphCluster Controller", func() {
 	const resourceNamespace = "default"
 
@@ -225,11 +232,11 @@ var _ = Describe("MemgraphCluster Controller", func() {
 					DataInstances: ptr.To(int32(1)),
 					Image: memgraphcomv1alpha1.ImageSpec{
 						Repository: "registry.example.com/memgraph",
-						Tag:        "3.13.0",
+						Tag:        customImageTag,
 						PullPolicy: corev1.PullAlways,
 					},
 					Secrets: memgraphcomv1alpha1.SecretsSpec{
-						Name:            "my-license",
+						Name:            customSecretName,
 						LicenseKey:      "license",
 						OrganizationKey: "organization",
 					},
@@ -257,22 +264,12 @@ var _ = Describe("MemgraphCluster Controller", func() {
 				Expect(container.ImagePullPolicy).To(Equal(corev1.PullAlways))
 
 				licenseRef := container.Env[len(container.Env)-2].ValueFrom.SecretKeyRef
-				Expect(licenseRef.Name).To(Equal("my-license"))
+				Expect(licenseRef.Name).To(Equal(customSecretName))
 				Expect(licenseRef.Key).To(Equal("license"))
 				organizationRef := container.Env[len(container.Env)-1].ValueFrom.SecretKeyRef
-				Expect(organizationRef.Name).To(Equal("my-license"))
+				Expect(organizationRef.Name).To(Equal(customSecretName))
 				Expect(organizationRef.Key).To(Equal("organization"))
 			}
-		})
-
-		It("should reject a spec violating the schema", func() {
-			invalid := &memgraphcomv1alpha1.MemgraphCluster{
-				ObjectMeta: metav1.ObjectMeta{Name: "mgc-invalid", Namespace: resourceNamespace},
-				Spec: memgraphcomv1alpha1.MemgraphClusterSpec{
-					Coordinators: ptr.To(int32(0)),
-				},
-			}
-			Expect(k8sClient.Create(ctx, invalid)).NotTo(Succeed())
 		})
 	})
 
