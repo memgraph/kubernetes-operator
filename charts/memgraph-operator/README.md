@@ -13,11 +13,25 @@ they ship with.
 ## Install
 
 ```sh
-helm install memgraph-operator ./charts/memgraph-operator \
+helm repo add memgraph https://memgraph.github.io/helm-charts
+helm repo update
+helm install memgraph-operator memgraph/memgraph-operator \
   --namespace memgraph-operator-system --create-namespace --wait
 ```
 
 The operator watches every namespace, so one release per cluster is enough.
+
+Releases cross-publish the packaged chart into that index; the source stays here. `helm search
+repo memgraph/memgraph-operator --versions` lists what is available, and the chart's `appVersion`
+is the operator version an install runs by default. The two version numbers move independently —
+see [`docs/releasing.md`](../../docs/releasing.md).
+
+Installing from a checkout works the same way:
+
+```sh
+helm install memgraph-operator ./charts/memgraph-operator \
+  --namespace memgraph-operator-system --create-namespace --wait
+```
 
 ## Uninstall
 

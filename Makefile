@@ -248,6 +248,40 @@ helm-uninstall: ## Uninstall the operator, including the CRDs helm leaves behind
 	"$(HELM)" uninstall "$(CHART_RELEASE)" --namespace "$(CHART_NAMESPACE)" --ignore-not-found
 	"$(KUBECTL)" delete --ignore-not-found=true -f "$(CHART_DIR)/crds"
 
+##@ Release
+
+# Two versions, moving independently: the chart's own version, and the
+# appVersion naming the operator image it installs by default. A tag releases
+# one of them -- v<version> the operator, chart-<version> the chart alone --
+# and the release workflow refuses a tag the chart does not declare.
+# See docs/releasing.md.
+CHART_VERSION = $(shell sed -n 's/^version:[[:space:]]*//p' $(CHART_DIR)/Chart.yaml | tr -d '"' | head -1)
+CHART_APP_VERSION = $(shell sed -n 's/^appVersion:[[:space:]]*//p' $(CHART_DIR)/Chart.yaml | tr -d '"' | head -1)
+
+.PHONY: chart-version
+chart-version: ## Print the chart version.
+	@echo "$(CHART_VERSION)"
+
+.PHONY: chart-app-version
+chart-app-version: ## Print the operator version the chart installs (its appVersion).
+	@echo "$(CHART_APP_VERSION)"
+
+.PHONY: chart-version-check
+chart-version-check: ## Fail if the chart changed without its version being bumped (against BASE_REF).
+	@./hack/chart-version-check.sh
+
+.PHONY: chart-package
+chart-package: chart-verify ## Package the install chart into dist/chart, publishing nothing.
+	HELM=$(HELM) ./hack/chart-publish.sh
+
+.PHONY: chart-publish
+chart-publish: chart-verify ## Publish the packaged chart into the Memgraph helm repository. Needs GH_TOKEN.
+	HELM=$(HELM) ./hack/chart-publish.sh --publish
+
+.PHONY: test-chart-publish
+test-chart-publish: ## Test the cross-publish path against a local stand-in for the helm-charts repository.
+	HELM=$(HELM) ./hack/chart-publish-test.sh
+
 ##@ Deployment
 
 ifndef ignore-not-found

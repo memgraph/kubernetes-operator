@@ -51,12 +51,19 @@ jobs:
     permissions:
       contents: read
     name: Install chart
+    # Disabled for now: this job boots a Kind cluster on every pull request.
+    # Remove this line to bring it back -- and note that its version check is
+    # premature until the first release, since it enforces a bump against a
+    # chart version that has never been published.
+    if: false
     runs-on: ubuntu-latest
     steps:
       - name: Clone the code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
+          # chart-version-check compares the chart against the base branch.
+          fetch-depth: 0
 
       - name: Setup Go
         uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
@@ -70,6 +77,18 @@ jobs:
 
       - name: Lint the chart
         run: make helm-lint
+
+      # A published chart version is immutable, so a change to the chart that
+      # keeps its version would be a change users never receive.
+      - name: Check the chart version was bumped
+        env:
+          BASE_REF: origin/${{ github.base_ref || github.ref_name }}
+        run: make chart-version-check
+
+      # Releases write into another repository, so the cross-publish path is
+      # tested here, against a local stand-in for it.
+      - name: Test the cross-publish path
+        run: make test-chart-publish
 
       - name: Install Kind
         run: go install sigs.k8s.io/kind@v0.32.0
