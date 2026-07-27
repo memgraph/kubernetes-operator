@@ -60,6 +60,16 @@ spec:
           spec:
             description: spec defines the desired state of MemgraphCluster
             properties:
+              clusterDomain:
+                default: cluster.local
+                description: |-
+                  clusterDomain is the Kubernetes cluster domain the advertised FQDN
+                  addresses are built from: <pod>.<service>.<namespace>.svc.<clusterDomain>.
+                  Override it on clusters configured with a domain other than the default.
+                maxLength: 253
+                minLength: 1
+                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                type: string
               coordinators:
                 default: 3
                 description: |-
@@ -88,6 +98,118 @@ spec:
                 - message: 'dataInstances is immutable: changing the data instance
                     count of an existing MemgraphCluster is not supported in v1alpha1'
                   rule: self == oldSelf
+              extraArgs:
+                description: extraArgs passes additional Memgraph flags to both roles.
+                properties:
+                  coordinators:
+                    description: coordinators are appended to every coordinator pod's
+                      Memgraph flags.
+                    items:
+                      maxLength: 4096
+                      minLength: 1
+                      type: string
+                    maxItems: 64
+                    type: array
+                    x-kubernetes-validations:
+                    - message: extraArgs must not set a port or the coordinator identity
+                        the operator derives (--bolt-port, --management-port, --coordinator-id,
+                        --coordinator-hostname, --coordinator-port); configure ports
+                        through spec.ports
+                      rule: self.all(a, !['--bolt-port', '--management-port', '--coordinator-id',
+                        '--coordinator-hostname', '--coordinator-port'].exists(f,
+                        a.startsWith(f)))
+                  data:
+                    description: data are appended to every data instance pod's Memgraph
+                      flags.
+                    items:
+                      maxLength: 4096
+                      minLength: 1
+                      type: string
+                    maxItems: 64
+                    type: array
+                    x-kubernetes-validations:
+                    - message: extraArgs must not set a port or the coordinator identity
+                        the operator derives (--bolt-port, --management-port, --coordinator-id,
+                        --coordinator-hostname, --coordinator-port); configure ports
+                        through spec.ports
+                      rule: self.all(a, !['--bolt-port', '--management-port', '--coordinator-id',
+                        '--coordinator-hostname', '--coordinator-port'].exists(f,
+                        a.startsWith(f)))
+                type: object
+              extraEnv:
+                description: |-
+                  extraEnv passes additional non-secret environment variables to both
+                  roles' Memgraph containers.
+                properties:
+                  coordinators:
+                    description: coordinators are added to every coordinator pod's
+                      Memgraph container.
+                    items:
+                      description: |-
+                        EnvVar is one non-secret environment variable set on a role's Memgraph
+                        container. Only literal values are supported — there is deliberately no
+                        valueFrom — so secret material stays confined to the secrets block and the CR
+                        remains safe to commit.
+                      properties:
+                        name:
+                          description: name is the environment variable's name.
+                          maxLength: 253
+                          minLength: 1
+                          pattern: ^[A-Za-z_][A-Za-z0-9_]*$
+                          type: string
+                        value:
+                          description: value is the literal, non-secret value.
+                          maxLength: 4096
+                          type: string
+                      required:
+                      - name
+                      type: object
+                    maxItems: 64
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - name
+                    x-kubernetes-list-type: map
+                    x-kubernetes-validations:
+                    - message: extraEnv must not set MEMGRAPH_ENTERPRISE_LICENSE or
+                        MEMGRAPH_ORGANIZATION_NAME (they come from the secrets block)
+                        or POD_NAME (it carries the pod's own identity)
+                      rule: self.all(e, !(e.name in ['MEMGRAPH_ENTERPRISE_LICENSE',
+                        'MEMGRAPH_ORGANIZATION_NAME', 'POD_NAME']))
+                  data:
+                    description: data are added to every data instance pod's Memgraph
+                      container.
+                    items:
+                      description: |-
+                        EnvVar is one non-secret environment variable set on a role's Memgraph
+                        container. Only literal values are supported — there is deliberately no
+                        valueFrom — so secret material stays confined to the secrets block and the CR
+                        remains safe to commit.
+                      properties:
+                        name:
+                          description: name is the environment variable's name.
+                          maxLength: 253
+                          minLength: 1
+                          pattern: ^[A-Za-z_][A-Za-z0-9_]*$
+                          type: string
+                        value:
+                          description: value is the literal, non-secret value.
+                          maxLength: 4096
+                          type: string
+                      required:
+                      - name
+                      type: object
+                    maxItems: 64
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - name
+                    x-kubernetes-list-type: map
+                    x-kubernetes-validations:
+                    - message: extraEnv must not set MEMGRAPH_ENTERPRISE_LICENSE or
+                        MEMGRAPH_ORGANIZATION_NAME (they come from the secrets block)
+                        or POD_NAME (it carries the pod's own identity)
+                      rule: self.all(e, !(e.name in ['MEMGRAPH_ENTERPRISE_LICENSE',
+                        'MEMGRAPH_ORGANIZATION_NAME', 'POD_NAME']))
+                type: object
               image:
                 default: {}
                 description: image selects the Memgraph container image run by all
@@ -126,6 +248,402 @@ spec:
                     minLength: 1
                     pattern: ^[a-zA-Z0-9_][a-zA-Z0-9._-]*$
                     type: string
+                type: object
+              labels:
+                description: labels adds custom labels to both roles' pods, StatefulSets
+                  and Services.
+                properties:
+                  coordinators:
+                    description: coordinators labels the coordinator objects.
+                    properties:
+                      podLabels:
+                        additionalProperties:
+                          type: string
+                        description: podLabels are added to the role's pods.
+                        type: object
+                      serviceLabels:
+                        additionalProperties:
+                          type: string
+                        description: serviceLabels are added to the role's headless
+                          Service.
+                        type: object
+                      statefulSetLabels:
+                        additionalProperties:
+                          type: string
+                        description: statefulSetLabels are added to the role's StatefulSet.
+                        type: object
+                    type: object
+                  data:
+                    description: data labels the data instance objects.
+                    properties:
+                      podLabels:
+                        additionalProperties:
+                          type: string
+                        description: podLabels are added to the role's pods.
+                        type: object
+                      serviceLabels:
+                        additionalProperties:
+                          type: string
+                        description: serviceLabels are added to the role's headless
+                          Service.
+                        type: object
+                      statefulSetLabels:
+                        additionalProperties:
+                          type: string
+                        description: statefulSetLabels are added to the role's StatefulSet.
+                        type: object
+                    type: object
+                type: object
+              ports:
+                default: {}
+                description: ports configures the internal ports Memgraph listens
+                  on.
+                properties:
+                  boltPort:
+                    default: 7687
+                    description: |-
+                      boltPort is the port Memgraph serves the Bolt protocol on. Clients and
+                      the operator's own management queries both use it.
+                    format: int32
+                    maximum: 65535
+                    minimum: 1
+                    type: integer
+                  coordinatorPort:
+                    default: 12000
+                    description: coordinatorPort is the port coordinators run their
+                      Raft protocol on.
+                    format: int32
+                    maximum: 65535
+                    minimum: 1
+                    type: integer
+                  managementPort:
+                    default: 10000
+                    description: managementPort is the port instances exchange HA
+                      management traffic on.
+                    format: int32
+                    maximum: 65535
+                    minimum: 1
+                    type: integer
+                  replicationPort:
+                    default: 20000
+                    description: replicationPort is the port data instances replicate
+                      over.
+                    format: int32
+                    maximum: 65535
+                    minimum: 1
+                    type: integer
+                type: object
+                x-kubernetes-validations:
+                - message: boltPort, managementPort, replicationPort and coordinatorPort
+                    must all be different ports
+                  rule: '!(has(self.boltPort) && has(self.managementPort) && has(self.replicationPort)
+                    && has(self.coordinatorPort)) || [self.boltPort, self.managementPort,
+                    self.replicationPort, self.coordinatorPort].all(p, [self.boltPort,
+                    self.managementPort, self.replicationPort, self.coordinatorPort].exists_one(q,
+                    q == p))'
+              probes:
+                description: probes tunes the probe timings of both roles.
+                properties:
+                  coordinators:
+                    description: coordinators tunes the probes of every coordinator
+                      pod.
+                    properties:
+                      livenessProbe:
+                        description: livenessProbe decides whether the container is
+                          restarted.
+                        properties:
+                          failureThreshold:
+                            description: |-
+                              failureThreshold is how many consecutive failures the probe tolerates
+                              before acting. Defaults to 1440 for the data instances' startup probe —
+                              2h at the default period, so a large snapshot restore is not killed
+                              mid-load — and to 20 for every other probe.
+                            format: int32
+                            minimum: 1
+                            type: integer
+                          periodSeconds:
+                            description: periodSeconds is how often the probe runs.
+                              Defaults to 5.
+                            format: int32
+                            minimum: 1
+                            type: integer
+                          timeoutSeconds:
+                            description: |-
+                              timeoutSeconds is how long a single probe attempt may take. Defaults to
+                              10.
+                            format: int32
+                            minimum: 1
+                            type: integer
+                        type: object
+                      readinessProbe:
+                        description: |-
+                          readinessProbe decides whether the pod receives traffic and whether the
+                          operator considers the workloads ready to register.
+                        properties:
+                          failureThreshold:
+                            description: |-
+                              failureThreshold is how many consecutive failures the probe tolerates
+                              before acting. Defaults to 1440 for the data instances' startup probe —
+                              2h at the default period, so a large snapshot restore is not killed
+                              mid-load — and to 20 for every other probe.
+                            format: int32
+                            minimum: 1
+                            type: integer
+                          periodSeconds:
+                            description: periodSeconds is how often the probe runs.
+                              Defaults to 5.
+                            format: int32
+                            minimum: 1
+                            type: integer
+                          timeoutSeconds:
+                            description: |-
+                              timeoutSeconds is how long a single probe attempt may take. Defaults to
+                              10.
+                            format: int32
+                            minimum: 1
+                            type: integer
+                        type: object
+                      startupProbe:
+                        description: startupProbe gates the other two probes until
+                          the instance has started.
+                        properties:
+                          failureThreshold:
+                            description: |-
+                              failureThreshold is how many consecutive failures the probe tolerates
+                              before acting. Defaults to 1440 for the data instances' startup probe —
+                              2h at the default period, so a large snapshot restore is not killed
+                              mid-load — and to 20 for every other probe.
+                            format: int32
+                            minimum: 1
+                            type: integer
+                          periodSeconds:
+                            description: periodSeconds is how often the probe runs.
+                              Defaults to 5.
+                            format: int32
+                            minimum: 1
+                            type: integer
+                          timeoutSeconds:
+                            description: |-
+                              timeoutSeconds is how long a single probe attempt may take. Defaults to
+                              10.
+                            format: int32
+                            minimum: 1
+                            type: integer
+                        type: object
+                    type: object
+                  data:
+                    description: data tunes the probes of every data instance pod.
+                    properties:
+                      livenessProbe:
+                        description: livenessProbe decides whether the container is
+                          restarted.
+                        properties:
+                          failureThreshold:
+                            description: |-
+                              failureThreshold is how many consecutive failures the probe tolerates
+                              before acting. Defaults to 1440 for the data instances' startup probe —
+                              2h at the default period, so a large snapshot restore is not killed
+                              mid-load — and to 20 for every other probe.
+                            format: int32
+                            minimum: 1
+                            type: integer
+                          periodSeconds:
+                            description: periodSeconds is how often the probe runs.
+                              Defaults to 5.
+                            format: int32
+                            minimum: 1
+                            type: integer
+                          timeoutSeconds:
+                            description: |-
+                              timeoutSeconds is how long a single probe attempt may take. Defaults to
+                              10.
+                            format: int32
+                            minimum: 1
+                            type: integer
+                        type: object
+                      readinessProbe:
+                        description: |-
+                          readinessProbe decides whether the pod receives traffic and whether the
+                          operator considers the workloads ready to register.
+                        properties:
+                          failureThreshold:
+                            description: |-
+                              failureThreshold is how many consecutive failures the probe tolerates
+                              before acting. Defaults to 1440 for the data instances' startup probe —
+                              2h at the default period, so a large snapshot restore is not killed
+                              mid-load — and to 20 for every other probe.
+                            format: int32
+                            minimum: 1
+                            type: integer
+                          periodSeconds:
+                            description: periodSeconds is how often the probe runs.
+                              Defaults to 5.
+                            format: int32
+                            minimum: 1
+                            type: integer
+                          timeoutSeconds:
+                            description: |-
+                              timeoutSeconds is how long a single probe attempt may take. Defaults to
+                              10.
+                            format: int32
+                            minimum: 1
+                            type: integer
+                        type: object
+                      startupProbe:
+                        description: startupProbe gates the other two probes until
+                          the instance has started.
+                        properties:
+                          failureThreshold:
+                            description: |-
+                              failureThreshold is how many consecutive failures the probe tolerates
+                              before acting. Defaults to 1440 for the data instances' startup probe —
+                              2h at the default period, so a large snapshot restore is not killed
+                              mid-load — and to 20 for every other probe.
+                            format: int32
+                            minimum: 1
+                            type: integer
+                          periodSeconds:
+                            description: periodSeconds is how often the probe runs.
+                              Defaults to 5.
+                            format: int32
+                            minimum: 1
+                            type: integer
+                          timeoutSeconds:
+                            description: |-
+                              timeoutSeconds is how long a single probe attempt may take. Defaults to
+                              10.
+                            format: int32
+                            minimum: 1
+                            type: integer
+                        type: object
+                    type: object
+                type: object
+              resources:
+                description: resources sets the compute resources of both roles' Memgraph
+                  containers.
+                properties:
+                  coordinators:
+                    description: |-
+                      coordinators are the resource requests and limits of every coordinator
+                      pod's Memgraph container.
+                    properties:
+                      claims:
+                        description: |-
+                          Claims lists the names of resources, defined in spec.resourceClaims,
+                          that are used by this container.
+
+                          This field depends on the
+                          DynamicResourceAllocation feature gate.
+
+                          This field is immutable. It can only be set for containers.
+                        items:
+                          description: ResourceClaim references one entry in PodSpec.ResourceClaims.
+                          properties:
+                            name:
+                              description: |-
+                                Name must match the name of one entry in pod.spec.resourceClaims of
+                                the Pod where this field is used. It makes that resource available
+                                inside a container.
+                              type: string
+                            request:
+                              description: |-
+                                Request is the name chosen for a request in the referenced claim.
+                                If empty, everything from the claim is made available, otherwise
+                                only the result of this request.
+                              type: string
+                          required:
+                          - name
+                          type: object
+                        type: array
+                        x-kubernetes-list-map-keys:
+                        - name
+                        x-kubernetes-list-type: map
+                      limits:
+                        additionalProperties:
+                          anyOf:
+                          - type: integer
+                          - type: string
+                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                          x-kubernetes-int-or-string: true
+                        description: |-
+                          Limits describes the maximum amount of compute resources allowed.
+                          More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                        type: object
+                      requests:
+                        additionalProperties:
+                          anyOf:
+                          - type: integer
+                          - type: string
+                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                          x-kubernetes-int-or-string: true
+                        description: |-
+                          Requests describes the minimum amount of compute resources required.
+                          If Requests is omitted for a container, it defaults to Limits if that is explicitly specified,
+                          otherwise to an implementation-defined value. Requests cannot exceed Limits.
+                          More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                        type: object
+                    type: object
+                  data:
+                    description: |-
+                      data are the resource requests and limits of every data instance pod's
+                      Memgraph container.
+                    properties:
+                      claims:
+                        description: |-
+                          Claims lists the names of resources, defined in spec.resourceClaims,
+                          that are used by this container.
+
+                          This field depends on the
+                          DynamicResourceAllocation feature gate.
+
+                          This field is immutable. It can only be set for containers.
+                        items:
+                          description: ResourceClaim references one entry in PodSpec.ResourceClaims.
+                          properties:
+                            name:
+                              description: |-
+                                Name must match the name of one entry in pod.spec.resourceClaims of
+                                the Pod where this field is used. It makes that resource available
+                                inside a container.
+                              type: string
+                            request:
+                              description: |-
+                                Request is the name chosen for a request in the referenced claim.
+                                If empty, everything from the claim is made available, otherwise
+                                only the result of this request.
+                              type: string
+                          required:
+                          - name
+                          type: object
+                        type: array
+                        x-kubernetes-list-map-keys:
+                        - name
+                        x-kubernetes-list-type: map
+                      limits:
+                        additionalProperties:
+                          anyOf:
+                          - type: integer
+                          - type: string
+                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                          x-kubernetes-int-or-string: true
+                        description: |-
+                          Limits describes the maximum amount of compute resources allowed.
+                          More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                        type: object
+                      requests:
+                        additionalProperties:
+                          anyOf:
+                          - type: integer
+                          - type: string
+                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                          x-kubernetes-int-or-string: true
+                        description: |-
+                          Requests describes the minimum amount of compute resources required.
+                          If Requests is omitted for a container, it defaults to Limits if that is explicitly specified,
+                          otherwise to an implementation-defined value. Requests cannot exceed Limits.
+                          More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                        type: object
+                    type: object
                 type: object
               secrets:
                 default: {}

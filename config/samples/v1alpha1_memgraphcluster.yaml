@@ -38,3 +38,56 @@ spec:
       libStorageAccessMode: ReadWriteOnce
       logPVCSize: 1Gi
       logStorageAccessMode: ReadWriteOnce
+  # The cluster domain and the internal ports are part of every advertised
+  # address the operator registers with the cluster, so they reach the
+  # container ports, the Services and the registration commands together.
+  # Changing them on a live cluster is not supported in v1alpha1.
+  clusterDomain: cluster.local
+  ports:
+    boltPort: 7687
+    managementPort: 10000
+    replicationPort: 20000
+    coordinatorPort: 12000
+  # Every probe is a TCP-socket check against the role's own port (the
+  # coordinator port for coordinators, the Bolt port for data instances); only
+  # the timings are configurable. Timings left out keep their defaults:
+  # failureThreshold 20 (1440 for the data instances' startup probe, which is
+  # 2h at the default period, so a large snapshot restore is not killed
+  # mid-load), timeoutSeconds 10, periodSeconds 5.
+  probes:
+    data:
+      startupProbe:
+        failureThreshold: 1440
+        timeoutSeconds: 10
+        periodSeconds: 5
+  # Requests and limits of the Memgraph container, per role. When setting
+  # Memgraph's own --memory-limit below, keep it under the pod's memory limit.
+  resources:
+    coordinators: {}
+    data: {}
+  # Custom labels per object. The operator's own app.kubernetes.io identity
+  # labels always win a collision: they are what the StatefulSets and Services
+  # select on.
+  labels:
+    coordinators:
+      podLabels: {}
+      statefulSetLabels: {}
+      serviceLabels: {}
+    data:
+      podLabels: {}
+      statefulSetLabels: {}
+      serviceLabels: {}
+  # Non-secret environment variables only; the license and organization name
+  # come from the secrets block above.
+  extraEnv:
+    coordinators: []
+    data: []
+  # Any Memgraph flag, without waiting for a typed field. These are appended
+  # after the flags the operator derives, and Memgraph takes the last
+  # occurrence of a repeated flag — except for the ports and the coordinator
+  # identity, which admission rejects here because they must stay consistent
+  # with the registered addresses.
+  extraArgs:
+    coordinators: []
+    data:
+      - --storage-snapshot-on-exit=false

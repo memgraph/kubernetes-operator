@@ -17,6 +17,7 @@ limitations under the License.
 package resources_test
 
 import (
+	"maps"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -47,6 +48,22 @@ const (
 	boltPortName        = "bolt"
 	managementPortName  = "management"
 	replicationPortName = "replication"
+
+	statefulSetKind = "StatefulSet"
+	serviceKind     = "Service"
+
+	// The operator's identity labels, which custom labels may never override.
+	nameLabel      = "app.kubernetes.io/name"
+	instanceLabel  = "app.kubernetes.io/instance"
+	componentLabel = "app.kubernetes.io/component"
+	managedByLabel = "app.kubernetes.io/managed-by"
+
+	// Custom label keys and values used by the tuning tests.
+	teamLabel   = "team"
+	tierLabel   = "tier"
+	exposeLabel = "expose"
+
+	platformTeam = "platform"
 )
 
 // minimalCluster returns a MemgraphCluster as a client would minimally create
@@ -78,6 +95,81 @@ func specifiedCluster() *memgraphcomv1alpha1.MemgraphCluster {
 	}
 }
 
+// Non-default ports and cluster domain shared by the tuning tests. Every one
+// differs from its default, so a knob that fails to propagate cannot hide
+// behind a value that happened to be right anyway.
+const (
+	customBoltPort        int32 = 7777
+	customManagementPort  int32 = 10001
+	customReplicationPort int32 = 20001
+	customCoordinatorPort int32 = 12001
+
+	customClusterDomain = "k8s.example.com"
+)
+
+// tunedCluster returns a MemgraphCluster with every pod-tuning knob set away
+// from its default, so the golden tests can pin what each one lands on.
+func tunedCluster() *memgraphcomv1alpha1.MemgraphCluster {
+	cluster := minimalCluster()
+	cluster.Spec.ClusterDomain = customClusterDomain
+	cluster.Spec.Ports = memgraphcomv1alpha1.PortsSpec{
+		BoltPort:        ptr.To(customBoltPort),
+		ManagementPort:  ptr.To(customManagementPort),
+		ReplicationPort: ptr.To(customReplicationPort),
+		CoordinatorPort: ptr.To(customCoordinatorPort),
+	}
+	cluster.Spec.Probes = memgraphcomv1alpha1.ProbesSpec{
+		Coordinators: memgraphcomv1alpha1.RoleProbesSpec{
+			StartupProbe: memgraphcomv1alpha1.ProbeSpec{FailureThreshold: ptr.To(int32(30))},
+			ReadinessProbe: memgraphcomv1alpha1.ProbeSpec{
+				TimeoutSeconds: ptr.To(int32(3)),
+				PeriodSeconds:  ptr.To(int32(2)),
+			},
+		},
+		Data: memgraphcomv1alpha1.RoleProbesSpec{
+			StartupProbe: memgraphcomv1alpha1.ProbeSpec{
+				FailureThreshold: ptr.To(int32(4320)),
+				TimeoutSeconds:   ptr.To(int32(15)),
+				PeriodSeconds:    ptr.To(int32(10)),
+			},
+			LivenessProbe: memgraphcomv1alpha1.ProbeSpec{FailureThreshold: ptr.To(int32(6))},
+		},
+	}
+	cluster.Spec.Resources = memgraphcomv1alpha1.ResourcesSpec{
+		Coordinators: corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("100m")},
+			Limits:   corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("512Mi")},
+		},
+		Data: corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("4Gi")},
+		},
+	}
+	cluster.Spec.Labels = memgraphcomv1alpha1.LabelsSpec{
+		Coordinators: memgraphcomv1alpha1.RoleLabelsSpec{
+			PodLabels:         map[string]string{teamLabel: platformTeam},
+			StatefulSetLabels: map[string]string{tierLabel: "control"},
+			ServiceLabels:     map[string]string{exposeLabel: "internal"},
+		},
+		Data: memgraphcomv1alpha1.RoleLabelsSpec{
+			PodLabels:         map[string]string{teamLabel: dataComponent},
+			StatefulSetLabels: map[string]string{tierLabel: "storage"},
+			ServiceLabels:     map[string]string{exposeLabel: "bolt"},
+		},
+	}
+	cluster.Spec.ExtraEnv = memgraphcomv1alpha1.ExtraEnvSpec{
+		Coordinators: []memgraphcomv1alpha1.EnvVar{{Name: "COORDINATOR_LABEL", Value: "coord"}},
+		Data: []memgraphcomv1alpha1.EnvVar{
+			{Name: "DATA_LABEL_ONE", Value: "one"},
+			{Name: "DATA_LABEL_TWO", Value: "two"},
+		},
+	}
+	cluster.Spec.ExtraArgs = memgraphcomv1alpha1.ExtraArgsSpec{
+		Coordinators: []string{"--log-level=WARNING"},
+		Data:         []string{"--storage-snapshot-on-exit=true", "--memory-limit=2048"},
+	}
+	return cluster
+}
+
 func licenseEnv(secretName, licenseKey, organizationKey string) []corev1.EnvVar {
 	return []corev1.EnvVar{
 		{
@@ -101,14 +193,20 @@ func licenseEnv(secretName, licenseKey, organizationKey string) []corev1.EnvVar 
 	}
 }
 
+// tcpProbe is a probe with the default timings, of which only the failure
+// threshold differs between probes.
 func tcpProbe(port, failureThreshold int32) *corev1.Probe {
+	return tunedTCPProbe(port, failureThreshold, 10, 5)
+}
+
+func tunedTCPProbe(port, failureThreshold, timeoutSeconds, periodSeconds int32) *corev1.Probe {
 	return &corev1.Probe{
 		ProbeHandler: corev1.ProbeHandler{
 			TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt32(port)},
 		},
 		FailureThreshold: failureThreshold,
-		TimeoutSeconds:   10,
-		PeriodSeconds:    5,
+		TimeoutSeconds:   timeoutSeconds,
+		PeriodSeconds:    periodSeconds,
 	}
 }
 
@@ -183,18 +281,26 @@ func expectedRetentionPolicy(
 
 func expectedLabels(component string) map[string]string {
 	return map[string]string{
-		"app.kubernetes.io/name":       memgraphName,
-		"app.kubernetes.io/instance":   clusterName,
-		"app.kubernetes.io/component":  component,
-		"app.kubernetes.io/managed-by": "memgraph-operator",
+		nameLabel:      memgraphName,
+		instanceLabel:  clusterName,
+		componentLabel: component,
+		managedByLabel: "memgraph-operator",
 	}
+}
+
+// expectedLabelsWith is the full label set of a role's object once the user's
+// custom labels are merged in.
+func expectedLabelsWith(component string, custom map[string]string) map[string]string {
+	l := expectedLabels(component)
+	maps.Copy(l, custom)
+	return l
 }
 
 func expectedSelectorLabels(component string) map[string]string {
 	return map[string]string{
-		"app.kubernetes.io/name":      memgraphName,
-		"app.kubernetes.io/instance":  clusterName,
-		"app.kubernetes.io/component": component,
+		nameLabel:      memgraphName,
+		instanceLabel:  clusterName,
+		componentLabel: component,
 	}
 }
 
@@ -213,7 +319,7 @@ exec /usr/lib/memgraph/memgraph \
 
 func TestCoordinatorStatefulSetDefaults(t *testing.T) {
 	want := &appsv1.StatefulSet{
-		TypeMeta: metav1.TypeMeta{APIVersion: "apps/v1", Kind: "StatefulSet"},
+		TypeMeta: metav1.TypeMeta{APIVersion: "apps/v1", Kind: statefulSetKind},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      coordinatorName,
 			Namespace: testNamespace,
@@ -267,7 +373,7 @@ func TestCoordinatorStatefulSetDefaults(t *testing.T) {
 
 func TestDataStatefulSetDefaults(t *testing.T) {
 	want := &appsv1.StatefulSet{
-		TypeMeta: metav1.TypeMeta{APIVersion: "apps/v1", Kind: "StatefulSet"},
+		TypeMeta: metav1.TypeMeta{APIVersion: "apps/v1", Kind: statefulSetKind},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      dataName,
 			Namespace: testNamespace,
@@ -446,6 +552,299 @@ func TestStatefulSetRetentionPolicy(t *testing.T) {
 				got := sts.Spec.PersistentVolumeClaimRetentionPolicy
 				if diff := cmp.Diff(want, got); diff != "" {
 					t.Errorf("%s retention policy mismatch (-want +got):\n%s", sts.Name, diff)
+				}
+			}
+		})
+	}
+}
+
+// The coordinator start script derives per-pod identity at runtime, so the
+// configured coordinator port and cluster domain have to be baked into it —
+// this is the same identity the operator registers with the cluster.
+const expectedTunedCoordinatorScript = `ordinal="${POD_NAME##*-}"
+exec /usr/lib/memgraph/memgraph \
+  --coordinator-id="$((ordinal + 1))" \
+  --coordinator-hostname="${POD_NAME}.example-coordinator.memgraph-test.svc.k8s.example.com" \
+  --coordinator-port=12001 \
+  --bolt-port=7777 \
+  --management-port=10001 \
+  --data-directory=/var/lib/memgraph/mg_data \
+  --log-level=TRACE \
+  --also-log-to-stderr \
+  --log-file=/var/log/memgraph/memgraph.log \
+  --log-retention-days=35 \
+  --log-level=WARNING`
+
+// TestStatefulSetPortsAndClusterDomain pins every place a configured port or
+// cluster domain has to surface: the container ports, the flags Memgraph is
+// started with, the ports the probes dial, and the coordinator's advertised
+// hostname.
+func TestStatefulSetPortsAndClusterDomain(t *testing.T) {
+	cluster := tunedCluster()
+
+	t.Run(coordinatorComponent, func(t *testing.T) {
+		container := resources.CoordinatorStatefulSet(cluster).Spec.Template.Spec.Containers[0]
+
+		wantPorts := []corev1.ContainerPort{
+			{Name: boltPortName, ContainerPort: customBoltPort},
+			{Name: managementPortName, ContainerPort: customManagementPort},
+			{Name: coordinatorComponent, ContainerPort: customCoordinatorPort},
+		}
+		if diff := cmp.Diff(wantPorts, container.Ports); diff != "" {
+			t.Errorf("container ports mismatch (-want +got):\n%s", diff)
+		}
+		wantCommand := []string{"/bin/sh", "-ec", expectedTunedCoordinatorScript}
+		if diff := cmp.Diff(wantCommand, container.Command); diff != "" {
+			t.Errorf("start script mismatch (-want +got):\n%s", diff)
+		}
+		for name, probe := range map[string]*corev1.Probe{
+			"startup":   container.StartupProbe,
+			"readiness": container.ReadinessProbe,
+			"liveness":  container.LivenessProbe,
+		} {
+			if got := probe.TCPSocket.Port; got != intstr.FromInt32(customCoordinatorPort) {
+				t.Errorf("%s probe dials %v, want the configured coordinator port %d",
+					name, got, customCoordinatorPort)
+			}
+		}
+	})
+
+	t.Run(dataComponent, func(t *testing.T) {
+		container := resources.DataStatefulSet(cluster).Spec.Template.Spec.Containers[0]
+
+		wantPorts := []corev1.ContainerPort{
+			{Name: boltPortName, ContainerPort: customBoltPort},
+			{Name: managementPortName, ContainerPort: customManagementPort},
+			{Name: replicationPortName, ContainerPort: customReplicationPort},
+		}
+		if diff := cmp.Diff(wantPorts, container.Ports); diff != "" {
+			t.Errorf("container ports mismatch (-want +got):\n%s", diff)
+		}
+		wantArgs := []string{
+			"--bolt-port=7777",
+			"--management-port=10001",
+			"--data-directory=/var/lib/memgraph/mg_data",
+			"--log-level=TRACE",
+			"--also-log-to-stderr",
+			"--log-file=/var/log/memgraph/memgraph.log",
+			"--log-retention-days=35",
+			"--storage-snapshot-on-exit=true",
+			"--memory-limit=2048",
+		}
+		if diff := cmp.Diff(wantArgs, container.Args); diff != "" {
+			t.Errorf("args mismatch (-want +got):\n%s", diff)
+		}
+		for name, probe := range map[string]*corev1.Probe{
+			"startup":   container.StartupProbe,
+			"readiness": container.ReadinessProbe,
+			"liveness":  container.LivenessProbe,
+		} {
+			if got := probe.TCPSocket.Port; got != intstr.FromInt32(customBoltPort) {
+				t.Errorf("%s probe dials %v, want the configured bolt port %d", name, got, customBoltPort)
+			}
+		}
+	})
+}
+
+// TestStatefulSetProbeOverrides asserts probe timings are per role and per
+// probe, and that a partially specified probe keeps the defaults for the
+// timings it leaves out — including the data instances' 2h startup budget.
+func TestStatefulSetProbeOverrides(t *testing.T) {
+	cluster := tunedCluster()
+
+	tests := []struct {
+		name                         string
+		sts                          *appsv1.StatefulSet
+		startup, readiness, liveness *corev1.Probe
+	}{
+		{
+			name: coordinatorComponent,
+			sts:  resources.CoordinatorStatefulSet(cluster),
+			// Only the failure threshold was raised, so the timings default.
+			startup: tunedTCPProbe(customCoordinatorPort, 30, 10, 5),
+			// Timings tightened, failure threshold left at its default.
+			readiness: tunedTCPProbe(customCoordinatorPort, 20, 3, 2),
+			liveness:  tunedTCPProbe(customCoordinatorPort, 20, 10, 5),
+		},
+		{
+			name:      dataComponent,
+			sts:       resources.DataStatefulSet(cluster),
+			startup:   tunedTCPProbe(customBoltPort, 4320, 15, 10),
+			readiness: tunedTCPProbe(customBoltPort, 20, 10, 5),
+			liveness:  tunedTCPProbe(customBoltPort, 6, 10, 5),
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			container := tc.sts.Spec.Template.Spec.Containers[0]
+			if diff := cmp.Diff(tc.startup, container.StartupProbe); diff != "" {
+				t.Errorf("startup probe mismatch (-want +got):\n%s", diff)
+			}
+			if diff := cmp.Diff(tc.readiness, container.ReadinessProbe); diff != "" {
+				t.Errorf("readiness probe mismatch (-want +got):\n%s", diff)
+			}
+			if diff := cmp.Diff(tc.liveness, container.LivenessProbe); diff != "" {
+				t.Errorf("liveness probe mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestStatefulSetResourceOverrides(t *testing.T) {
+	cluster := tunedCluster()
+
+	tests := []struct {
+		name string
+		sts  *appsv1.StatefulSet
+		want corev1.ResourceRequirements
+	}{
+		{
+			name: coordinatorComponent,
+			sts:  resources.CoordinatorStatefulSet(cluster),
+			want: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("100m")},
+				Limits:   corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("512Mi")},
+			},
+		},
+		{
+			name: dataComponent,
+			sts:  resources.DataStatefulSet(cluster),
+			want: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("4Gi")},
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tc.sts.Spec.Template.Spec.Containers[0].Resources
+			if diff := cmp.Diff(tc.want, got); diff != "" {
+				t.Errorf("resources mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestStatefulSetLabelOverrides asserts custom labels land on the object they
+// name: StatefulSet labels on the StatefulSet, pod labels on the pod template,
+// and neither on the selector, which stays operator-owned.
+func TestStatefulSetLabelOverrides(t *testing.T) {
+	cluster := tunedCluster()
+
+	tests := []struct {
+		name      string
+		sts       *appsv1.StatefulSet
+		component string
+		stsLabels map[string]string
+		podLabels map[string]string
+	}{
+		{
+			name:      coordinatorComponent,
+			sts:       resources.CoordinatorStatefulSet(cluster),
+			component: coordinatorComponent,
+			stsLabels: map[string]string{tierLabel: "control"},
+			podLabels: map[string]string{teamLabel: platformTeam},
+		},
+		{
+			name:      dataComponent,
+			sts:       resources.DataStatefulSet(cluster),
+			component: dataComponent,
+			stsLabels: map[string]string{tierLabel: "storage"},
+			podLabels: map[string]string{teamLabel: dataComponent},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if diff := cmp.Diff(expectedLabelsWith(tc.component, tc.stsLabels), tc.sts.Labels); diff != "" {
+				t.Errorf("StatefulSet labels mismatch (-want +got):\n%s", diff)
+			}
+			wantPodLabels := expectedLabelsWith(tc.component, tc.podLabels)
+			if diff := cmp.Diff(wantPodLabels, tc.sts.Spec.Template.Labels); diff != "" {
+				t.Errorf("pod labels mismatch (-want +got):\n%s", diff)
+			}
+			wantSelector := &metav1.LabelSelector{MatchLabels: expectedSelectorLabels(tc.component)}
+			if diff := cmp.Diff(wantSelector, tc.sts.Spec.Selector); diff != "" {
+				t.Errorf("selector mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// A custom label that collides with one of the operator's identity labels must
+// lose: those labels are what the StatefulSet and Service select on, so a
+// custom label winning would detach the pods from their cluster.
+func TestStatefulSetCustomLabelsCannotOverrideIdentity(t *testing.T) {
+	cluster := minimalCluster()
+	hijack := map[string]string{
+		nameLabel:      "not-memgraph",
+		instanceLabel:  "other-cluster",
+		componentLabel: dataComponent,
+		managedByLabel: "someone-else",
+		teamLabel:      platformTeam,
+	}
+	cluster.Spec.Labels.Coordinators = memgraphcomv1alpha1.RoleLabelsSpec{
+		PodLabels:         hijack,
+		StatefulSetLabels: hijack,
+		ServiceLabels:     hijack,
+	}
+
+	want := expectedLabelsWith(coordinatorComponent, map[string]string{teamLabel: platformTeam})
+	sts := resources.CoordinatorStatefulSet(cluster)
+	for name, got := range map[string]map[string]string{
+		statefulSetKind: sts.Labels,
+		"pod":           sts.Spec.Template.Labels,
+		serviceKind:     resources.CoordinatorHeadlessService(cluster).Labels,
+	} {
+		if diff := cmp.Diff(want, got); diff != "" {
+			t.Errorf("%s labels mismatch (-want +got):\n%s", name, diff)
+		}
+	}
+}
+
+// TestStatefulSetExtraEnv asserts the passthrough environment lands after the
+// license variables the operator wires from the secrets block, and that no
+// secret material can ride along with it.
+func TestStatefulSetExtraEnv(t *testing.T) {
+	cluster := tunedCluster()
+
+	tests := []struct {
+		name string
+		sts  *appsv1.StatefulSet
+		want []corev1.EnvVar
+	}{
+		{
+			name: coordinatorComponent,
+			sts:  resources.CoordinatorStatefulSet(cluster),
+			want: append(
+				append([]corev1.EnvVar{{
+					Name: "POD_NAME",
+					ValueFrom: &corev1.EnvVarSource{
+						FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"},
+					},
+				}}, licenseEnv("memgraph-secrets", "MEMGRAPH_ENTERPRISE_LICENSE", "MEMGRAPH_ORGANIZATION_NAME")...),
+				corev1.EnvVar{Name: "COORDINATOR_LABEL", Value: "coord"},
+			),
+		},
+		{
+			name: dataComponent,
+			sts:  resources.DataStatefulSet(cluster),
+			want: append(
+				licenseEnv("memgraph-secrets", "MEMGRAPH_ENTERPRISE_LICENSE", "MEMGRAPH_ORGANIZATION_NAME"),
+				corev1.EnvVar{Name: "DATA_LABEL_ONE", Value: "one"},
+				corev1.EnvVar{Name: "DATA_LABEL_TWO", Value: "two"},
+			),
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tc.sts.Spec.Template.Spec.Containers[0].Env
+			if diff := cmp.Diff(tc.want, got); diff != "" {
+				t.Errorf("env mismatch (-want +got):\n%s", diff)
+			}
+			for _, variable := range got {
+				if variable.ValueFrom != nil && variable.ValueFrom.SecretKeyRef != nil {
+					if variable.Name != "MEMGRAPH_ENTERPRISE_LICENSE" && variable.Name != "MEMGRAPH_ORGANIZATION_NAME" {
+						t.Errorf("env %q reads a Secret; only the secrets block may", variable.Name)
+					}
 				}
 			}
 		})

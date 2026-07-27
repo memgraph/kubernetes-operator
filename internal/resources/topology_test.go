@@ -113,3 +113,82 @@ func TestDeclaredTopologyMatchesCoordinatorStartScript(t *testing.T) {
 		}
 	}
 }
+
+// TestDeclaredTopologyPortsAndClusterDomain asserts the configured ports and
+// cluster domain reach every advertised address, since these are exactly the
+// addresses the operator registers with the cluster.
+func TestDeclaredTopologyPortsAndClusterDomain(t *testing.T) {
+	got := resources.DeclaredTopology(tunedCluster())
+
+	coordinatorFQDN := func(ordinal int) string {
+		return fmt.Sprintf("%s-%d.%s.%s.svc.k8s.example.com", coordinatorName, ordinal, coordinatorName, testNamespace)
+	}
+	dataFQDN := func(ordinal int) string {
+		return fmt.Sprintf("%s-%d.%s.%s.svc.k8s.example.com", dataName, ordinal, dataName, testNamespace)
+	}
+
+	want := planner.Topology{
+		Coordinators: []memgraph.CoordinatorSpec{
+			{
+				ID:                1,
+				BoltServer:        coordinatorFQDN(0) + ":7777",
+				CoordinatorServer: coordinatorFQDN(0) + ":12001",
+				ManagementServer:  coordinatorFQDN(0) + ":10001",
+			},
+			{
+				ID:                2,
+				BoltServer:        coordinatorFQDN(1) + ":7777",
+				CoordinatorServer: coordinatorFQDN(1) + ":12001",
+				ManagementServer:  coordinatorFQDN(1) + ":10001",
+			},
+			{
+				ID:                3,
+				BoltServer:        coordinatorFQDN(2) + ":7777",
+				CoordinatorServer: coordinatorFQDN(2) + ":12001",
+				ManagementServer:  coordinatorFQDN(2) + ":10001",
+			},
+		},
+		DataInstances: []memgraph.DataInstanceSpec{
+			{
+				Name:              "instance_0",
+				BoltServer:        dataFQDN(0) + ":7777",
+				ManagementServer:  dataFQDN(0) + ":10001",
+				ReplicationServer: dataFQDN(0) + ":20001",
+			},
+			{
+				Name:              "instance_1",
+				BoltServer:        dataFQDN(1) + ":7777",
+				ManagementServer:  dataFQDN(1) + ":10001",
+				ReplicationServer: dataFQDN(1) + ":20001",
+			},
+		},
+	}
+
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("DeclaredTopology() mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// The coordinator pods must advertise the same non-default identity the
+// registration topology declares for them, otherwise the Raft cluster and the
+// registrations disagree about who is who.
+func TestDeclaredTopologyMatchesTunedCoordinatorStartScript(t *testing.T) {
+	cluster := tunedCluster()
+	topology := resources.DeclaredTopology(cluster)
+	sts := resources.CoordinatorStatefulSet(cluster)
+	script := strings.Join(sts.Spec.Template.Spec.Containers[0].Command, "\n")
+
+	suffix := fmt.Sprintf("%s.%s.svc.k8s.example.com", coordinatorName, testNamespace)
+	if !strings.Contains(script, `--coordinator-hostname="${POD_NAME}.`+suffix+`"`) {
+		t.Errorf("coordinator start script does not advertise the configured cluster domain:\n%s", script)
+	}
+	if !strings.Contains(script, "--coordinator-port=12001") {
+		t.Errorf("coordinator start script does not listen on the configured coordinator port:\n%s", script)
+	}
+	for i, coordinator := range topology.Coordinators {
+		wantHost := fmt.Sprintf("%s-%d.%s:12001", coordinatorName, i, suffix)
+		if coordinator.CoordinatorServer != wantHost {
+			t.Errorf("coordinator %d advertises %q, want %q", coordinator.ID, coordinator.CoordinatorServer, wantHost)
+		}
+	}
+}

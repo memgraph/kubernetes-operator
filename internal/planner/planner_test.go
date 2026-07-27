@@ -21,10 +21,18 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 
+	memgraphcomv1alpha1 "github.com/memgraph/kubernetes-operator/api/v1alpha1"
 	"github.com/memgraph/kubernetes-operator/internal/memgraph"
 	"github.com/memgraph/kubernetes-operator/internal/planner"
+	"github.com/memgraph/kubernetes-operator/internal/resources"
 )
+
+// firstInstance is the data instance the planner promotes at bootstrap: the
+// first one the topology declares.
+const firstInstance = "instance_0"
 
 // declaredTopology is the canonical 3-coordinator, 2-data-instance fixture
 // the cases below diff observed cluster states against.
@@ -101,7 +109,7 @@ func TestPlan(t *testing.T) {
 				planner.AddCoordinator{Coordinator: coordinatorSpec(3)},
 				planner.RegisterInstance{Instance: dataInstanceSpec(0)},
 				planner.RegisterInstance{Instance: dataInstanceSpec(1)},
-				planner.SetInstanceToMain{Name: "instance_0"},
+				planner.SetInstanceToMain{Name: firstInstance},
 			},
 		},
 		{
@@ -168,7 +176,7 @@ func TestPlan(t *testing.T) {
 				observedDataInstance(1, memgraph.RoleReplica),
 			},
 			want: []planner.Command{
-				planner.SetInstanceToMain{Name: "instance_0"},
+				planner.SetInstanceToMain{Name: firstInstance},
 			},
 		},
 		{
@@ -220,5 +228,89 @@ func TestPlan(t *testing.T) {
 				t.Errorf("Plan() mismatch (-want +got):\n%s", diff)
 			}
 		})
+	}
+}
+
+// TestPlanUsesConfiguredPortsAndClusterDomain plans a fresh bootstrap over a
+// topology derived from a CR with non-default ports and cluster domain: the
+// registration commands must carry exactly those addresses, because they are
+// what the coordinators will use to reach every instance.
+func TestPlanUsesConfiguredPortsAndClusterDomain(t *testing.T) {
+	cluster := &memgraphcomv1alpha1.MemgraphCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "example", Namespace: "memgraph-test"},
+		Spec: memgraphcomv1alpha1.MemgraphClusterSpec{
+			Coordinators:  ptr.To(int32(1)),
+			DataInstances: ptr.To(int32(1)),
+			ClusterDomain: "k8s.example.com",
+			Ports: memgraphcomv1alpha1.PortsSpec{
+				BoltPort:        ptr.To(int32(7777)),
+				ManagementPort:  ptr.To(int32(10001)),
+				ReplicationPort: ptr.To(int32(20001)),
+				CoordinatorPort: ptr.To(int32(12001)),
+			},
+		},
+	}
+
+	coordinatorHost := "example-coordinator-0.example-coordinator.memgraph-test.svc.k8s.example.com"
+	dataHost := "example-data-0.example-data.memgraph-test.svc.k8s.example.com"
+	want := []planner.Command{
+		planner.AddCoordinator{Coordinator: memgraph.CoordinatorSpec{
+			ID:                1,
+			BoltServer:        coordinatorHost + ":7777",
+			CoordinatorServer: coordinatorHost + ":12001",
+			ManagementServer:  coordinatorHost + ":10001",
+		}},
+		planner.RegisterInstance{Instance: memgraph.DataInstanceSpec{
+			Name:              firstInstance,
+			BoltServer:        dataHost + ":7777",
+			ManagementServer:  dataHost + ":10001",
+			ReplicationServer: dataHost + ":20001",
+		}},
+		planner.SetInstanceToMain{Name: firstInstance},
+	}
+
+	got := planner.Plan(resources.DeclaredTopology(cluster), nil)
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("Plan() mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// A cluster already registered on the configured addresses is converged: the
+// planner must not re-issue registrations just because the ports are not the
+// defaults.
+func TestPlanConvergedOnConfiguredPorts(t *testing.T) {
+	cluster := &memgraphcomv1alpha1.MemgraphCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "example", Namespace: "memgraph-test"},
+		Spec: memgraphcomv1alpha1.MemgraphClusterSpec{
+			Coordinators:  ptr.To(int32(1)),
+			DataInstances: ptr.To(int32(1)),
+			ClusterDomain: "k8s.example.com",
+			Ports:         memgraphcomv1alpha1.PortsSpec{BoltPort: ptr.To(int32(7777))},
+		},
+	}
+	declared := resources.DeclaredTopology(cluster)
+
+	coordinator := declared.Coordinators[0]
+	instance := declared.DataInstances[0]
+	observed := []memgraph.Instance{
+		{
+			Name:              coordinator.Name(),
+			BoltServer:        coordinator.BoltServer,
+			CoordinatorServer: coordinator.CoordinatorServer,
+			ManagementServer:  coordinator.ManagementServer,
+			Health:            "up",
+			Role:              memgraph.RoleLeader,
+		},
+		{
+			Name:             instance.Name,
+			BoltServer:       instance.BoltServer,
+			ManagementServer: instance.ManagementServer,
+			Health:           "up",
+			Role:             memgraph.RoleMain,
+		},
+	}
+
+	if got := planner.Plan(declared, observed); got != nil {
+		t.Errorf("Plan() = %v, want no commands", got)
 	}
 }
