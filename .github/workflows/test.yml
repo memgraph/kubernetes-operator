@@ -51,6 +51,11 @@ jobs:
     permissions:
       contents: read
     name: Install chart
+    # Disabled for now: this job boots a Kind cluster on every pull request.
+    # Remove this line to bring it back -- and note that its version check is
+    # premature until the first release, since it enforces a bump against a
+    # chart version that has never been published.
+    if: false
     runs-on: ubuntu-latest
     steps:
       - name: Clone the code
