@@ -75,11 +75,20 @@ type MemgraphClusterReconciler struct {
 	Memgraph memgraph.Connector
 }
 
-// +kubebuilder:rbac:groups=memgraph.com,resources=memgraphclusters,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=memgraph.com,resources=memgraphclusters/status,verbs=get;update;patch
+// The install chart's ClusterRole is generated from these markers, so they are
+// the operator's permission surface: nothing broader is ever granted. The
+// verbs are only the ones this reconciler issues — it reads MemgraphClusters
+// and patches their status, and server-side-applies (create plus patch) the
+// workloads without ever updating or deleting them, because deletion belongs
+// to garbage collection via the owner references. The finalizers subresource
+// is needed to set those owner references: they block owner deletion, which
+// clusters running the OwnerReferencesPermissionEnforcement admission plugin
+// only allow with update access to the owner's finalizers.
+// +kubebuilder:rbac:groups=memgraph.com,resources=memgraphclusters,verbs=get;list;watch
+// +kubebuilder:rbac:groups=memgraph.com,resources=memgraphclusters/status,verbs=get;patch
 // +kubebuilder:rbac:groups=memgraph.com,resources=memgraphclusters/finalizers,verbs=update
-// +kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;create;patch
+// +kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;patch
 
 // Reconcile drives the cluster toward the declared MemgraphCluster spec in
 // two stages. First it server-side-applies the builders' desired objects: one

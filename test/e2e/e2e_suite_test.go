@@ -31,12 +31,18 @@ import (
 	"github.com/memgraph/kubernetes-operator/test/utils"
 )
 
-var (
+const (
+	// managerImageRepository and managerImageTag make up the manager image that
+	// is built, loaded into Kind, and installed through the chart's image values.
+	managerImageRepository = "example.com/kubernetes-operator"
+	managerImageTag        = "v0.0.1"
+
 	// managerImage is the manager image to be built and loaded for testing.
-	managerImage = "example.com/kubernetes-operator:v0.0.1"
-	// shouldCleanupCertManager tracks whether CertManager was installed by this suite.
-	shouldCleanupCertManager = false
+	managerImage = managerImageRepository + ":" + managerImageTag
 )
+
+// shouldCleanupCertManager tracks whether CertManager was installed by this suite.
+var shouldCleanupCertManager = false
 
 // TestE2E runs the e2e test suite to validate the solution in an isolated environment.
 // The default setup requires Kind and CertManager.
@@ -51,10 +57,13 @@ func TestE2E(t *testing.T) {
 }
 
 // The suite deploys the operator once, before any scenario runs: build and
-// load the manager image, install the CRDs, and deploy the controller into its
-// namespace. Scenario containers (Describe blocks) then only exercise
-// MemgraphCluster behavior, so a new scenario is a new test case, never new
-// pipeline or deployment plumbing.
+// load the manager image, then helm install the local chart into a namespace
+// that enforces the restricted Pod Security Standard. The install path is the
+// users' install path — the same chart, the same CRDs, the same
+// least-privilege RBAC — so every scenario below runs against exactly the
+// permissions a real installation grants. Scenario containers (Describe
+// blocks) then only exercise MemgraphCluster behavior, so a new scenario is a
+// new test case, never new pipeline or deployment plumbing.
 var _ = BeforeSuite(func() {
 	By("building the manager image")
 	cmd := exec.Command("make", "docker-build", fmt.Sprintf("IMG=%s", managerImage))
@@ -81,24 +90,26 @@ var _ = BeforeSuite(func() {
 	_, err = utils.Run(cmd)
 	Expect(err).NotTo(HaveOccurred(), "Failed to label namespace with restricted policy")
 
-	By("installing CRDs")
-	cmd = exec.Command("make", "install")
+	By("installing the operator from the local install chart")
+	cmd = exec.Command("helm", "install", releaseName, chartDir,
+		"--namespace", namespace,
+		"--set-string", "image.repository="+managerImageRepository,
+		"--set-string", "image.tag="+managerImageTag,
+		"--wait", "--timeout", "5m",
+	)
 	_, err = utils.Run(cmd)
-	Expect(err).NotTo(HaveOccurred(), "Failed to install CRDs")
-
-	By("deploying the controller-manager")
-	cmd = exec.Command("make", "deploy", fmt.Sprintf("IMG=%s", managerImage))
-	_, err = utils.Run(cmd)
-	Expect(err).NotTo(HaveOccurred(), "Failed to deploy the controller-manager")
+	Expect(err).NotTo(HaveOccurred(), "Failed to install the operator chart")
 })
 
 var _ = AfterSuite(func() {
-	By("undeploying the controller-manager")
-	cmd := exec.Command("make", "undeploy")
+	By("uninstalling the operator chart")
+	cmd := exec.Command("helm", "uninstall", releaseName, "--namespace", namespace, "--wait")
 	_, _ = utils.Run(cmd)
 
+	// Helm never removes CRDs it installed, so the documented uninstall ends
+	// with deleting them explicitly.
 	By("uninstalling CRDs")
-	cmd = exec.Command("make", "uninstall")
+	cmd = exec.Command("kubectl", "delete", "-f", chartDir+"/crds", "--ignore-not-found=true")
 	_, _ = utils.Run(cmd)
 
 	By("removing manager namespace")

@@ -137,7 +137,7 @@ var _ = Describe("MemgraphCluster", Ordered, func() {
 			{"get", "pods", "-n", clusterNamespace, "-o", "wide"},
 			{"get", "memgraphclusters", "-n", clusterNamespace, "-o", "yaml"},
 			{"get", "events", "-n", clusterNamespace, "--sort-by=.lastTimestamp"},
-			{"logs", "deploy/kubernetes-operator-controller-manager", "-n", namespace},
+			{"logs", "deploy/" + controllerDeploymentName, "-n", namespace},
 		} {
 			cmd := exec.Command("kubectl", args...)
 			output, err := utils.Run(cmd)
