@@ -302,6 +302,56 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 			Expect(dumps.Coordinators).To(Equal(defaultRoleCoreDumps()))
 		})
 
+		// The extraVolumes entries are schemaless, so nothing but this spec
+		// proves the API server keeps an arbitrary volume source intact instead
+		// of pruning the fields it has no schema for.
+		It("should preserve a schemaless extra volume through a round trip", func() {
+			stored := createAccepted("valid-extra-volumes", memgraphcomv1alpha1.MemgraphClusterSpec{
+				ExtraVolumes: memgraphcomv1alpha1.ExtraVolumesSpec{
+					Data: []corev1.Volume{{
+						Name: "bolt-certs",
+						VolumeSource: corev1.VolumeSource{
+							Secret: &corev1.SecretVolumeSource{
+								SecretName:  "bolt-tls",
+								DefaultMode: ptr.To(int32(0o400)),
+								Items:       []corev1.KeyToPath{{Key: "tls.crt", Path: "cert.pem"}},
+							},
+						},
+					}},
+					Coordinators: []corev1.Volume{{
+						Name: "vault",
+						VolumeSource: corev1.VolumeSource{
+							CSI: &corev1.CSIVolumeSource{
+								Driver:           "secrets-store.csi.k8s.io",
+								ReadOnly:         ptr.To(true),
+								VolumeAttributes: map[string]string{"secretProviderClass": "memgraph"},
+							},
+						},
+					}},
+				},
+				ExtraVolumeMounts: memgraphcomv1alpha1.ExtraVolumeMountsSpec{
+					Data: []corev1.VolumeMount{{
+						Name: "bolt-certs", MountPath: "/etc/memgraph/ssl", ReadOnly: true,
+					}},
+				},
+			})
+
+			volume := stored.Spec.ExtraVolumes.Data[0]
+			Expect(volume.Name).To(Equal("bolt-certs"))
+			Expect(volume.Secret).NotTo(BeNil(), "the secret source must survive a schemaless round trip")
+			Expect(volume.Secret.SecretName).To(Equal("bolt-tls"))
+			Expect(volume.Secret.DefaultMode).To(HaveValue(Equal(int32(0o400))))
+			Expect(volume.Secret.Items).To(ConsistOf(corev1.KeyToPath{Key: "tls.crt", Path: "cert.pem"}))
+
+			csi := stored.Spec.ExtraVolumes.Coordinators[0].CSI
+			Expect(csi).NotTo(BeNil())
+			Expect(csi.Driver).To(Equal("secrets-store.csi.k8s.io"))
+			Expect(csi.VolumeAttributes).To(HaveKeyWithValue("secretProviderClass", "memgraph"))
+
+			Expect(stored.Spec.ExtraVolumeMounts.Data[0].MountPath).To(Equal("/etc/memgraph/ssl"))
+			Expect(stored.Spec.ExtraVolumeMounts.Coordinators).To(BeEmpty())
+		})
+
 		It("should accept a registry host carrying a port", func() {
 			stored := createAccepted("valid-registry-port", memgraphcomv1alpha1.MemgraphClusterSpec{
 				Image: memgraphcomv1alpha1.ImageSpec{Repository: "registry.example.com:5000/memgraph"},
@@ -382,6 +432,22 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 					Ports: memgraphcomv1alpha1.PortsSpec{ManagementPort: ptr.To(memgraphcomv1alpha1.DefaultBoltPort)},
 				},
 				"must all be different ports"),
+			// Two mounts cannot share a path, and mounting over the data or log
+			// directory would hide Memgraph's own storage behind another volume.
+			Entry("an extra mount over the data directory", "invalid-extra-mount-lib",
+				memgraphcomv1alpha1.MemgraphClusterSpec{
+					ExtraVolumeMounts: memgraphcomv1alpha1.ExtraVolumeMountsSpec{
+						Data: []corev1.VolumeMount{{Name: "shadow", MountPath: "/var/lib/memgraph"}},
+					},
+				},
+				"extraVolumeMounts must not mount over a path the operator already mounts"),
+			Entry("an extra mount over the scratch directory", "invalid-extra-mount-tmp",
+				memgraphcomv1alpha1.MemgraphClusterSpec{
+					ExtraVolumeMounts: memgraphcomv1alpha1.ExtraVolumeMountsSpec{
+						Coordinators: []corev1.VolumeMount{{Name: "shadow", MountPath: "/tmp"}},
+					},
+				},
+				"extraVolumeMounts must not mount over a path the operator already mounts"),
 			Entry("a cluster domain that is not a DNS name", "invalid-cluster-domain",
 				memgraphcomv1alpha1.MemgraphClusterSpec{ClusterDomain: "Cluster_Local"},
 				"in body should match"),

@@ -653,6 +653,62 @@ type ExtraEnvSpec struct {
 	Data []EnvVar `json:"data,omitempty"`
 }
 
+// ExtraVolumesSpec adds pod volumes to a role beyond the ones the operator
+// provisions, mirroring the memgraph-high-availability Helm chart's
+// storage.<role>.extraVolumes block. Each entry is a core/v1 Volume: a Secret
+// holding certificates, a ConfigMap, a CSI volume, an emptyDir, whatever the
+// pod needs. extraVolumeMounts is what puts them in the Memgraph container.
+//
+// The entries are deliberately schemaless. A core/v1 Volume carries every
+// volume source Kubernetes has, and inlining that schema twice grows this CRD
+// past the size a client-side kubectl apply can carry — so the field accepts
+// the same arbitrary volume YAML the Helm chart does, and the API server keeps
+// it verbatim without validating its contents. What that costs: kubectl
+// explain says nothing about the entries, and a malformed or misspelled volume
+// source is caught when the operator applies the StatefulSet, surfacing on this
+// resource as the ApplyFailed condition rather than as an admission error. Two
+// mistakes that arrive that way in particular: reusing one of the volume names
+// the operator owns (lib-storage, log-storage, core-dumps, tmp), and naming a
+// volume source that does not exist.
+type ExtraVolumesSpec struct {
+	// coordinators are added to every coordinator pod.
+	// +kubebuilder:validation:Schemaless
+	// +kubebuilder:pruning:PreserveUnknownFields
+	// +optional
+	Coordinators []corev1.Volume `json:"coordinators,omitempty"`
+
+	// data are added to every data instance pod.
+	// +kubebuilder:validation:Schemaless
+	// +kubebuilder:pruning:PreserveUnknownFields
+	// +optional
+	Data []corev1.Volume `json:"data,omitempty"`
+}
+
+// ExtraVolumeMountsSpec mounts volumes into a role's Memgraph container beyond
+// the ones the operator mounts, mirroring the memgraph-high-availability Helm
+// chart's storage.<role>.extraVolumeMounts block. Each entry names a volume the
+// pod has — usually one from extraVolumes.
+//
+// The paths the operator already mounts are off limits: two mounts cannot share
+// a path, and mounting over Memgraph's data or log directory would hide it.
+type ExtraVolumeMountsSpec struct {
+	// coordinators are added to every coordinator pod's Memgraph container.
+	// +listType=map
+	// +listMapKey=mountPath
+	// +kubebuilder:validation:MaxItems=64
+	// +kubebuilder:validation:XValidation:rule="self.all(m, !(m.mountPath in ['/var/lib/memgraph', '/var/log/memgraph', '/var/core/memgraph', '/tmp']))",message="extraVolumeMounts must not mount over a path the operator already mounts (/var/lib/memgraph, /var/log/memgraph, /var/core/memgraph, /tmp)"
+	// +optional
+	Coordinators []corev1.VolumeMount `json:"coordinators,omitempty"`
+
+	// data are added to every data instance pod's Memgraph container.
+	// +listType=map
+	// +listMapKey=mountPath
+	// +kubebuilder:validation:MaxItems=64
+	// +kubebuilder:validation:XValidation:rule="self.all(m, !(m.mountPath in ['/var/lib/memgraph', '/var/log/memgraph', '/var/core/memgraph', '/tmp']))",message="extraVolumeMounts must not mount over a path the operator already mounts (/var/lib/memgraph, /var/log/memgraph, /var/core/memgraph, /tmp)"
+	// +optional
+	Data []corev1.VolumeMount `json:"data,omitempty"`
+}
+
 // ExtraArgsSpec passes additional Memgraph flags to a role, so any flag is
 // usable without waiting for a typed field. The flags are appended after the
 // ones the operator derives, and Memgraph takes the last occurrence of a
@@ -757,6 +813,16 @@ type MemgraphClusterSpec struct {
 	// extraArgs passes additional Memgraph flags to both roles.
 	// +optional
 	ExtraArgs ExtraArgsSpec `json:"extraArgs,omitzero"`
+
+	// extraVolumes adds pod volumes to both roles beyond the ones the operator
+	// provisions.
+	// +optional
+	ExtraVolumes ExtraVolumesSpec `json:"extraVolumes,omitzero"`
+
+	// extraVolumeMounts mounts volumes into both roles' Memgraph containers
+	// beyond the ones the operator mounts.
+	// +optional
+	ExtraVolumeMounts ExtraVolumeMountsSpec `json:"extraVolumeMounts,omitzero"`
 }
 
 // MemgraphClusterStatus defines the observed state of MemgraphCluster.

@@ -787,6 +787,70 @@ func TestStatefulSetCoreDumpsUploader(t *testing.T) {
 	}
 }
 
+// TestStatefulSetExtraVolumes covers the passthrough: the role's volumes join
+// the pod after the operator's scratch volume, its mounts join the Memgraph
+// container after the operator's, and the other role is untouched.
+func TestStatefulSetExtraVolumes(t *testing.T) {
+	certVolume := corev1.Volume{
+		Name: "bolt-certs",
+		VolumeSource: corev1.VolumeSource{
+			Secret: &corev1.SecretVolumeSource{SecretName: "bolt-tls"},
+		},
+	}
+	certMount := corev1.VolumeMount{Name: "bolt-certs", MountPath: "/etc/memgraph/ssl", ReadOnly: true}
+
+	cluster := minimalCluster()
+	cluster.Spec.ExtraVolumes = memgraphcomv1alpha1.ExtraVolumesSpec{
+		Data: []corev1.Volume{certVolume},
+	}
+	cluster.Spec.ExtraVolumeMounts = memgraphcomv1alpha1.ExtraVolumeMountsSpec{
+		Data: []corev1.VolumeMount{certMount},
+	}
+
+	t.Run(dataComponent, func(t *testing.T) {
+		podSpec := resources.DataStatefulSet(cluster).Spec.Template.Spec
+
+		wantVolumes := append(expectedVolumes(), certVolume)
+		if diff := cmp.Diff(wantVolumes, podSpec.Volumes); diff != "" {
+			t.Errorf("volumes mismatch (-want +got):\n%s", diff)
+		}
+		wantMounts := append(expectedVolumeMounts(), certMount)
+		if diff := cmp.Diff(wantMounts, podSpec.Containers[0].VolumeMounts); diff != "" {
+			t.Errorf("volume mounts mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run(coordinatorComponent, func(t *testing.T) {
+		podSpec := resources.CoordinatorStatefulSet(cluster).Spec.Template.Spec
+
+		if diff := cmp.Diff(expectedVolumes(), podSpec.Volumes); diff != "" {
+			t.Errorf("volumes mismatch (-want +got):\n%s", diff)
+		}
+		if diff := cmp.Diff(expectedVolumeMounts(), podSpec.Containers[0].VolumeMounts); diff != "" {
+			t.Errorf("volume mounts mismatch (-want +got):\n%s", diff)
+		}
+	})
+}
+
+// A volume the role declares but never mounts is still a legitimate pod volume
+// — the uploader sidecar or a future consumer may be its reader — so the
+// builder passes it through rather than second-guessing it.
+func TestStatefulSetExtraVolumeWithoutMount(t *testing.T) {
+	cluster := minimalCluster()
+	cluster.Spec.ExtraVolumes.Coordinators = []corev1.Volume{{
+		Name:         "scratch",
+		VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+	}}
+
+	podSpec := resources.CoordinatorStatefulSet(cluster).Spec.Template.Spec
+	if len(podSpec.Volumes) != 2 {
+		t.Errorf("volumes = %v, want the scratch volume alongside tmp", podSpec.Volumes)
+	}
+	if diff := cmp.Diff(expectedVolumeMounts(), podSpec.Containers[0].VolumeMounts); diff != "" {
+		t.Errorf("volume mounts mismatch (-want +got):\n%s", diff)
+	}
+}
+
 // TestStatefulSetRetentionPolicy pins the mapping from the spec's retention
 // policy onto the StatefulSet machinery that is the only deleter of this
 // cluster's storage. whenScaled stays Retain regardless: both replica counts

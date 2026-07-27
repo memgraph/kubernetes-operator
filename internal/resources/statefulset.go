@@ -286,7 +286,8 @@ func uploaderSidecar(coreDumps normalizedCoreDumps) corev1.Container {
 
 // volumeMounts are the Memgraph container's mounts: lib storage, the scratch
 // directory the read-only root filesystem needs, log storage unless the role
-// opted out of it, and the core dumps directory when the role collects dumps.
+// opted out of it, the core dumps directory when the role collects dumps, and
+// last the role's own extra mounts.
 func volumeMounts(role normalizedRole) []corev1.VolumeMount {
 	mounts := []corev1.VolumeMount{{Name: libVolumeName, MountPath: libMountPath}}
 	if role.storage.createLogClaim {
@@ -297,7 +298,18 @@ func volumeMounts(role normalizedRole) []corev1.VolumeMount {
 		mounts = append(mounts,
 			corev1.VolumeMount{Name: coreDumpsVolumeName, MountPath: coreDumpsMountPath})
 	}
-	return mounts
+	return append(mounts, role.extraMounts...)
+}
+
+// podVolumes is the scratch directory the read-only root filesystem needs plus
+// the role's extra volumes. Everything persistent comes from
+// volumeClaimTemplates instead.
+func podVolumes(role normalizedRole) []corev1.Volume {
+	volumes := make([]corev1.Volume, 0, 1+len(role.extraVolumes))
+	volumes = append(volumes, corev1.Volume{
+		Name: tmpVolumeName, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+	})
+	return append(volumes, role.extraVolumes...)
 }
 
 // volumeClaimTemplates are the per-pod claims of the role: lib storage always,
@@ -388,12 +400,7 @@ func statefulSet(
 						RunAsNonRoot:   ptr.To(true),
 						SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
 					},
-					// Persistent storage comes from the volumeClaimTemplates
-					// above; only the scratch directory the read-only root
-					// filesystem still needs is ephemeral.
-					Volumes: []corev1.Volume{
-						{Name: tmpVolumeName, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
-					},
+					Volumes: podVolumes(role),
 				},
 			},
 		},

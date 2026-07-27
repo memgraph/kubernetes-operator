@@ -125,6 +125,8 @@ type normalizedRole struct {
 	serviceLabels     map[string]string
 	env               []corev1.EnvVar
 	extraArgs         []string
+	extraVolumes      []corev1.Volume
+	extraMounts       []corev1.VolumeMount
 }
 
 // normalizedCoreDumps is one role's core dump configuration with every optional
@@ -176,24 +178,28 @@ func normalize(spec memgraphcomv1alpha1.MemgraphClusterSpec) normalizedSpec {
 		ports:           normalizePorts(spec.Ports),
 		retentionPolicy: spec.Storage.RetentionPolicy,
 		coordinatorRole: normalizeRole(roleSpec{
-			storage:   spec.Storage.Coordinators,
-			coreDumps: normalizeCoreDumps(spec.CoreDumps, spec.CoreDumps.Coordinators),
-			probes:    spec.Probes.Coordinators,
-			resources: spec.Resources.Coordinators,
-			labels:    spec.Labels.Coordinators,
-			env:       spec.ExtraEnv.Coordinators,
-			extraArgs: spec.ExtraArgs.Coordinators,
+			storage:      spec.Storage.Coordinators,
+			coreDumps:    normalizeCoreDumps(spec.CoreDumps, spec.CoreDumps.Coordinators),
+			probes:       spec.Probes.Coordinators,
+			resources:    spec.Resources.Coordinators,
+			labels:       spec.Labels.Coordinators,
+			env:          spec.ExtraEnv.Coordinators,
+			extraArgs:    spec.ExtraArgs.Coordinators,
+			extraVolumes: spec.ExtraVolumes.Coordinators,
+			extraMounts:  spec.ExtraVolumeMounts.Coordinators,
 
 			startupFailureThreshold: memgraphcomv1alpha1.DefaultProbeFailureThreshold,
 		}),
 		dataRole: normalizeRole(roleSpec{
-			storage:   spec.Storage.Data,
-			coreDumps: normalizeCoreDumps(spec.CoreDumps, spec.CoreDumps.Data),
-			probes:    spec.Probes.Data,
-			resources: spec.Resources.Data,
-			labels:    spec.Labels.Data,
-			env:       spec.ExtraEnv.Data,
-			extraArgs: spec.ExtraArgs.Data,
+			storage:      spec.Storage.Data,
+			coreDumps:    normalizeCoreDumps(spec.CoreDumps, spec.CoreDumps.Data),
+			probes:       spec.Probes.Data,
+			resources:    spec.Resources.Data,
+			labels:       spec.Labels.Data,
+			env:          spec.ExtraEnv.Data,
+			extraArgs:    spec.ExtraArgs.Data,
+			extraVolumes: spec.ExtraVolumes.Data,
+			extraMounts:  spec.ExtraVolumeMounts.Data,
 
 			// Data instances get the long startup budget: only they load
 			// snapshots, and a large restore must not be killed mid-load.
@@ -236,12 +242,14 @@ type roleSpec struct {
 	// coreDumps arrives already normalized: unlike the other entries it is
 	// folded from two spec blocks (the cluster-wide settings and the role's
 	// own), which the caller does before handing it over.
-	coreDumps normalizedCoreDumps
-	probes    memgraphcomv1alpha1.RoleProbesSpec
-	resources corev1.ResourceRequirements
-	labels    memgraphcomv1alpha1.RoleLabelsSpec
-	env       []memgraphcomv1alpha1.EnvVar
-	extraArgs []string
+	coreDumps    normalizedCoreDumps
+	probes       memgraphcomv1alpha1.RoleProbesSpec
+	resources    corev1.ResourceRequirements
+	labels       memgraphcomv1alpha1.RoleLabelsSpec
+	env          []memgraphcomv1alpha1.EnvVar
+	extraArgs    []string
+	extraVolumes []corev1.Volume
+	extraMounts  []corev1.VolumeMount
 
 	// startupFailureThreshold is this role's default startup probe failure
 	// budget — the one default that differs between the roles.
@@ -261,6 +269,8 @@ func normalizeRole(role roleSpec) normalizedRole {
 		serviceLabels:     role.labels.ServiceLabels,
 		env:               normalizeEnv(role.env),
 		extraArgs:         role.extraArgs,
+		extraVolumes:      role.extraVolumes,
+		extraMounts:       role.extraMounts,
 	}
 }
 

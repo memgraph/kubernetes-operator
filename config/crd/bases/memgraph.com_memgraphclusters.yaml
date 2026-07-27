@@ -450,6 +450,174 @@ spec:
                       rule: self.all(e, !(e.name in ['MEMGRAPH_ENTERPRISE_LICENSE',
                         'MEMGRAPH_ORGANIZATION_NAME', 'POD_NAME']))
                 type: object
+              extraVolumeMounts:
+                description: |-
+                  extraVolumeMounts mounts volumes into both roles' Memgraph containers
+                  beyond the ones the operator mounts.
+                properties:
+                  coordinators:
+                    description: coordinators are added to every coordinator pod's
+                      Memgraph container.
+                    items:
+                      description: VolumeMount describes a mounting of a Volume within
+                        a container.
+                      properties:
+                        mountPath:
+                          description: |-
+                            Path within the container at which the volume should be mounted.  Must
+                            not contain ':'.
+                          type: string
+                        mountPropagation:
+                          description: |-
+                            mountPropagation determines how mounts are propagated from the host
+                            to container and the other way around.
+                            When not set, MountPropagationNone is used.
+                            This field is beta in 1.10.
+                            When RecursiveReadOnly is set to IfPossible or to Enabled, MountPropagation must be None or unspecified
+                            (which defaults to None).
+                          type: string
+                        name:
+                          description: This must match the Name of a Volume.
+                          type: string
+                        readOnly:
+                          description: |-
+                            Mounted read-only if true, read-write otherwise (false or unspecified).
+                            Defaults to false.
+                          type: boolean
+                        recursiveReadOnly:
+                          description: |-
+                            RecursiveReadOnly specifies whether read-only mounts should be handled
+                            recursively.
+
+                            If ReadOnly is false, this field has no meaning and must be unspecified.
+
+                            If ReadOnly is true, and this field is set to Disabled, the mount is not made
+                            recursively read-only.  If this field is set to IfPossible, the mount is made
+                            recursively read-only, if it is supported by the container runtime.  If this
+                            field is set to Enabled, the mount is made recursively read-only if it is
+                            supported by the container runtime, otherwise the pod will not be started and
+                            an error will be generated to indicate the reason.
+
+                            If this field is set to IfPossible or Enabled, MountPropagation must be set to
+                            None (or be unspecified, which defaults to None).
+
+                            If this field is not specified, it is treated as an equivalent of Disabled.
+                          type: string
+                        subPath:
+                          description: |-
+                            Path within the volume from which the container's volume should be mounted.
+                            Defaults to "" (volume's root).
+                          type: string
+                        subPathExpr:
+                          description: |-
+                            Expanded path within the volume from which the container's volume should be mounted.
+                            Behaves similarly to SubPath but environment variable references $(VAR_NAME) are expanded using the container's environment.
+                            Defaults to "" (volume's root).
+                            SubPathExpr and SubPath are mutually exclusive.
+                          type: string
+                      required:
+                      - mountPath
+                      - name
+                      type: object
+                    maxItems: 64
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - mountPath
+                    x-kubernetes-list-type: map
+                    x-kubernetes-validations:
+                    - message: extraVolumeMounts must not mount over a path the operator
+                        already mounts (/var/lib/memgraph, /var/log/memgraph, /var/core/memgraph,
+                        /tmp)
+                      rule: self.all(m, !(m.mountPath in ['/var/lib/memgraph', '/var/log/memgraph',
+                        '/var/core/memgraph', '/tmp']))
+                  data:
+                    description: data are added to every data instance pod's Memgraph
+                      container.
+                    items:
+                      description: VolumeMount describes a mounting of a Volume within
+                        a container.
+                      properties:
+                        mountPath:
+                          description: |-
+                            Path within the container at which the volume should be mounted.  Must
+                            not contain ':'.
+                          type: string
+                        mountPropagation:
+                          description: |-
+                            mountPropagation determines how mounts are propagated from the host
+                            to container and the other way around.
+                            When not set, MountPropagationNone is used.
+                            This field is beta in 1.10.
+                            When RecursiveReadOnly is set to IfPossible or to Enabled, MountPropagation must be None or unspecified
+                            (which defaults to None).
+                          type: string
+                        name:
+                          description: This must match the Name of a Volume.
+                          type: string
+                        readOnly:
+                          description: |-
+                            Mounted read-only if true, read-write otherwise (false or unspecified).
+                            Defaults to false.
+                          type: boolean
+                        recursiveReadOnly:
+                          description: |-
+                            RecursiveReadOnly specifies whether read-only mounts should be handled
+                            recursively.
+
+                            If ReadOnly is false, this field has no meaning and must be unspecified.
+
+                            If ReadOnly is true, and this field is set to Disabled, the mount is not made
+                            recursively read-only.  If this field is set to IfPossible, the mount is made
+                            recursively read-only, if it is supported by the container runtime.  If this
+                            field is set to Enabled, the mount is made recursively read-only if it is
+                            supported by the container runtime, otherwise the pod will not be started and
+                            an error will be generated to indicate the reason.
+
+                            If this field is set to IfPossible or Enabled, MountPropagation must be set to
+                            None (or be unspecified, which defaults to None).
+
+                            If this field is not specified, it is treated as an equivalent of Disabled.
+                          type: string
+                        subPath:
+                          description: |-
+                            Path within the volume from which the container's volume should be mounted.
+                            Defaults to "" (volume's root).
+                          type: string
+                        subPathExpr:
+                          description: |-
+                            Expanded path within the volume from which the container's volume should be mounted.
+                            Behaves similarly to SubPath but environment variable references $(VAR_NAME) are expanded using the container's environment.
+                            Defaults to "" (volume's root).
+                            SubPathExpr and SubPath are mutually exclusive.
+                          type: string
+                      required:
+                      - mountPath
+                      - name
+                      type: object
+                    maxItems: 64
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - mountPath
+                    x-kubernetes-list-type: map
+                    x-kubernetes-validations:
+                    - message: extraVolumeMounts must not mount over a path the operator
+                        already mounts (/var/lib/memgraph, /var/log/memgraph, /var/core/memgraph,
+                        /tmp)
+                      rule: self.all(m, !(m.mountPath in ['/var/lib/memgraph', '/var/log/memgraph',
+                        '/var/core/memgraph', '/tmp']))
+                type: object
+              extraVolumes:
+                description: |-
+                  extraVolumes adds pod volumes to both roles beyond the ones the operator
+                  provisions.
+                properties:
+                  coordinators:
+                    description: coordinators are added to every coordinator pod.
+                    x-kubernetes-preserve-unknown-fields: true
+                  data:
+                    description: data are added to every data instance pod.
+                    x-kubernetes-preserve-unknown-fields: true
+                type: object
               image:
                 default: {}
                 description: image selects the Memgraph container image run by all

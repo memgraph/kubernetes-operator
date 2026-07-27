@@ -208,3 +208,29 @@ spec:
     coordinators: []
     data:
       - --storage-snapshot-on-exit=false
+  # Any pod volume the operator does not provision itself, plus where to mount
+  # it in the Memgraph container. Entries are plain core/v1 volumes and volume
+  # mounts, appended after the operator's own — the usual reason to reach for
+  # them is a Secret holding certificates or a ConfigMap of extra
+  # configuration.
+  #
+  # extraVolumes entries are stored without schema validation: a core/v1 volume
+  # carries every volume source Kubernetes has, and inlining that schema per
+  # role would grow the CRD past what a client-side `kubectl apply` can carry.
+  # So any volume source works, exactly as in the Helm chart, but a typo in one
+  # is only caught when the operator applies the StatefulSet — where it shows up
+  # as the ApplyFailed condition on this resource. The mounts, being small, are
+  # fully validated: admission rejects a path the operator already mounts.
+  extraVolumes:
+    coordinators: []
+    data: []
+      # - name: bolt-certs
+      #   secret:
+      #     secretName: bolt-tls
+      #     defaultMode: 0400
+  extraVolumeMounts:
+    coordinators: []
+    data: []
+      # - name: bolt-certs
+      #   mountPath: /etc/memgraph/ssl
+      #   readOnly: true
