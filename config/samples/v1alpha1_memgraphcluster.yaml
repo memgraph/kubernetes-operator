@@ -11,9 +11,13 @@ spec:
   # must be odd so the Raft quorum cannot split.
   coordinators: 3
   dataInstances: 2
+  # repository carries the registry host and image path only — the version
+  # belongs in tag, and admission rejects a digest or a tag smuggled into the
+  # repository.
   image:
     repository: docker.io/memgraph/memgraph
     tag: 3.12.0-relwithdebinfo
+    pullPolicy: IfNotPresent
   # References an existing Secret holding the enterprise license; the CR
   # carries no secret material itself.
   secrets:
@@ -26,18 +30,25 @@ spec:
     # Delete on dev clusters that should clean up after themselves.
     retentionPolicy: Retain
     # Each pod of a role gets a lib claim (Memgraph's data directory) and a log
-    # claim. Leave the storage class names out to use the cluster's default
-    # StorageClass. Claim sizes and classes cannot be changed after creation.
+    # claim. The storage class names have no default and are commented out on
+    # purpose: left unset, each claim uses the cluster's default StorageClass,
+    # while the empty string turns dynamic provisioning off and binds a
+    # pre-created PersistentVolume. Sizes, access modes and classes become
+    # StatefulSet volumeClaimTemplates, which Kubernetes treats as immutable.
     coordinators:
       libPVCSize: 1Gi
       libStorageAccessMode: ReadWriteOnce
+      # libStorageClassName: standard
       logPVCSize: 1Gi
       logStorageAccessMode: ReadWriteOnce
+      # logStorageClassName: standard
     data:
       libPVCSize: 1Gi
       libStorageAccessMode: ReadWriteOnce
+      # libStorageClassName: standard
       logPVCSize: 1Gi
       logStorageAccessMode: ReadWriteOnce
+      # logStorageClassName: standard
   # The cluster domain and the internal ports are part of every advertised
   # address the operator registers with the cluster, so they reach the
   # container ports, the Services and the registration commands together.
@@ -55,32 +66,76 @@ spec:
   # 2h at the default period, so a large snapshot restore is not killed
   # mid-load), timeoutSeconds 10, periodSeconds 5.
   probes:
+    coordinators:
+      # Gates the other two probes until the coordinator has started.
+      startupProbe:
+        failureThreshold: 20
+        timeoutSeconds: 10
+        periodSeconds: 5
+      # Decides whether the pod receives traffic, and whether the operator
+      # considers the workloads ready to register.
+      readinessProbe:
+        failureThreshold: 20
+        timeoutSeconds: 10
+        periodSeconds: 5
+      # Decides whether the container is restarted.
+      livenessProbe:
+        failureThreshold: 20
+        timeoutSeconds: 10
+        periodSeconds: 5
     data:
       startupProbe:
         failureThreshold: 1440
         timeoutSeconds: 10
         periodSeconds: 5
-  # Requests and limits of the Memgraph container, per role. When setting
-  # Memgraph's own --memory-limit below, keep it under the pod's memory limit.
+      readinessProbe:
+        failureThreshold: 20
+        timeoutSeconds: 10
+        periodSeconds: 5
+      livenessProbe:
+        failureThreshold: 20
+        timeoutSeconds: 10
+        periodSeconds: 5
+  # Requests and limits of the Memgraph container, per role, unset by default so
+  # the pods schedule anywhere. When setting Memgraph's own --memory-limit
+  # below, keep it under the pod's memory limit: Memgraph must hit its own limit
+  # and fail the query before the kubelet evicts the pod. (The block is the core
+  # ResourceRequirements type, so it also accepts claims — leave that one alone,
+  # it needs pod-level resourceClaims the operator does not set.)
   resources:
     coordinators: {}
+      # requests:
+      #   cpu: 100m
+      #   memory: 256Mi
+      # limits:
+      #   memory: 1Gi
     data: {}
+      # requests:
+      #   cpu: 500m
+      #   memory: 2Gi
+      # limits:
+      #   memory: 4Gi
   # Custom labels per object. The operator's own app.kubernetes.io identity
   # labels always win a collision: they are what the StatefulSets and Services
   # select on.
   labels:
     coordinators:
       podLabels: {}
+        # team: platform
       statefulSetLabels: {}
       serviceLabels: {}
     data:
       podLabels: {}
       statefulSetLabels: {}
       serviceLabels: {}
-  # Non-secret environment variables only; the license and organization name
-  # come from the secrets block above.
+  # Literal, non-secret environment variables only: there is no valueFrom, so
+  # the CR stays safe to commit. The license and the organization name come from
+  # the secrets block above, and admission rejects an entry that tries to shadow
+  # either of them or POD_NAME, which carries the pod's own identity.
   extraEnv:
     coordinators: []
+      # - name: MEMGRAPH_LOG_LEVEL
+      #   value: TRACE
     data: []
   # Any Memgraph flag, without waiting for a typed field. These are appended
   # after the flags the operator derives, and Memgraph takes the last
