@@ -7,6 +7,9 @@
 bin/*
 Dockerfile.cross
 
+# Build and packaging output: the kustomize installer, packaged charts
+dist/
+
 # Test binary, built with `go test -c`
 *.test
 

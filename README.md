@@ -18,9 +18,19 @@ The operator replaces the `memgraph-high-availability` Helm chart's fire-and-for
 
 ### To install the operator
 
-The install chart in [`charts/memgraph-operator`](charts/memgraph-operator/README.md) is the
-complete install story — it ships the `MemgraphCluster` CRD, a least-privilege RBAC set, and the
-controller Deployment:
+The install chart is published to the Memgraph helm repository — the same one the Memgraph charts
+come from. It ships the `MemgraphCluster` CRD, a least-privilege RBAC set, and the controller
+Deployment:
+
+```sh
+helm repo add memgraph https://memgraph.github.io/helm-charts
+helm repo update
+helm install memgraph-operator memgraph/memgraph-operator \
+  --namespace memgraph-operator-system --create-namespace --wait
+```
+
+The chart source lives in this repository, in
+[`charts/memgraph-operator`](charts/memgraph-operator/README.md), and installs from there too:
 
 ```sh
 helm install memgraph-operator ./charts/memgraph-operator \
@@ -126,9 +136,12 @@ make helm-lint       # lint the chart and render it with defaults and with the t
 make test-chart      # install/uninstall the chart on a throwaway Kind cluster
 ```
 
-Releases cross-publish the packaged chart into the existing
+Pushing a version tag cross-publishes the packaged chart into the existing
 [`memgraph.github.io/helm-charts`](https://memgraph.github.io/helm-charts) index, so users install
-it from the helm repository they already have configured.
+it from the helm repository they already have configured. The chart version and the operator
+version move independently — `v0.2.0` releases the operator, `chart-0.4.2` releases the chart
+alone. See [`docs/releasing.md`](docs/releasing.md) for the procedure, the dry-run and prerelease
+paths, and the credentials involved.
 
 ## Contributing
 
