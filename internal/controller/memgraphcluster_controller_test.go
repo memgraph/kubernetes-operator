@@ -26,6 +26,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
@@ -45,9 +46,23 @@ const (
 // Non-default spec values the specs in this package override with, chosen so
 // that they cannot be confused with the CRD schema defaults.
 const (
-	customImageTag   = "3.13.0"
-	customSecretName = "my-license"
+	customImageTag         = "3.13.0"
+	customSecretName       = "my-license"
+	customStorageClassName = "fast-ssd"
 )
+
+// libClaim returns the lib storage claim template of a provisioned
+// StatefulSet, failing the spec if the builder stopped emitting it.
+func libClaim(sts *appsv1.StatefulSet) corev1.PersistentVolumeClaimSpec {
+	GinkgoHelper()
+	for _, claim := range sts.Spec.VolumeClaimTemplates {
+		if claim.Name == "lib-storage" {
+			return claim.Spec
+		}
+	}
+	Fail("StatefulSet " + sts.Name + " has no lib-storage claim template")
+	return corev1.PersistentVolumeClaimSpec{}
+}
 
 var _ = Describe("MemgraphCluster Controller", func() {
 	const resourceNamespace = "default"
@@ -191,6 +206,48 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			}
 		})
 
+		It("should back both roles with retained lib and log claims", func() {
+			reconcileCluster(resourceName)
+
+			for _, suffix := range []string{coordinatorSuffix, dataSuffix} {
+				sts := &appsv1.StatefulSet{}
+				get(resourceName+suffix, sts)
+
+				claims := map[string]corev1.PersistentVolumeClaimSpec{}
+				for _, claim := range sts.Spec.VolumeClaimTemplates {
+					claims[claim.Name] = claim.Spec
+				}
+				Expect(claims).To(HaveKey("lib-storage"))
+				Expect(claims).To(HaveKey("log-storage"))
+				for name, claim := range claims {
+					Expect(claim.AccessModes).To(ConsistOf(corev1.ReadWriteOnce), "claim %s", name)
+					Expect(claim.Resources.Requests.Storage()).To(HaveValue(Equal(resource.MustParse("1Gi"))),
+						"claim %s", name)
+					Expect(claim.StorageClassName).To(BeNil(),
+						"claim %s must fall back to the cluster's default StorageClass", name)
+				}
+
+				// The default keeps data safe from an accidental CR delete, and
+				// nothing ever scales down because both counts are immutable.
+				Expect(sts.Spec.PersistentVolumeClaimRetentionPolicy).To(HaveValue(Equal(
+					appsv1.StatefulSetPersistentVolumeClaimRetentionPolicy{
+						WhenDeleted: appsv1.RetainPersistentVolumeClaimRetentionPolicyType,
+						WhenScaled:  appsv1.RetainPersistentVolumeClaimRetentionPolicyType,
+					})))
+			}
+		})
+
+		// Deleting storage is the StatefulSet machinery's job alone. An
+		// operator-owned finalizer would be a second, undeclared deleter — and
+		// one that can wedge a deletion when the operator is down.
+		It("should claim no finalizer on the MemgraphCluster", func() {
+			reconcileCluster(resourceName)
+
+			stored := &memgraphcomv1alpha1.MemgraphCluster{}
+			get(resourceName, stored)
+			Expect(stored.Finalizers).To(BeEmpty())
+		})
+
 		It("should be idempotent when reconciling an unchanged resource", func() {
 			reconcileCluster(resourceName)
 
@@ -225,7 +282,7 @@ var _ = Describe("MemgraphCluster Controller", func() {
 		cluster := &memgraphcomv1alpha1.MemgraphCluster{}
 
 		BeforeEach(func() {
-			resource := &memgraphcomv1alpha1.MemgraphCluster{
+			cr := &memgraphcomv1alpha1.MemgraphCluster{
 				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: resourceNamespace},
 				Spec: memgraphcomv1alpha1.MemgraphClusterSpec{
 					Coordinators:  ptr.To(int32(1)),
@@ -240,9 +297,19 @@ var _ = Describe("MemgraphCluster Controller", func() {
 						LicenseKey:      "license",
 						OrganizationKey: "organization",
 					},
+					Storage: memgraphcomv1alpha1.StorageSpec{
+						RetentionPolicy: memgraphcomv1alpha1.RetentionPolicyDelete,
+						Coordinators: memgraphcomv1alpha1.RoleStorageSpec{
+							LibPVCSize: ptr.To(resource.MustParse("2Gi")),
+						},
+						Data: memgraphcomv1alpha1.RoleStorageSpec{
+							LibPVCSize:          ptr.To(resource.MustParse("100Gi")),
+							LibStorageClassName: ptr.To(customStorageClassName),
+						},
+					},
 				},
 			}
-			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+			Expect(k8sClient.Create(ctx, cr)).To(Succeed())
 			get(resourceName, cluster)
 		})
 
@@ -269,7 +336,26 @@ var _ = Describe("MemgraphCluster Controller", func() {
 				organizationRef := container.Env[len(container.Env)-1].ValueFrom.SecretKeyRef
 				Expect(organizationRef.Name).To(Equal(customSecretName))
 				Expect(organizationRef.Key).To(Equal("organization"))
+
+				Expect(sts.Spec.PersistentVolumeClaimRetentionPolicy.WhenDeleted).To(
+					Equal(appsv1.DeletePersistentVolumeClaimRetentionPolicyType))
 			}
+		})
+
+		It("should size each role's claims from that role's storage block", func() {
+			reconcileCluster(resourceName)
+
+			coordinatorSts := &appsv1.StatefulSet{}
+			get(resourceName+coordinatorSuffix, coordinatorSts)
+			coordinatorLib := libClaim(coordinatorSts)
+			Expect(coordinatorLib.Resources.Requests.Storage()).To(HaveValue(Equal(resource.MustParse("2Gi"))))
+			Expect(coordinatorLib.StorageClassName).To(BeNil())
+
+			dataSts := &appsv1.StatefulSet{}
+			get(resourceName+dataSuffix, dataSts)
+			dataLib := libClaim(dataSts)
+			Expect(dataLib.Resources.Requests.Storage()).To(HaveValue(Equal(resource.MustParse("100Gi"))))
+			Expect(dataLib.StorageClassName).To(HaveValue(Equal(customStorageClassName)))
 		})
 	})
 

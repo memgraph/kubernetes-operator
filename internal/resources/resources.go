@@ -21,6 +21,7 @@ package resources
 
 import (
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 
 	memgraphcomv1alpha1 "github.com/memgraph/kubernetes-operator/api/v1alpha1"
 )
@@ -89,24 +90,43 @@ func selectorLabels(cluster *memgraphcomv1alpha1.MemgraphCluster, component stri
 // to its CRD schema default, so builders behave correctly on specs that never
 // passed admission.
 type normalizedSpec struct {
-	coordinators    int32
-	dataInstances   int32
-	image           string
-	pullPolicy      corev1.PullPolicy
-	secretName      string
-	licenseKey      string
-	organizationKey string
+	coordinators       int32
+	dataInstances      int32
+	image              string
+	pullPolicy         corev1.PullPolicy
+	secretName         string
+	licenseKey         string
+	organizationKey    string
+	retentionPolicy    memgraphcomv1alpha1.StorageRetentionPolicy
+	coordinatorStorage normalizedStorage
+	dataStorage        normalizedStorage
+}
+
+// normalizedStorage is one role's lib and log claim configuration with every
+// optional field resolved to its CRD schema default. A nil storage class means
+// "use the cluster default" and is passed through as nil, which is distinct
+// from the empty string (no dynamic provisioning).
+type normalizedStorage struct {
+	libSize       resource.Quantity
+	libAccessMode corev1.PersistentVolumeAccessMode
+	libClass      *string
+	logSize       resource.Quantity
+	logAccessMode corev1.PersistentVolumeAccessMode
+	logClass      *string
 }
 
 func normalize(spec memgraphcomv1alpha1.MemgraphClusterSpec) normalizedSpec {
 	n := normalizedSpec{
-		coordinators:    memgraphcomv1alpha1.DefaultCoordinatorCount,
-		dataInstances:   memgraphcomv1alpha1.DefaultDataInstanceCount,
-		image:           imageRef(spec.Image),
-		pullPolicy:      spec.Image.PullPolicy,
-		secretName:      spec.Secrets.Name,
-		licenseKey:      spec.Secrets.LicenseKey,
-		organizationKey: spec.Secrets.OrganizationKey,
+		coordinators:       memgraphcomv1alpha1.DefaultCoordinatorCount,
+		dataInstances:      memgraphcomv1alpha1.DefaultDataInstanceCount,
+		image:              imageRef(spec.Image),
+		pullPolicy:         spec.Image.PullPolicy,
+		secretName:         spec.Secrets.Name,
+		licenseKey:         spec.Secrets.LicenseKey,
+		organizationKey:    spec.Secrets.OrganizationKey,
+		retentionPolicy:    spec.Storage.RetentionPolicy,
+		coordinatorStorage: normalizeStorage(spec.Storage.Coordinators),
+		dataStorage:        normalizeStorage(spec.Storage.Data),
 	}
 	if spec.Coordinators != nil {
 		n.coordinators = *spec.Coordinators
@@ -125,6 +145,33 @@ func normalize(spec memgraphcomv1alpha1.MemgraphClusterSpec) normalizedSpec {
 	}
 	if n.organizationKey == "" {
 		n.organizationKey = memgraphcomv1alpha1.DefaultOrganizationSecretKey
+	}
+	if n.retentionPolicy == "" {
+		n.retentionPolicy = memgraphcomv1alpha1.DefaultStorageRetention
+	}
+	return n
+}
+
+func normalizeStorage(spec memgraphcomv1alpha1.RoleStorageSpec) normalizedStorage {
+	n := normalizedStorage{
+		libSize:       resource.MustParse(memgraphcomv1alpha1.DefaultLibPVCSize),
+		libAccessMode: spec.LibStorageAccessMode,
+		libClass:      spec.LibStorageClassName,
+		logSize:       resource.MustParse(memgraphcomv1alpha1.DefaultLogPVCSize),
+		logAccessMode: spec.LogStorageAccessMode,
+		logClass:      spec.LogStorageClassName,
+	}
+	if spec.LibPVCSize != nil {
+		n.libSize = *spec.LibPVCSize
+	}
+	if spec.LogPVCSize != nil {
+		n.logSize = *spec.LogPVCSize
+	}
+	if n.libAccessMode == "" {
+		n.libAccessMode = memgraphcomv1alpha1.DefaultStorageAccessMode
+	}
+	if n.logAccessMode == "" {
+		n.logAccessMode = memgraphcomv1alpha1.DefaultStorageAccessMode
 	}
 	return n
 }

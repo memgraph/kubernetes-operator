@@ -22,6 +22,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
@@ -139,11 +140,44 @@ func expectedVolumeMounts() []corev1.VolumeMount {
 	}
 }
 
+// expectedVolumes covers only the ephemeral scratch volume: lib and log
+// storage are provisioned through volumeClaimTemplates.
 func expectedVolumes() []corev1.Volume {
 	return []corev1.Volume{
-		{Name: "lib-storage", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
-		{Name: "log-storage", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
 		{Name: "tmp", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+	}
+}
+
+func expectedClaimTemplate(name, size string, accessMode corev1.PersistentVolumeAccessMode,
+	class *string) corev1.PersistentVolumeClaim {
+	return corev1.PersistentVolumeClaim{
+		TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "PersistentVolumeClaim"},
+		ObjectMeta: metav1.ObjectMeta{Name: name},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			AccessModes:      []corev1.PersistentVolumeAccessMode{accessMode},
+			StorageClassName: class,
+			Resources: corev1.VolumeResourceRequirements{
+				Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse(size)},
+			},
+		},
+	}
+}
+
+// expectedClaimTemplates are the claims a spec that never set storage gets:
+// 1Gi ReadWriteOnce on the cluster's default StorageClass for both volumes.
+func expectedClaimTemplates() []corev1.PersistentVolumeClaim {
+	return []corev1.PersistentVolumeClaim{
+		expectedClaimTemplate("lib-storage", "1Gi", corev1.ReadWriteOnce, nil),
+		expectedClaimTemplate("log-storage", "1Gi", corev1.ReadWriteOnce, nil),
+	}
+}
+
+func expectedRetentionPolicy(
+	whenDeleted appsv1.PersistentVolumeClaimRetentionPolicyType,
+) *appsv1.StatefulSetPersistentVolumeClaimRetentionPolicy {
+	return &appsv1.StatefulSetPersistentVolumeClaimRetentionPolicy{
+		WhenDeleted: whenDeleted,
+		WhenScaled:  appsv1.RetainPersistentVolumeClaimRetentionPolicyType,
 	}
 }
 
@@ -190,6 +224,9 @@ func TestCoordinatorStatefulSetDefaults(t *testing.T) {
 			ServiceName:         coordinatorName,
 			PodManagementPolicy: appsv1.ParallelPodManagement,
 			Selector:            &metav1.LabelSelector{MatchLabels: expectedSelectorLabels(coordinatorComponent)},
+			PersistentVolumeClaimRetentionPolicy: expectedRetentionPolicy(
+				appsv1.RetainPersistentVolumeClaimRetentionPolicyType),
+			VolumeClaimTemplates: expectedClaimTemplates(),
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: expectedLabels(coordinatorComponent)},
 				Spec: corev1.PodSpec{
@@ -241,6 +278,9 @@ func TestDataStatefulSetDefaults(t *testing.T) {
 			ServiceName:         dataName,
 			PodManagementPolicy: appsv1.ParallelPodManagement,
 			Selector:            &metav1.LabelSelector{MatchLabels: expectedSelectorLabels(dataComponent)},
+			PersistentVolumeClaimRetentionPolicy: expectedRetentionPolicy(
+				appsv1.RetainPersistentVolumeClaimRetentionPolicyType),
+			VolumeClaimTemplates: expectedClaimTemplates(),
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: expectedLabels(dataComponent)},
 				Spec: corev1.PodSpec{
@@ -309,6 +349,104 @@ func TestStatefulSetSpecOverrides(t *testing.T) {
 			gotEnv := container.Env[len(container.Env)-2:]
 			if diff := cmp.Diff(wantEnv, gotEnv); diff != "" {
 				t.Errorf("license env mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestStatefulSetStorageOverrides asserts each role's claim templates follow
+// that role's storage block only, so sizing coordinators and data instances
+// differently really produces differently sized claims.
+func TestStatefulSetStorageOverrides(t *testing.T) {
+	cluster := minimalCluster()
+	cluster.Spec.Storage = memgraphcomv1alpha1.StorageSpec{
+		Coordinators: memgraphcomv1alpha1.RoleStorageSpec{
+			LibPVCSize:           ptr.To(resource.MustParse("4Gi")),
+			LibStorageAccessMode: corev1.ReadWriteOncePod,
+			LibStorageClassName:  ptr.To("fast-ssd"),
+			LogPVCSize:           ptr.To(resource.MustParse("512Mi")),
+			LogStorageClassName:  ptr.To(""),
+		},
+		Data: memgraphcomv1alpha1.RoleStorageSpec{
+			LibPVCSize:          ptr.To(resource.MustParse("100Gi")),
+			LibStorageClassName: ptr.To("gp3"),
+		},
+	}
+
+	tests := []struct {
+		name string
+		sts  *appsv1.StatefulSet
+		want []corev1.PersistentVolumeClaim
+	}{
+		{
+			name: coordinatorComponent,
+			sts:  resources.CoordinatorStatefulSet(cluster),
+			want: []corev1.PersistentVolumeClaim{
+				expectedClaimTemplate("lib-storage", "4Gi", corev1.ReadWriteOncePod, ptr.To("fast-ssd")),
+				// An empty storage class is passed through verbatim: it means
+				// "no dynamic provisioning", not "cluster default".
+				expectedClaimTemplate("log-storage", "512Mi", corev1.ReadWriteOnce, ptr.To("")),
+			},
+		},
+		{
+			name: dataComponent,
+			sts:  resources.DataStatefulSet(cluster),
+			want: []corev1.PersistentVolumeClaim{
+				expectedClaimTemplate("lib-storage", "100Gi", corev1.ReadWriteOnce, ptr.To("gp3")),
+				// Untouched by the spec, so it keeps every schema default.
+				expectedClaimTemplate("log-storage", "1Gi", corev1.ReadWriteOnce, nil),
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if diff := cmp.Diff(tc.want, tc.sts.Spec.VolumeClaimTemplates); diff != "" {
+				t.Errorf("volume claim templates mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestStatefulSetRetentionPolicy pins the mapping from the spec's retention
+// policy onto the StatefulSet machinery that is the only deleter of this
+// cluster's storage. whenScaled stays Retain regardless: both replica counts
+// are immutable, so nothing ever scales down.
+func TestStatefulSetRetentionPolicy(t *testing.T) {
+	tests := []struct {
+		name        string
+		policy      memgraphcomv1alpha1.StorageRetentionPolicy
+		whenDeleted appsv1.PersistentVolumeClaimRetentionPolicyType
+	}{
+		{
+			name:        "unset defaults to retain",
+			policy:      "",
+			whenDeleted: appsv1.RetainPersistentVolumeClaimRetentionPolicyType,
+		},
+		{
+			name:        "retain",
+			policy:      memgraphcomv1alpha1.RetentionPolicyRetain,
+			whenDeleted: appsv1.RetainPersistentVolumeClaimRetentionPolicyType,
+		},
+		{
+			name:        "delete",
+			policy:      memgraphcomv1alpha1.RetentionPolicyDelete,
+			whenDeleted: appsv1.DeletePersistentVolumeClaimRetentionPolicyType,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cluster := minimalCluster()
+			cluster.Spec.Storage.RetentionPolicy = tc.policy
+
+			want := expectedRetentionPolicy(tc.whenDeleted)
+			for _, sts := range []*appsv1.StatefulSet{
+				resources.CoordinatorStatefulSet(cluster),
+				resources.DataStatefulSet(cluster),
+			} {
+				got := sts.Spec.PersistentVolumeClaimRetentionPolicy
+				if diff := cmp.Diff(want, got); diff != "" {
+					t.Errorf("%s retention policy mismatch (-want +got):\n%s", sts.Name, diff)
+				}
 			}
 		})
 	}

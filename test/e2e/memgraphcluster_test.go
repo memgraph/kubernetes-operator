@@ -207,7 +207,141 @@ var _ = Describe("MemgraphCluster", Ordered, func() {
 		By("waiting for the operator to converge the cluster back to fully registered")
 		Eventually(verifyClusterRegistered, 10*time.Minute, 10*time.Second).Should(Succeed())
 	})
+
+	// Storage survives the cluster under the default retention policy: an
+	// accidental `kubectl delete mgc` must not take a production database with
+	// it. This deletes the CR, so it runs last in this Ordered container.
+	It("leaves the PVCs behind when the default-retention CR is deleted", func() {
+		By("confirming the cluster is converged before deleting it")
+		Eventually(verifyClusterRegistered, 10*time.Minute, 10*time.Second).Should(Succeed())
+
+		By("recording the provisioned PVCs")
+		before, err := listPVCs(clusterNamespace)
+		Expect(err).NotTo(HaveOccurred())
+		// Two claims (lib and log) per coordinator and data instance pod.
+		Expect(before).To(HaveLen(2 * (coordinatorCount + dataInstanceCount)))
+
+		By("deleting the MemgraphCluster")
+		cmd := exec.Command("kubectl", "delete", "memgraphcluster", clusterName,
+			"-n", clusterNamespace, "--wait=true")
+		_, err = utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred(), "Failed to delete the MemgraphCluster")
+
+		By("waiting for garbage collection to remove the workloads")
+		Eventually(func(g Gomega) {
+			cmd := exec.Command("kubectl", "get", "statefulsets", "-n", clusterNamespace,
+				"-o", "jsonpath={.items[*].metadata.name}")
+			output, err := utils.Run(cmd)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(strings.TrimSpace(output)).To(BeEmpty())
+		}, 5*time.Minute, 5*time.Second).Should(Succeed())
+
+		By("confirming every PVC is still there")
+		// Consistently, not Eventually: the failure mode is a delayed deletion,
+		// which a single post-condition check would race straight past.
+		Consistently(func(g Gomega) {
+			after, err := listPVCs(clusterNamespace)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(after).To(ConsistOf(before))
+		}, 30*time.Second, 5*time.Second).Should(Succeed())
+	})
 })
+
+// The Delete retention policy is the dev-cluster counterpart of the spec
+// above: the StatefulSet machinery takes the claims down with the CR. It gets
+// its own container and namespace because it needs a differently-configured
+// cluster, and it never waits for registration to converge — the StatefulSet
+// controller provisions the claims as soon as the pods are created, so the
+// retention behavior is observable long before Memgraph is.
+var _ = Describe("MemgraphCluster with Delete storage retention", Ordered, func() {
+	const retentionNamespace = "memgraph-e2e-retention"
+	const retentionCluster = "retention"
+
+	BeforeAll(func() {
+		By("creating the cluster namespace")
+		cmd := exec.Command("kubectl", "create", "ns", retentionNamespace)
+		_, err := utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred(), "Failed to create namespace")
+	})
+
+	AfterAll(func() {
+		By("removing the cluster namespace")
+		cmd := exec.Command("kubectl", "delete", "ns", retentionNamespace,
+			"--ignore-not-found", "--wait=false")
+		_, _ = utils.Run(cmd)
+	})
+
+	It("removes the PVCs when the CR is deleted", func() {
+		By("applying a MemgraphCluster with Delete retention")
+		manifest := fmt.Sprintf(`apiVersion: memgraph.com/v1alpha1
+kind: MemgraphCluster
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  coordinators: 1
+  dataInstances: 1
+  image:
+    repository: %s
+    tag: %s
+  storage:
+    retentionPolicy: Delete
+`, retentionCluster, retentionNamespace, memgraphImageRepository, memgraphImageTag)
+		cmd := exec.Command("kubectl", "apply", "-f", "-")
+		_, err := utils.RunWithInput(cmd, manifest)
+		Expect(err).NotTo(HaveOccurred(), "Failed to apply the MemgraphCluster")
+
+		By("waiting for the claims to be provisioned")
+		// One lib and one log claim for the single coordinator and the single
+		// data instance.
+		Eventually(func(g Gomega) {
+			claims, err := listPVCs(retentionNamespace)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(claims).To(HaveLen(4))
+		}, 5*time.Minute, 5*time.Second).Should(Succeed())
+
+		By("deleting the MemgraphCluster")
+		cmd = exec.Command("kubectl", "delete", "memgraphcluster", retentionCluster,
+			"-n", retentionNamespace, "--wait=true")
+		_, err = utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred(), "Failed to delete the MemgraphCluster")
+
+		By("waiting for the StatefulSet machinery to take the claims down with it")
+		Eventually(func(g Gomega) {
+			claims, err := listPVCs(retentionNamespace)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(claims).To(BeEmpty())
+		}, 5*time.Minute, 5*time.Second).Should(Succeed())
+	})
+})
+
+// listPVCs returns the names of the PersistentVolumeClaims in a namespace,
+// excluding any already marked for deletion — a claim with a deletion
+// timestamp is gone as far as the retention contract is concerned, even while
+// a finalizer keeps the object around.
+func listPVCs(namespace string) ([]string, error) {
+	cmd := exec.Command("kubectl", "get", "pvc", "-n", namespace, "-o",
+		`jsonpath={range .items[*]}{.metadata.name}{"\t"}{.metadata.deletionTimestamp}{"\n"}{end}`)
+	output, err := utils.Run(cmd)
+	if err != nil {
+		return nil, err
+	}
+
+	// A claim with no deletion timestamp yields a line of "<name>\t"; the
+	// separator is always emitted, so the split is total.
+	names := []string{}
+	for _, line := range utils.GetNonEmptyLines(output) {
+		name, deletionTimestamp, found := strings.Cut(line, "\t")
+		if !found {
+			return nil, fmt.Errorf("unexpected kubectl get pvc output line: %q", line)
+		}
+		if strings.TrimSpace(deletionTimestamp) != "" {
+			continue
+		}
+		names = append(names, strings.TrimSpace(name))
+	}
+	return names, nil
+}
 
 // verifyClusterRegistered asserts the coordinator leader reports every declared
 // instance registered and healthy with exactly one MAIN — the converged steady

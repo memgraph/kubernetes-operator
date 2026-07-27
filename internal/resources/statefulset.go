@@ -22,6 +22,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
@@ -37,6 +38,12 @@ const (
 	libMountPath = "/var/lib/memgraph"
 	logMountPath = "/var/log/memgraph"
 	tmpMountPath = "/tmp"
+
+	// Volume names double as the StatefulSet volumeClaimTemplate names, so the
+	// provisioned claims are <volume>-<pod>, e.g. lib-storage-example-data-0.
+	libVolumeName = "lib-storage"
+	logVolumeName = "log-storage"
+	tmpVolumeName = "tmp"
 )
 
 // CoordinatorStatefulSet builds the single StatefulSet running all
@@ -66,7 +73,7 @@ func CoordinatorStatefulSet(cluster *memgraphcomv1alpha1.MemgraphCluster) *appsv
 	container.ReadinessProbe = tcpProbe(CoordinatorPort, 20)
 	container.LivenessProbe = tcpProbe(CoordinatorPort, 20)
 
-	return statefulSet(cluster, coordinatorComponent, CoordinatorName(cluster), spec.coordinators, container)
+	return statefulSet(cluster, coordinatorComponent, CoordinatorName(cluster), spec, spec.coordinators, container)
 }
 
 // DataStatefulSet builds the single StatefulSet running all data instances.
@@ -86,7 +93,7 @@ func DataStatefulSet(cluster *memgraphcomv1alpha1.MemgraphCluster) *appsv1.State
 	container.ReadinessProbe = tcpProbe(BoltPort, 20)
 	container.LivenessProbe = tcpProbe(BoltPort, 20)
 
-	return statefulSet(cluster, dataComponent, DataName(cluster), spec.dataInstances, container)
+	return statefulSet(cluster, dataComponent, DataName(cluster), spec, spec.dataInstances, container)
 }
 
 // coordinatorStartScript derives the coordinator's identity from its pod
@@ -155,9 +162,9 @@ func memgraphContainer(spec normalizedSpec) corev1.Container {
 			},
 		},
 		VolumeMounts: []corev1.VolumeMount{
-			{Name: "lib-storage", MountPath: libMountPath},
-			{Name: "log-storage", MountPath: logMountPath},
-			{Name: "tmp", MountPath: tmpMountPath},
+			{Name: libVolumeName, MountPath: libMountPath},
+			{Name: logVolumeName, MountPath: logMountPath},
+			{Name: tmpVolumeName, MountPath: tmpMountPath},
 		},
 		SecurityContext: &corev1.SecurityContext{
 			AllowPrivilegeEscalation: ptr.To(false),
@@ -172,9 +179,15 @@ func memgraphContainer(spec normalizedSpec) corev1.Container {
 func statefulSet(
 	cluster *memgraphcomv1alpha1.MemgraphCluster,
 	component, name string,
+	spec normalizedSpec,
 	replicas int32,
 	container corev1.Container,
 ) *appsv1.StatefulSet {
+	storage := spec.dataStorage
+	if component == coordinatorComponent {
+		storage = spec.coordinatorStorage
+	}
+
 	return &appsv1.StatefulSet{
 		// TypeMeta is set explicitly because the controller server-side
 		// applies builder output, and apply patches must carry the GVK.
@@ -189,6 +202,19 @@ func statefulSet(
 			ServiceName:         name,
 			PodManagementPolicy: appsv1.ParallelPodManagement,
 			Selector:            &metav1.LabelSelector{MatchLabels: selectorLabels(cluster, component)},
+			// The StatefulSet controller is the only thing that ever deletes
+			// this cluster's storage; the operator owns no finalizer and runs
+			// no cleanup of its own. whenScaled is always Retain because both
+			// replica counts are immutable in v1alpha1 — nothing scales down,
+			// so no claim is ever orphaned by scaling.
+			PersistentVolumeClaimRetentionPolicy: &appsv1.StatefulSetPersistentVolumeClaimRetentionPolicy{
+				WhenDeleted: retentionType(spec.retentionPolicy),
+				WhenScaled:  appsv1.RetainPersistentVolumeClaimRetentionPolicyType,
+			},
+			VolumeClaimTemplates: []corev1.PersistentVolumeClaim{
+				volumeClaimTemplate(libVolumeName, storage.libSize, storage.libAccessMode, storage.libClass),
+				volumeClaimTemplate(logVolumeName, storage.logSize, storage.logAccessMode, storage.logClass),
+			},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: labels(cluster, component),
@@ -202,18 +228,50 @@ func statefulSet(
 						RunAsNonRoot:   ptr.To(true),
 						SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
 					},
-					// Storage is ephemeral in this slice; PVC templates and
-					// retention policy land with the storage-configuration
-					// slice (specs/operator-mvp/issues/08).
+					// Lib and log storage come from the volumeClaimTemplates
+					// above; only the scratch directory the read-only root
+					// filesystem still needs is ephemeral.
 					Volumes: []corev1.Volume{
-						{Name: "lib-storage", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
-						{Name: "log-storage", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
-						{Name: "tmp", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+						{Name: tmpVolumeName, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
 					},
 				},
 			},
 		},
 	}
+}
+
+// volumeClaimTemplate builds one StatefulSet volumeClaimTemplate. A nil class
+// is left unset so the cluster's default StorageClass applies; the empty
+// string is passed through as-is, which disables dynamic provisioning.
+func volumeClaimTemplate(
+	name string,
+	size resource.Quantity,
+	accessMode corev1.PersistentVolumeAccessMode,
+	class *string,
+) corev1.PersistentVolumeClaim {
+	return corev1.PersistentVolumeClaim{
+		// TypeMeta is set explicitly for the same reason the StatefulSet sets
+		// it: the controller server-side applies the builder output.
+		TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "PersistentVolumeClaim"},
+		ObjectMeta: metav1.ObjectMeta{Name: name},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			AccessModes:      []corev1.PersistentVolumeAccessMode{accessMode},
+			StorageClassName: class,
+			Resources: corev1.VolumeResourceRequirements{
+				Requests: corev1.ResourceList{corev1.ResourceStorage: size},
+			},
+		},
+	}
+}
+
+// retentionType maps the spec's retention policy onto the StatefulSet's
+// whenDeleted policy. The two vocabularies coincide, so the mapping is a
+// rename rather than a decision.
+func retentionType(policy memgraphcomv1alpha1.StorageRetentionPolicy) appsv1.PersistentVolumeClaimRetentionPolicyType {
+	if policy == memgraphcomv1alpha1.RetentionPolicyDelete {
+		return appsv1.DeletePersistentVolumeClaimRetentionPolicyType
+	}
+	return appsv1.RetainPersistentVolumeClaimRetentionPolicyType
 }
 
 func tcpProbe(port, failureThreshold int32) *corev1.Probe {
