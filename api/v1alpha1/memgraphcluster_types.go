@@ -45,6 +45,46 @@ const (
 	DefaultLogPVCSize        = "1Gi"
 	DefaultStorageAccessMode = corev1.ReadWriteOnce
 	DefaultStorageRetention  = RetentionPolicyRetain
+
+	DefaultClusterDomain = "cluster.local"
+
+	DefaultBoltPort        int32 = 7687
+	DefaultManagementPort  int32 = 10000
+	DefaultReplicationPort int32 = 20000
+	DefaultCoordinatorPort int32 = 12000
+)
+
+// Probe timing defaults. Unlike the other defaults these are Go constants only:
+// a CRD schema default is per-field, and the data instances' startup budget
+// deliberately differs from every other probe's, which one shared schema
+// default cannot express. The doc comments on ProbeSpec name them.
+const (
+	// DefaultProbeFailureThreshold is the failure budget of every probe except
+	// the data instances' startup probe.
+	DefaultProbeFailureThreshold int32 = 20
+
+	// DefaultDataStartupProbeFailureThreshold gives data instances a generous
+	// startup budget so a large snapshot restore is not killed mid-load: 1440
+	// failures at the default 5s period is 2h, mirroring the
+	// memgraph-high-availability Helm chart's default.
+	DefaultDataStartupProbeFailureThreshold int32 = 1440
+
+	DefaultProbeTimeoutSeconds int32 = 10
+	DefaultProbePeriodSeconds  int32 = 5
+)
+
+// Names of the environment variables the operator itself sets on the Memgraph
+// container, which extraEnv therefore may not carry.
+const (
+	// EnvLicense holds the enterprise license, wired from the secrets block.
+	EnvLicense = "MEMGRAPH_ENTERPRISE_LICENSE"
+
+	// EnvOrganization holds the organization name, wired from the secrets block.
+	EnvOrganization = "MEMGRAPH_ORGANIZATION_NAME"
+
+	// EnvPodName carries the pod's own name, from which a coordinator derives
+	// its ordinal-dependent identity at startup.
+	EnvPodName = "POD_NAME"
 )
 
 // StorageRetentionPolicy decides what happens to the cluster's
@@ -249,10 +289,218 @@ type StorageSpec struct {
 	Data RoleStorageSpec `json:"data,omitzero"`
 }
 
-// MemgraphClusterSpec defines the desired state of MemgraphCluster.
+// PortsSpec configures the internal ports Memgraph listens on. The knob names
+// mirror the memgraph-high-availability Helm chart's ports block.
 //
-// Port and pod-tuning fields land in subsequent slices of the operator MVP
-// (see specs/operator-mvp/PRD.md).
+// These ports are load-bearing beyond the container: they are part of every
+// advertised address the operator registers with the cluster (bolt_server,
+// coordinator_server, management_server, replication_server), so a change
+// reaches container ports, Services, and registration commands together.
+// Changing a port on a live cluster is a day-2 operation and out of scope for
+// v1alpha1: the pods restart on the new ports while the coordinators keep the
+// addresses they were registered with.
+//
+// The has() guards keep the rule evaluable against the block's empty object
+// default, which the API server checks before nested field defaults apply.
+//
+// +kubebuilder:validation:XValidation:rule="!(has(self.boltPort) && has(self.managementPort) && has(self.replicationPort) && has(self.coordinatorPort)) || [self.boltPort, self.managementPort, self.replicationPort, self.coordinatorPort].all(p, [self.boltPort, self.managementPort, self.replicationPort, self.coordinatorPort].exists_one(q, q == p))",message="boltPort, managementPort, replicationPort and coordinatorPort must all be different ports"
+type PortsSpec struct {
+	// boltPort is the port Memgraph serves the Bolt protocol on. Clients and
+	// the operator's own management queries both use it.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=65535
+	// +kubebuilder:default=7687
+	// +optional
+	BoltPort *int32 `json:"boltPort,omitempty"`
+
+	// managementPort is the port instances exchange HA management traffic on.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=65535
+	// +kubebuilder:default=10000
+	// +optional
+	ManagementPort *int32 `json:"managementPort,omitempty"`
+
+	// replicationPort is the port data instances replicate over.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=65535
+	// +kubebuilder:default=20000
+	// +optional
+	ReplicationPort *int32 `json:"replicationPort,omitempty"`
+
+	// coordinatorPort is the port coordinators run their Raft protocol on.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=65535
+	// +kubebuilder:default=12000
+	// +optional
+	CoordinatorPort *int32 `json:"coordinatorPort,omitempty"`
+}
+
+// ProbeSpec tunes the timings of one probe. The probe type itself is not
+// configurable: every probe is a TCP-socket check against the role's own port
+// (the coordinator port for coordinators, the Bolt port for data instances),
+// which is the memgraph-high-availability Helm chart's established convention.
+//
+// Every field defaults to the value named in its doc comment.
+type ProbeSpec struct {
+	// failureThreshold is how many consecutive failures the probe tolerates
+	// before acting. Defaults to 1440 for the data instances' startup probe —
+	// 2h at the default period, so a large snapshot restore is not killed
+	// mid-load — and to 20 for every other probe.
+	// +kubebuilder:validation:Minimum=1
+	// +optional
+	FailureThreshold *int32 `json:"failureThreshold,omitempty"`
+
+	// timeoutSeconds is how long a single probe attempt may take. Defaults to
+	// 10.
+	// +kubebuilder:validation:Minimum=1
+	// +optional
+	TimeoutSeconds *int32 `json:"timeoutSeconds,omitempty"`
+
+	// periodSeconds is how often the probe runs. Defaults to 5.
+	// +kubebuilder:validation:Minimum=1
+	// +optional
+	PeriodSeconds *int32 `json:"periodSeconds,omitempty"`
+}
+
+// RoleProbesSpec tunes all three probes of one role.
+type RoleProbesSpec struct {
+	// startupProbe gates the other two probes until the instance has started.
+	// +optional
+	StartupProbe ProbeSpec `json:"startupProbe,omitzero"`
+
+	// readinessProbe decides whether the pod receives traffic and whether the
+	// operator considers the workloads ready to register.
+	// +optional
+	ReadinessProbe ProbeSpec `json:"readinessProbe,omitzero"`
+
+	// livenessProbe decides whether the container is restarted.
+	// +optional
+	LivenessProbe ProbeSpec `json:"livenessProbe,omitzero"`
+}
+
+// ProbesSpec tunes probe timings per role.
+type ProbesSpec struct {
+	// coordinators tunes the probes of every coordinator pod.
+	// +optional
+	Coordinators RoleProbesSpec `json:"coordinators,omitzero"`
+
+	// data tunes the probes of every data instance pod.
+	// +optional
+	Data RoleProbesSpec `json:"data,omitzero"`
+}
+
+// ResourcesSpec sets the compute resources of the Memgraph container per role.
+// When setting Memgraph's own --memory-limit through extraArgs, keep it below
+// the pod's memory limit: Memgraph must hit its own limit and raise a query
+// exception before the kubelet evicts the pod.
+type ResourcesSpec struct {
+	// coordinators are the resource requests and limits of every coordinator
+	// pod's Memgraph container.
+	// +optional
+	Coordinators corev1.ResourceRequirements `json:"coordinators,omitzero"`
+
+	// data are the resource requests and limits of every data instance pod's
+	// Memgraph container.
+	// +optional
+	Data corev1.ResourceRequirements `json:"data,omitzero"`
+}
+
+// RoleLabelsSpec adds custom labels to one role's objects. The operator's own
+// identity labels (app.kubernetes.io/name, /instance, /component, /managed-by)
+// always win a key collision: they are what the StatefulSets and Services
+// select on, so a custom label can never detach a pod from its cluster.
+type RoleLabelsSpec struct {
+	// podLabels are added to the role's pods.
+	// +optional
+	PodLabels map[string]string `json:"podLabels,omitempty"`
+
+	// statefulSetLabels are added to the role's StatefulSet.
+	// +optional
+	StatefulSetLabels map[string]string `json:"statefulSetLabels,omitempty"`
+
+	// serviceLabels are added to the role's headless Service.
+	// +optional
+	ServiceLabels map[string]string `json:"serviceLabels,omitempty"`
+}
+
+// LabelsSpec adds custom labels per role, mirroring the
+// memgraph-high-availability Helm chart's labels block.
+type LabelsSpec struct {
+	// coordinators labels the coordinator objects.
+	// +optional
+	Coordinators RoleLabelsSpec `json:"coordinators,omitzero"`
+
+	// data labels the data instance objects.
+	// +optional
+	Data RoleLabelsSpec `json:"data,omitzero"`
+}
+
+// EnvVar is one non-secret environment variable set on a role's Memgraph
+// container. Only literal values are supported — there is deliberately no
+// valueFrom — so secret material stays confined to the secrets block and the CR
+// remains safe to commit.
+type EnvVar struct {
+	// name is the environment variable's name.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[A-Za-z_][A-Za-z0-9_]*$`
+	// +required
+	Name string `json:"name"`
+
+	// value is the literal, non-secret value.
+	// +kubebuilder:validation:MaxLength=4096
+	// +optional
+	Value string `json:"value,omitempty"`
+}
+
+// ExtraEnvSpec passes additional non-secret environment variables to a role's
+// Memgraph container, mirroring the memgraph-high-availability Helm chart's
+// extraEnv block.
+type ExtraEnvSpec struct {
+	// coordinators are added to every coordinator pod's Memgraph container.
+	// +listType=map
+	// +listMapKey=name
+	// +kubebuilder:validation:MaxItems=64
+	// +kubebuilder:validation:XValidation:rule="self.all(e, !(e.name in ['MEMGRAPH_ENTERPRISE_LICENSE', 'MEMGRAPH_ORGANIZATION_NAME', 'POD_NAME']))",message="extraEnv must not set MEMGRAPH_ENTERPRISE_LICENSE or MEMGRAPH_ORGANIZATION_NAME (they come from the secrets block) or POD_NAME (it carries the pod's own identity)"
+	// +optional
+	Coordinators []EnvVar `json:"coordinators,omitempty"`
+
+	// data are added to every data instance pod's Memgraph container.
+	// +listType=map
+	// +listMapKey=name
+	// +kubebuilder:validation:MaxItems=64
+	// +kubebuilder:validation:XValidation:rule="self.all(e, !(e.name in ['MEMGRAPH_ENTERPRISE_LICENSE', 'MEMGRAPH_ORGANIZATION_NAME', 'POD_NAME']))",message="extraEnv must not set MEMGRAPH_ENTERPRISE_LICENSE or MEMGRAPH_ORGANIZATION_NAME (they come from the secrets block) or POD_NAME (it carries the pod's own identity)"
+	// +optional
+	Data []EnvVar `json:"data,omitempty"`
+}
+
+// ExtraArgsSpec passes additional Memgraph flags to a role, so any flag is
+// usable without waiting for a typed field. The flags are appended after the
+// ones the operator derives, and Memgraph takes the last occurrence of a
+// repeated flag, so a flag set here overrides the operator's value.
+//
+// The ports and the coordinator identity are excluded from that override: they
+// must stay consistent with the advertised addresses the operator registers
+// with the cluster. Configure ports through spec.ports instead.
+type ExtraArgsSpec struct {
+	// coordinators are appended to every coordinator pod's Memgraph flags.
+	// +kubebuilder:validation:MaxItems=64
+	// +kubebuilder:validation:items:MinLength=1
+	// +kubebuilder:validation:items:MaxLength=4096
+	// +kubebuilder:validation:XValidation:rule="self.all(a, !['--bolt-port', '--management-port', '--coordinator-id', '--coordinator-hostname', '--coordinator-port'].exists(f, a.startsWith(f)))",message="extraArgs must not set a port or the coordinator identity the operator derives (--bolt-port, --management-port, --coordinator-id, --coordinator-hostname, --coordinator-port); configure ports through spec.ports"
+	// +optional
+	Coordinators []string `json:"coordinators,omitempty"`
+
+	// data are appended to every data instance pod's Memgraph flags.
+	// +kubebuilder:validation:MaxItems=64
+	// +kubebuilder:validation:items:MinLength=1
+	// +kubebuilder:validation:items:MaxLength=4096
+	// +kubebuilder:validation:XValidation:rule="self.all(a, !['--bolt-port', '--management-port', '--coordinator-id', '--coordinator-hostname', '--coordinator-port'].exists(f, a.startsWith(f)))",message="extraArgs must not set a port or the coordinator identity the operator derives (--bolt-port, --management-port, --coordinator-id, --coordinator-hostname, --coordinator-port); configure ports through spec.ports"
+	// +optional
+	Data []string `json:"data,omitempty"`
+}
+
+// MemgraphClusterSpec defines the desired state of MemgraphCluster.
 type MemgraphClusterSpec struct {
 	// coordinators is the number of Raft coordinator instances. It must be odd
 	// so the Raft quorum cannot split, and it is immutable: scaling is not
@@ -288,6 +536,42 @@ type MemgraphClusterSpec struct {
 	// +kubebuilder:default={}
 	// +optional
 	Storage StorageSpec `json:"storage,omitzero"`
+
+	// clusterDomain is the Kubernetes cluster domain the advertised FQDN
+	// addresses are built from: <pod>.<service>.<namespace>.svc.<clusterDomain>.
+	// Override it on clusters configured with a domain other than the default.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
+	// +kubebuilder:default="cluster.local"
+	// +optional
+	ClusterDomain string `json:"clusterDomain,omitempty"`
+
+	// ports configures the internal ports Memgraph listens on.
+	// +kubebuilder:default={}
+	// +optional
+	Ports PortsSpec `json:"ports,omitzero"`
+
+	// probes tunes the probe timings of both roles.
+	// +optional
+	Probes ProbesSpec `json:"probes,omitzero"`
+
+	// resources sets the compute resources of both roles' Memgraph containers.
+	// +optional
+	Resources ResourcesSpec `json:"resources,omitzero"`
+
+	// labels adds custom labels to both roles' pods, StatefulSets and Services.
+	// +optional
+	Labels LabelsSpec `json:"labels,omitzero"`
+
+	// extraEnv passes additional non-secret environment variables to both
+	// roles' Memgraph containers.
+	// +optional
+	ExtraEnv ExtraEnvSpec `json:"extraEnv,omitzero"`
+
+	// extraArgs passes additional Memgraph flags to both roles.
+	// +optional
+	ExtraArgs ExtraArgsSpec `json:"extraArgs,omitzero"`
 }
 
 // MemgraphClusterStatus defines the observed state of MemgraphCluster.

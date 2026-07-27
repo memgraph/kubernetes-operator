@@ -38,36 +38,46 @@ func DeclaredTopology(cluster *memgraphcomv1alpha1.MemgraphCluster) planner.Topo
 		DataInstances: make([]memgraph.DataInstanceSpec, 0, spec.dataInstances),
 	}
 	for ordinal := range spec.coordinators {
-		fqdn := podFQDN(cluster, CoordinatorName(cluster), ordinal)
+		fqdn := podFQDN(cluster, CoordinatorName(cluster), spec, ordinal)
 		topology.Coordinators = append(topology.Coordinators, memgraph.CoordinatorSpec{
 			ID:                ordinal + 1,
-			BoltServer:        hostPort(fqdn, BoltPort),
-			CoordinatorServer: hostPort(fqdn, CoordinatorPort),
-			ManagementServer:  hostPort(fqdn, ManagementPort),
+			BoltServer:        hostPort(fqdn, spec.ports.bolt),
+			CoordinatorServer: hostPort(fqdn, spec.ports.coordinator),
+			ManagementServer:  hostPort(fqdn, spec.ports.management),
 		})
 	}
 	for ordinal := range spec.dataInstances {
-		fqdn := podFQDN(cluster, DataName(cluster), ordinal)
+		fqdn := podFQDN(cluster, DataName(cluster), spec, ordinal)
 		topology.DataInstances = append(topology.DataInstances, memgraph.DataInstanceSpec{
 			Name:              fmt.Sprintf("instance_%d", ordinal),
-			BoltServer:        hostPort(fqdn, BoltPort),
-			ManagementServer:  hostPort(fqdn, ManagementPort),
-			ReplicationServer: hostPort(fqdn, ReplicationPort),
+			BoltServer:        hostPort(fqdn, spec.ports.bolt),
+			ManagementServer:  hostPort(fqdn, spec.ports.management),
+			ReplicationServer: hostPort(fqdn, spec.ports.replication),
 		})
 	}
 	return topology
 }
 
 // podFQDNSuffix returns the DNS suffix a pod name is appended to for pods of
-// the given headless Service: "<service>.<namespace>.svc.<domain>".
-func podFQDNSuffix(cluster *memgraphcomv1alpha1.MemgraphCluster, serviceName string) string {
-	return fmt.Sprintf("%s.%s.svc.%s", serviceName, cluster.Namespace, clusterDomain)
+// the given headless Service: "<service>.<namespace>.svc.<domain>", where the
+// domain is the configured cluster domain.
+func podFQDNSuffix(
+	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	serviceName string,
+	spec normalizedSpec,
+) string {
+	return fmt.Sprintf("%s.%s.svc.%s", serviceName, cluster.Namespace, spec.clusterDomain)
 }
 
 // podFQDN returns the stable DNS name of the pod with the given ordinal in
 // the StatefulSet backed by the given headless Service (both share one name).
-func podFQDN(cluster *memgraphcomv1alpha1.MemgraphCluster, serviceName string, ordinal int32) string {
-	return fmt.Sprintf("%s-%d.%s", serviceName, ordinal, podFQDNSuffix(cluster, serviceName))
+func podFQDN(
+	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	serviceName string,
+	spec normalizedSpec,
+	ordinal int32,
+) string {
+	return fmt.Sprintf("%s-%d.%s", serviceName, ordinal, podFQDNSuffix(cluster, serviceName, spec))
 }
 
 func hostPort(host string, port int32) string {

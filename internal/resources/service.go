@@ -26,26 +26,33 @@ import (
 // CoordinatorHeadlessService builds the headless Service backing the
 // coordinator StatefulSet's per-pod DNS identities.
 func CoordinatorHeadlessService(cluster *memgraphcomv1alpha1.MemgraphCluster) *corev1.Service {
-	return headlessService(cluster, coordinatorComponent, CoordinatorName(cluster), []corev1.ServicePort{
-		{Name: boltPortName, Port: BoltPort},
-		{Name: managementPortName, Port: ManagementPort},
-		{Name: coordinatorPortName, Port: CoordinatorPort},
-	})
+	spec := normalize(cluster.Spec)
+
+	return headlessService(cluster, coordinatorComponent, CoordinatorName(cluster),
+		spec.coordinatorRole.serviceLabels, []corev1.ServicePort{
+			{Name: boltPortName, Port: spec.ports.bolt},
+			{Name: managementPortName, Port: spec.ports.management},
+			{Name: coordinatorPortName, Port: spec.ports.coordinator},
+		})
 }
 
 // DataHeadlessService builds the headless Service backing the data-instance
 // StatefulSet's per-pod DNS identities.
 func DataHeadlessService(cluster *memgraphcomv1alpha1.MemgraphCluster) *corev1.Service {
-	return headlessService(cluster, dataComponent, DataName(cluster), []corev1.ServicePort{
-		{Name: boltPortName, Port: BoltPort},
-		{Name: managementPortName, Port: ManagementPort},
-		{Name: replicationPortName, Port: ReplicationPort},
-	})
+	spec := normalize(cluster.Spec)
+
+	return headlessService(cluster, dataComponent, DataName(cluster),
+		spec.dataRole.serviceLabels, []corev1.ServicePort{
+			{Name: boltPortName, Port: spec.ports.bolt},
+			{Name: managementPortName, Port: spec.ports.management},
+			{Name: replicationPortName, Port: spec.ports.replication},
+		})
 }
 
 func headlessService(
 	cluster *memgraphcomv1alpha1.MemgraphCluster,
 	component, name string,
+	customLabels map[string]string,
 	ports []corev1.ServicePort,
 ) *corev1.Service {
 	return &corev1.Service{
@@ -55,7 +62,7 @@ func headlessService(
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: cluster.Namespace,
-			Labels:    labels(cluster, component),
+			Labels:    labels(cluster, component, customLabels),
 		},
 		Spec: corev1.ServiceSpec{
 			ClusterIP: corev1.ClusterIPNone,

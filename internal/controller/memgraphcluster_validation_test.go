@@ -21,6 +21,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -43,6 +44,17 @@ func defaultRoleStorage() memgraphcomv1alpha1.RoleStorageSpec {
 		LibStorageAccessMode: memgraphcomv1alpha1.DefaultStorageAccessMode,
 		LogPVCSize:           ptr.To(resource.MustParse(memgraphcomv1alpha1.DefaultLogPVCSize)),
 		LogStorageAccessMode: memgraphcomv1alpha1.DefaultStorageAccessMode,
+	}
+}
+
+// defaultPorts are the internal ports as the CRD schema defaults materialize
+// them.
+func defaultPorts() memgraphcomv1alpha1.PortsSpec {
+	return memgraphcomv1alpha1.PortsSpec{
+		BoltPort:        ptr.To(memgraphcomv1alpha1.DefaultBoltPort),
+		ManagementPort:  ptr.To(memgraphcomv1alpha1.DefaultManagementPort),
+		ReplicationPort: ptr.To(memgraphcomv1alpha1.DefaultReplicationPort),
+		CoordinatorPort: ptr.To(memgraphcomv1alpha1.DefaultCoordinatorPort),
 	}
 }
 
@@ -120,6 +132,11 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 					Coordinators:    defaultRoleStorage(),
 					Data:            defaultRoleStorage(),
 				},
+				ClusterDomain: memgraphcomv1alpha1.DefaultClusterDomain,
+				Ports:         defaultPorts(),
+				// Probes, resources, labels and the env/args passthrough have no
+				// schema defaults: the probe timings' defaults depend on the role
+				// and the rest default to "nothing added".
 			}), "the CRD schema defaults must match the Go constants the builders fall back to")
 		})
 
@@ -190,6 +207,56 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 				int32(9), int32(16)),
 		)
 
+		It("should accept a fully tuned pod configuration", func() {
+			stored := createAccepted("valid-pod-tuning", memgraphcomv1alpha1.MemgraphClusterSpec{
+				ClusterDomain: "k8s.example.com",
+				Ports: memgraphcomv1alpha1.PortsSpec{
+					BoltPort:        ptr.To(int32(7777)),
+					ManagementPort:  ptr.To(int32(10001)),
+					ReplicationPort: ptr.To(int32(20001)),
+					CoordinatorPort: ptr.To(int32(12001)),
+				},
+				Probes: memgraphcomv1alpha1.ProbesSpec{
+					Data: memgraphcomv1alpha1.RoleProbesSpec{
+						StartupProbe: memgraphcomv1alpha1.ProbeSpec{FailureThreshold: ptr.To(int32(4320))},
+					},
+				},
+				Resources: memgraphcomv1alpha1.ResourcesSpec{
+					Data: corev1.ResourceRequirements{
+						Requests: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("4Gi")},
+					},
+				},
+				Labels: memgraphcomv1alpha1.LabelsSpec{
+					Data: memgraphcomv1alpha1.RoleLabelsSpec{PodLabels: map[string]string{"team": "data"}},
+				},
+				ExtraEnv: memgraphcomv1alpha1.ExtraEnvSpec{
+					Data: []memgraphcomv1alpha1.EnvVar{{Name: "DATA_LABEL_ONE", Value: "one"}},
+				},
+				ExtraArgs: memgraphcomv1alpha1.ExtraArgsSpec{
+					Data: []string{"--storage-snapshot-on-exit=true"},
+				},
+			})
+
+			Expect(stored.Spec.ClusterDomain).To(Equal("k8s.example.com"))
+			Expect(stored.Spec.Ports.BoltPort).To(HaveValue(Equal(int32(7777))))
+			Expect(stored.Spec.Probes.Data.StartupProbe.FailureThreshold).To(HaveValue(Equal(int32(4320))))
+			Expect(stored.Spec.Probes.Data.ReadinessProbe).To(Equal(memgraphcomv1alpha1.ProbeSpec{}),
+				"an unset probe stays unset; its defaults are resolved by the builders, not the schema")
+			Expect(stored.Spec.ExtraEnv.Data).To(HaveLen(1))
+			Expect(stored.Spec.ExtraArgs.Data).To(ConsistOf("--storage-snapshot-on-exit=true"))
+		})
+
+		It("should default the ports a partially specified block leaves out", func() {
+			stored := createAccepted("valid-partial-ports", memgraphcomv1alpha1.MemgraphClusterSpec{
+				Ports: memgraphcomv1alpha1.PortsSpec{BoltPort: ptr.To(int32(7777))},
+			})
+
+			Expect(stored.Spec.Ports.BoltPort).To(HaveValue(Equal(int32(7777))))
+			Expect(stored.Spec.Ports.ManagementPort).To(HaveValue(Equal(memgraphcomv1alpha1.DefaultManagementPort)))
+			Expect(stored.Spec.Ports.ReplicationPort).To(HaveValue(Equal(memgraphcomv1alpha1.DefaultReplicationPort)))
+			Expect(stored.Spec.Ports.CoordinatorPort).To(HaveValue(Equal(memgraphcomv1alpha1.DefaultCoordinatorPort)))
+		})
+
 		It("should accept a registry host carrying a port", func() {
 			stored := createAccepted("valid-registry-port", memgraphcomv1alpha1.MemgraphClusterSpec{
 				Image: memgraphcomv1alpha1.ImageSpec{Repository: "registry.example.com:5000/memgraph"},
@@ -253,7 +320,91 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 					},
 				},
 				`Unsupported value: "ReadWriteSometimes"`),
+			Entry("a port outside the valid range", "invalid-port-range",
+				memgraphcomv1alpha1.MemgraphClusterSpec{
+					Ports: memgraphcomv1alpha1.PortsSpec{BoltPort: ptr.To(int32(70000))},
+				},
+				"should be less than or equal to 65535"),
+			Entry("a port of zero", "invalid-port-zero",
+				memgraphcomv1alpha1.MemgraphClusterSpec{
+					Ports: memgraphcomv1alpha1.PortsSpec{ManagementPort: ptr.To(int32(0))},
+				},
+				"should be greater than or equal to 1"),
+			// Two roles sharing a port number would make the advertised
+			// addresses ambiguous, so it is rejected instead of half-working.
+			Entry("two ports colliding", "invalid-ports-collide",
+				memgraphcomv1alpha1.MemgraphClusterSpec{
+					Ports: memgraphcomv1alpha1.PortsSpec{ManagementPort: ptr.To(memgraphcomv1alpha1.DefaultBoltPort)},
+				},
+				"must all be different ports"),
+			Entry("a cluster domain that is not a DNS name", "invalid-cluster-domain",
+				memgraphcomv1alpha1.MemgraphClusterSpec{ClusterDomain: "Cluster_Local"},
+				"in body should match"),
+			Entry("an env var name that is not a shell identifier", "invalid-env-name",
+				memgraphcomv1alpha1.MemgraphClusterSpec{
+					ExtraEnv: memgraphcomv1alpha1.ExtraEnvSpec{
+						Data: []memgraphcomv1alpha1.EnvVar{{Name: "not-an-identifier", Value: "x"}},
+					},
+				},
+				"in body should match"),
+			Entry("an env var shadowing the license the secrets block owns", "invalid-env-license",
+				memgraphcomv1alpha1.MemgraphClusterSpec{
+					ExtraEnv: memgraphcomv1alpha1.ExtraEnvSpec{
+						Data: []memgraphcomv1alpha1.EnvVar{{
+							Name:  memgraphcomv1alpha1.EnvLicense,
+							Value: "smuggled-license",
+						}},
+					},
+				},
+				"they come from the secrets block"),
+			Entry("an env var shadowing the pod's own identity", "invalid-env-pod-name",
+				memgraphcomv1alpha1.MemgraphClusterSpec{
+					ExtraEnv: memgraphcomv1alpha1.ExtraEnvSpec{
+						Coordinators: []memgraphcomv1alpha1.EnvVar{{
+							Name:  memgraphcomv1alpha1.EnvPodName,
+							Value: "not-my-name",
+						}},
+					},
+				},
+				"it carries the pod's own identity"),
+			// A port set through extraArgs would leave the pods listening
+			// somewhere the registered addresses do not point.
+			Entry("an extra arg overriding a port", "invalid-args-port",
+				memgraphcomv1alpha1.MemgraphClusterSpec{
+					ExtraArgs: memgraphcomv1alpha1.ExtraArgsSpec{Data: []string{"--bolt-port=7777"}},
+				},
+				"configure ports through spec.ports"),
+			Entry("an extra arg overriding the coordinator identity", "invalid-args-coordinator-id",
+				memgraphcomv1alpha1.MemgraphClusterSpec{
+					ExtraArgs: memgraphcomv1alpha1.ExtraArgsSpec{Coordinators: []string{"--coordinator-id=9"}},
+				},
+				"the coordinator identity the operator derives"),
+			Entry("a probe timing below one", "invalid-probe-period",
+				memgraphcomv1alpha1.MemgraphClusterSpec{
+					Probes: memgraphcomv1alpha1.ProbesSpec{
+						Coordinators: memgraphcomv1alpha1.RoleProbesSpec{
+							ReadinessProbe: memgraphcomv1alpha1.ProbeSpec{PeriodSeconds: ptr.To(int32(0))},
+						},
+					},
+				},
+				"should be greater than or equal to 1"),
 		)
+
+		// Two extra env vars of the same name would be an ambiguous
+		// configuration, so the list is keyed by name.
+		It("should reject a repeated env var name", func() {
+			err := create("invalid-env-duplicate", memgraphcomv1alpha1.MemgraphClusterSpec{
+				ExtraEnv: memgraphcomv1alpha1.ExtraEnvSpec{
+					Data: []memgraphcomv1alpha1.EnvVar{
+						{Name: "DATA_LABEL", Value: "one"},
+						{Name: "DATA_LABEL", Value: "two"},
+					},
+				},
+			})
+
+			Expect(err).To(HaveOccurred(), "expected admission to reject the duplicate")
+			Expect(err.Error()).To(ContainSubstring("Duplicate value"))
+		})
 
 		// The typed client drops empty strings before they reach the API
 		// server (omitempty), so the fields a user can only blank out from
