@@ -100,7 +100,10 @@ type MemgraphClusterReconciler struct {
 // mid-bootstrap is harmless. Registration reconciliation is continuous, not
 // one-shot: a converged cluster is re-observed on a periodic resync, so a
 // registration a pod loses (rescheduled, wiped storage) is re-issued without
-// human action. Deletion needs no handling here — every object
+// human action. An apply the API server rejects — an edit to a field
+// Kubernetes treats as immutable, a quota denial — is reported on the resource
+// as ApplyFailed rather than only in the log, because no amount of retrying
+// will clear it. Deletion needs no handling here — every object
 // carries a controller owner reference, so garbage collection removes the
 // workloads with the CR.
 func (r *MemgraphClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -122,7 +125,22 @@ func (r *MemgraphClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 			return ctrl.Result{}, fmt.Errorf("setting owner reference on %T %s: %w", obj, obj.GetName(), err)
 		}
 		if err := r.apply(ctx, obj); err != nil {
-			return ctrl.Result{}, fmt.Errorf("applying %T %s: %w", obj, obj.GetName(), err)
+			applyErr := fmt.Errorf("applying %T %s: %w", obj, obj.GetName(), err)
+			// A rejected apply is retried forever behind the scenes, so report
+			// it on the resource: without this the conditions keep describing
+			// the cluster that is still running while the declared spec never
+			// lands, and the rejection is only visible in the operator's log.
+			// Both conditions go False — the workloads are not the declared
+			// ones, so neither serving nor convergence can be claimed for the
+			// spec the user asked for.
+			msg := truncateMessage(applyErr.Error())
+			if statusErr := r.writeStatus(ctx, &cluster, cluster.Status.Main,
+				notReadyCondition(memgraphcomv1alpha1.ReasonApplyFailed, msg),
+				notConvergedCondition(memgraphcomv1alpha1.ReasonApplyFailed, msg),
+			); statusErr != nil {
+				return ctrl.Result{}, errors.Join(applyErr, statusErr)
+			}
+			return ctrl.Result{}, applyErr
 		}
 	}
 
@@ -233,6 +251,18 @@ func readyOrNot(main string) metav1.Condition {
 	}
 	return trueCondition(memgraphcomv1alpha1.ConditionReady,
 		memgraphcomv1alpha1.ReasonMainElected, "Data instance "+main+" is MAIN")
+}
+
+// maxConditionMessage bounds a condition message well under the API's own
+// 32Ki limit: an apply rejection can carry a long field list, and the useful
+// part — what the API server refused — comes first.
+const maxConditionMessage = 1024
+
+func truncateMessage(message string) string {
+	if len(message) <= maxConditionMessage {
+		return message
+	}
+	return message[:maxConditionMessage-3] + "..."
 }
 
 func trueCondition(condType, reason, message string) metav1.Condition {

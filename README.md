@@ -93,7 +93,7 @@ kubectl wait --namespace memgraph --for=condition=Converged \
   memgraphcluster/memgraph --timeout=10m
 ```
 
-If it does not converge, `kubectl describe mgc memgraph -n memgraph` gives the condition messages (which pods are not ready, whether a coordinator is unreachable), and the operator logs the rest:
+If it does not converge, `kubectl describe mgc memgraph -n memgraph` gives the condition messages (which pods are not ready, whether a coordinator is unreachable, or — with reason `ApplyFailed` — what the API server refused about the workloads), and the operator logs the rest:
 
 ```sh
 kubectl logs -n memgraph-operator-system deploy/memgraph-operator-controller-manager
@@ -161,7 +161,7 @@ Uninstall the operator with `helm uninstall memgraph-operator --namespace memgra
 
 ## Configuration
 
-Beyond the quickstart's four fields, v1alpha1 exposes storage (PVC size, access mode, storage class, retention) per role, resource requests and limits per role, probe timings per role, custom labels on pods, StatefulSets and Services, the internal ports, the cluster domain used in advertised addresses, and a freeform environment-variable and Memgraph-flag passthrough per role.
+Beyond the quickstart's four fields, v1alpha1 exposes storage (PVC size, access mode, storage class, whether the log claim is created at all, retention) per role, resource requests and limits per role, probe timings per role, custom labels on pods, StatefulSets and Services, the internal ports, the cluster domain used in advertised addresses, and a freeform environment-variable and Memgraph-flag passthrough per role.
 
 [`config/samples/v1alpha1_memgraphcluster.yaml`](config/samples/v1alpha1_memgraphcluster.yaml) spells the full surface out with every default and the reasoning behind it. `kubectl explain mgc.spec --recursive` documents the same fields from the installed CRD.
 

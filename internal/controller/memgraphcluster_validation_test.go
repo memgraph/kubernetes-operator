@@ -40,10 +40,11 @@ import (
 // materialize it.
 func defaultRoleStorage() memgraphcomv1alpha1.RoleStorageSpec {
 	return memgraphcomv1alpha1.RoleStorageSpec{
-		LibPVCSize:           ptr.To(resource.MustParse(memgraphcomv1alpha1.DefaultLibPVCSize)),
-		LibStorageAccessMode: memgraphcomv1alpha1.DefaultStorageAccessMode,
-		LogPVCSize:           ptr.To(resource.MustParse(memgraphcomv1alpha1.DefaultLogPVCSize)),
-		LogStorageAccessMode: memgraphcomv1alpha1.DefaultStorageAccessMode,
+		LibPVCSize:            ptr.To(resource.MustParse(memgraphcomv1alpha1.DefaultLibPVCSize)),
+		LibStorageAccessMode:  memgraphcomv1alpha1.DefaultStorageAccessMode,
+		CreateLogStorageClaim: ptr.To(memgraphcomv1alpha1.DefaultCreateLogStorageClaim),
+		LogPVCSize:            ptr.To(resource.MustParse(memgraphcomv1alpha1.DefaultLogPVCSize)),
+		LogStorageAccessMode:  memgraphcomv1alpha1.DefaultStorageAccessMode,
 	}
 }
 

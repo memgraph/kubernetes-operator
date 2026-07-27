@@ -35,10 +35,18 @@ spec:
     # while the empty string turns dynamic provisioning off and binds a
     # pre-created PersistentVolume. Sizes, access modes and classes become
     # StatefulSet volumeClaimTemplates, which Kubernetes treats as immutable.
+    # Setting createLogStorageClaim to false drops the log claim for that role
+    # and passes an empty --log-file, leaving stderr (and so `kubectl logs`) as
+    # the only log sink; the other log* knobs are then ignored. Flipping it
+    # on a live cluster needs the role's StatefulSet recreated (patch this
+    # resource, then `kubectl delete statefulset <cluster>-<role>
+    # --cascade=orphan`) — adding or removing a claim template is not an update
+    # Kubernetes allows.
     coordinators:
       libPVCSize: 1Gi
       libStorageAccessMode: ReadWriteOnce
       # libStorageClassName: standard
+      createLogStorageClaim: true
       logPVCSize: 1Gi
       logStorageAccessMode: ReadWriteOnce
       # logStorageClassName: standard
@@ -46,6 +54,7 @@ spec:
       libPVCSize: 1Gi
       libStorageAccessMode: ReadWriteOnce
       # libStorageClassName: standard
+      createLogStorageClaim: true
       logPVCSize: 1Gi
       logStorageAccessMode: ReadWriteOnce
       # logStorageClassName: standard

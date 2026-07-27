@@ -692,6 +692,24 @@ spec:
                     description: coordinators configures the storage of every coordinator
                       pod.
                     properties:
+                      createLogStorageClaim:
+                        default: true
+                        description: |-
+                          createLogStorageClaim decides whether every pod of the role gets a log
+                          storage claim at all. With it disabled the operator drops the claim and
+                          passes an empty --log-file, which turns file logging off, so stderr and
+                          `kubectl logs` (plus whatever collects it) become the single log sink. Use
+                          it to avoid a second PersistentVolumeClaim per pod on clusters that ship
+                          logs off-node anyway.
+
+                          The remaining log* knobs below are ignored while this is false.
+
+                          Like the sizes and classes around it this is effectively a create-time
+                          choice: flipping it adds or removes a volumeClaimTemplate, which
+                          Kubernetes forbids on a live StatefulSet, so the operator's apply is
+                          rejected until the StatefulSet is recreated (delete it with
+                          --cascade=orphan and the operator rebuilds it around the running pods).
+                        type: boolean
                       libPVCSize:
                         anyOf:
                         - type: integer
@@ -756,6 +774,24 @@ spec:
                     description: data configures the storage of every data instance
                       pod.
                     properties:
+                      createLogStorageClaim:
+                        default: true
+                        description: |-
+                          createLogStorageClaim decides whether every pod of the role gets a log
+                          storage claim at all. With it disabled the operator drops the claim and
+                          passes an empty --log-file, which turns file logging off, so stderr and
+                          `kubectl logs` (plus whatever collects it) become the single log sink. Use
+                          it to avoid a second PersistentVolumeClaim per pod on clusters that ship
+                          logs off-node anyway.
+
+                          The remaining log* knobs below are ignored while this is false.
+
+                          Like the sizes and classes around it this is effectively a create-time
+                          choice: flipping it adds or removes a volumeClaimTemplate, which
+                          Kubernetes forbids on a live StatefulSet, so the operator's apply is
+                          rejected until the StatefulSet is recreated (delete it with
+                          --cascade=orphan and the operator rebuilds it around the running pods).
+                        type: boolean
                       libPVCSize:
                         anyOf:
                         - type: integer

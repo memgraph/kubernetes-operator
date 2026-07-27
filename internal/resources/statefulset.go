@@ -85,7 +85,7 @@ func DataStatefulSet(cluster *memgraphcomv1alpha1.MemgraphCluster) *appsv1.State
 	role := spec.dataRole
 
 	container := memgraphContainer(spec, role)
-	container.Args = append(commonArgs(spec), role.extraArgs...)
+	container.Args = append(commonArgs(spec, role), role.extraArgs...)
 	container.Ports = []corev1.ContainerPort{
 		{Name: boltPortName, ContainerPort: spec.ports.bolt},
 		{Name: managementPortName, ContainerPort: spec.ports.management},
@@ -109,7 +109,7 @@ func coordinatorStartScript(
 	role normalizedRole,
 ) string {
 	fqdnSuffix := podFQDNSuffix(cluster, CoordinatorName(cluster), spec)
-	args := append(commonArgs(spec), role.extraArgs...)
+	args := append(commonArgs(spec, role), role.extraArgs...)
 	return fmt.Sprintf(`ordinal="${POD_NAME##*-}"
 exec %s \
   --coordinator-id="$((ordinal + 1))" \
@@ -122,14 +122,26 @@ exec %s \
 // chart's auto-appended and default logging arguments. A role's extra args are
 // appended after these, and Memgraph takes the last occurrence of a repeated
 // flag, so a user-supplied flag wins.
-func commonArgs(spec normalizedSpec) []string {
+//
+// A role that opted out of log storage gets --log-file with an empty value,
+// which is what turns file logging off. Leaving the flag out would not: the
+// image ships /etc/memgraph/memgraph.conf with log_file set to the path below,
+// Memgraph parses that file before the command line, and failing to open the
+// resulting path is fatal — so an unmounted log directory on a read-only root
+// filesystem would crash-loop the pod. --also-log-to-stderr keeps the logs in
+// `kubectl logs` either way.
+func commonArgs(spec normalizedSpec, role normalizedRole) []string {
+	logDestination := logFile
+	if !role.storage.createLogClaim {
+		logDestination = ""
+	}
 	return []string{
 		fmt.Sprintf("--bolt-port=%d", spec.ports.bolt),
 		fmt.Sprintf("--management-port=%d", spec.ports.management),
 		"--data-directory=" + dataDirectory,
 		"--log-level=TRACE",
 		"--also-log-to-stderr",
-		"--log-file=" + logFile,
+		"--log-file=" + logDestination,
 		"--log-retention-days=35",
 	}
 }
@@ -170,11 +182,7 @@ func memgraphContainer(spec normalizedSpec, role normalizedRole) corev1.Containe
 				},
 			},
 		}, role.env...),
-		VolumeMounts: []corev1.VolumeMount{
-			{Name: libVolumeName, MountPath: libMountPath},
-			{Name: logVolumeName, MountPath: logMountPath},
-			{Name: tmpVolumeName, MountPath: tmpMountPath},
-		},
+		VolumeMounts: volumeMounts(role.storage),
 		SecurityContext: &corev1.SecurityContext{
 			AllowPrivilegeEscalation: ptr.To(false),
 			Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
@@ -183,6 +191,30 @@ func memgraphContainer(spec normalizedSpec, role normalizedRole) corev1.Containe
 			SeccompProfile:           &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
 		},
 	}
+}
+
+// volumeMounts are the role's container mounts: lib storage, the scratch
+// directory the read-only root filesystem needs, and log storage unless the
+// role opted out of it.
+func volumeMounts(storage normalizedStorage) []corev1.VolumeMount {
+	mounts := []corev1.VolumeMount{{Name: libVolumeName, MountPath: libMountPath}}
+	if storage.createLogClaim {
+		mounts = append(mounts, corev1.VolumeMount{Name: logVolumeName, MountPath: logMountPath})
+	}
+	return append(mounts, corev1.VolumeMount{Name: tmpVolumeName, MountPath: tmpMountPath})
+}
+
+// volumeClaimTemplates are the per-pod claims of the role: lib storage always,
+// log storage unless the role opted out of it.
+func volumeClaimTemplates(storage normalizedStorage) []corev1.PersistentVolumeClaim {
+	claims := []corev1.PersistentVolumeClaim{
+		volumeClaimTemplate(libVolumeName, storage.libSize, storage.libAccessMode, storage.libClass),
+	}
+	if storage.createLogClaim {
+		claims = append(claims,
+			volumeClaimTemplate(logVolumeName, storage.logSize, storage.logAccessMode, storage.logClass))
+	}
+	return claims
 }
 
 func statefulSet(
@@ -217,10 +249,7 @@ func statefulSet(
 				WhenDeleted: retentionType(spec.retentionPolicy),
 				WhenScaled:  appsv1.RetainPersistentVolumeClaimRetentionPolicyType,
 			},
-			VolumeClaimTemplates: []corev1.PersistentVolumeClaim{
-				volumeClaimTemplate(libVolumeName, storage.libSize, storage.libAccessMode, storage.libClass),
-				volumeClaimTemplate(logVolumeName, storage.logSize, storage.logAccessMode, storage.logClass),
-			},
+			VolumeClaimTemplates: volumeClaimTemplates(storage),
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: labels(cluster, component, role.podLabels),
@@ -234,7 +263,7 @@ func statefulSet(
 						RunAsNonRoot:   ptr.To(true),
 						SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
 					},
-					// Lib and log storage come from the volumeClaimTemplates
+					// Persistent storage comes from the volumeClaimTemplates
 					// above; only the scratch directory the read-only root
 					// filesystem still needs is ephemeral.
 					Volumes: []corev1.Volume{

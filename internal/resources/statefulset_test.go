@@ -18,6 +18,7 @@ package resources_test
 
 import (
 	"maps"
+	"slices"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -238,6 +239,19 @@ func expectedVolumeMounts() []corev1.VolumeMount {
 	}
 }
 
+// expectedVolumeMountsWithoutLog is the mount set of a role that opted out of
+// log storage: everything except the log volume.
+func expectedVolumeMountsWithoutLog() []corev1.VolumeMount {
+	return slices.DeleteFunc(expectedVolumeMounts(), func(mount corev1.VolumeMount) bool {
+		return mount.Name == "log-storage"
+	})
+}
+
+// expectedCommand wraps a coordinator start script the way the builder does.
+func expectedCommand(script string) []string {
+	return []string{"/bin/sh", "-ec", script}
+}
+
 // expectedVolumes covers only the ephemeral scratch volume: lib and log
 // storage are provisioned through volumeClaimTemplates.
 func expectedVolumes() []corev1.Volume {
@@ -340,7 +354,7 @@ func TestCoordinatorStatefulSetDefaults(t *testing.T) {
 						Name:            memgraphName,
 						Image:           "docker.io/memgraph/memgraph:3.12.0-relwithdebinfo",
 						ImagePullPolicy: corev1.PullIfNotPresent,
-						Command:         []string{"/bin/sh", "-ec", expectedCoordinatorScript},
+						Command:         expectedCommand(expectedCoordinatorScript),
 						Env: append([]corev1.EnvVar{{
 							Name: "POD_NAME",
 							ValueFrom: &corev1.EnvVarSource{
@@ -513,6 +527,72 @@ func TestStatefulSetStorageOverrides(t *testing.T) {
 	}
 }
 
+// TestStatefulSetWithoutLogStorageClaim asserts that a role which opted out of
+// log storage gets no log claim, no log mount, and an empty --log-file. The
+// empty flag is load-bearing rather than cosmetic: the image's
+// /etc/memgraph/memgraph.conf sets log_file, Memgraph reads it before the
+// command line, and it fails startup when that path cannot be opened — so
+// dropping the flag would crash-loop the pod instead of disabling file logging.
+// Logs still reach `kubectl logs` through --also-log-to-stderr.
+func TestStatefulSetWithoutLogStorageClaim(t *testing.T) {
+	cluster := minimalCluster()
+	cluster.Spec.Storage = memgraphcomv1alpha1.StorageSpec{
+		Coordinators: memgraphcomv1alpha1.RoleStorageSpec{
+			CreateLogStorageClaim: ptr.To(false),
+		},
+		// The data instances keep their log claim: the knob is per role.
+		Data: memgraphcomv1alpha1.RoleStorageSpec{},
+	}
+
+	t.Run(coordinatorComponent, func(t *testing.T) {
+		sts := resources.CoordinatorStatefulSet(cluster)
+
+		wantClaims := []corev1.PersistentVolumeClaim{
+			expectedClaimTemplate("lib-storage", "1Gi", corev1.ReadWriteOnce, nil),
+		}
+		if diff := cmp.Diff(wantClaims, sts.Spec.VolumeClaimTemplates); diff != "" {
+			t.Errorf("volume claim templates mismatch (-want +got):\n%s", diff)
+		}
+
+		container := sts.Spec.Template.Spec.Containers[0]
+		if diff := cmp.Diff(expectedVolumeMountsWithoutLog(), container.VolumeMounts); diff != "" {
+			t.Errorf("volume mounts mismatch (-want +got):\n%s", diff)
+		}
+		wantScript := `ordinal="${POD_NAME##*-}"
+exec /usr/lib/memgraph/memgraph \
+  --coordinator-id="$((ordinal + 1))" \
+  --coordinator-hostname="${POD_NAME}.example-coordinator.memgraph-test.svc.cluster.local" \
+  --coordinator-port=12000 \
+  --bolt-port=7687 \
+  --management-port=10000 \
+  --data-directory=/var/lib/memgraph/mg_data \
+  --log-level=TRACE \
+  --also-log-to-stderr \
+  --log-file= \
+  --log-retention-days=35`
+		wantCommand := expectedCommand(wantScript)
+		if diff := cmp.Diff(wantCommand, container.Command); diff != "" {
+			t.Errorf("start script mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run(dataComponent, func(t *testing.T) {
+		sts := resources.DataStatefulSet(cluster)
+
+		if diff := cmp.Diff(expectedClaimTemplates(), sts.Spec.VolumeClaimTemplates); diff != "" {
+			t.Errorf("volume claim templates mismatch (-want +got):\n%s", diff)
+		}
+
+		container := sts.Spec.Template.Spec.Containers[0]
+		if diff := cmp.Diff(expectedVolumeMounts(), container.VolumeMounts); diff != "" {
+			t.Errorf("volume mounts mismatch (-want +got):\n%s", diff)
+		}
+		if !slices.Contains(container.Args, "--log-file=/var/log/memgraph/memgraph.log") {
+			t.Errorf("args = %v, want the log file the role still has storage for", container.Args)
+		}
+	})
+}
+
 // TestStatefulSetRetentionPolicy pins the mapping from the spec's retention
 // policy onto the StatefulSet machinery that is the only deleter of this
 // cluster's storage. whenScaled stays Retain regardless: both replica counts
@@ -593,7 +673,7 @@ func TestStatefulSetPortsAndClusterDomain(t *testing.T) {
 		if diff := cmp.Diff(wantPorts, container.Ports); diff != "" {
 			t.Errorf("container ports mismatch (-want +got):\n%s", diff)
 		}
-		wantCommand := []string{"/bin/sh", "-ec", expectedTunedCoordinatorScript}
+		wantCommand := expectedCommand(expectedTunedCoordinatorScript)
 		if diff := cmp.Diff(wantCommand, container.Command); diff != "" {
 			t.Errorf("start script mismatch (-want +got):\n%s", diff)
 		}

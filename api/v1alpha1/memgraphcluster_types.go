@@ -41,10 +41,11 @@ const (
 	DefaultLicenseSecretKey      = "MEMGRAPH_ENTERPRISE_LICENSE"
 	DefaultOrganizationSecretKey = "MEMGRAPH_ORGANIZATION_NAME"
 
-	DefaultLibPVCSize        = "1Gi"
-	DefaultLogPVCSize        = "1Gi"
-	DefaultStorageAccessMode = corev1.ReadWriteOnce
-	DefaultStorageRetention  = RetentionPolicyRetain
+	DefaultLibPVCSize            = "1Gi"
+	DefaultLogPVCSize            = "1Gi"
+	DefaultCreateLogStorageClaim = true
+	DefaultStorageAccessMode     = corev1.ReadWriteOnce
+	DefaultStorageRetention      = RetentionPolicyRetain
 
 	DefaultClusterDomain = "cluster.local"
 
@@ -121,6 +122,12 @@ const (
 // Condition reasons reported on MemgraphCluster status. Reasons are CamelCase
 // per Kubernetes API conventions and are stable enough for tooling to gate on.
 const (
+	// ReasonApplyFailed is set when the API server rejected one of the desired
+	// workload objects, so the cluster does not run the declared spec. The
+	// condition message carries the rejection verbatim: the operator cannot act
+	// on it, but it names exactly what a human has to change.
+	ReasonApplyFailed = "ApplyFailed"
+
 	// ReasonWorkloadsNotReady is set while not every workload pod is ready, so
 	// registration has not been attempted.
 	ReasonWorkloadsNotReady = "WorkloadsNotReady"
@@ -241,6 +248,24 @@ type RoleStorageSpec struct {
 	// +kubebuilder:validation:MaxLength=253
 	// +optional
 	LibStorageClassName *string `json:"libStorageClassName,omitempty"`
+
+	// createLogStorageClaim decides whether every pod of the role gets a log
+	// storage claim at all. With it disabled the operator drops the claim and
+	// passes an empty --log-file, which turns file logging off, so stderr and
+	// `kubectl logs` (plus whatever collects it) become the single log sink. Use
+	// it to avoid a second PersistentVolumeClaim per pod on clusters that ship
+	// logs off-node anyway.
+	//
+	// The remaining log* knobs below are ignored while this is false.
+	//
+	// Like the sizes and classes around it this is effectively a create-time
+	// choice: flipping it adds or removes a volumeClaimTemplate, which
+	// Kubernetes forbids on a live StatefulSet, so the operator's apply is
+	// rejected until the StatefulSet is recreated (delete it with
+	// --cascade=orphan and the operator rebuilds it around the running pods).
+	// +kubebuilder:default=true
+	// +optional
+	CreateLogStorageClaim *bool `json:"createLogStorageClaim,omitempty"`
 
 	// logPVCSize is the requested size of the log storage claim, which backs
 	// Memgraph's log file.
