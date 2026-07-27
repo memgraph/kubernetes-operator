@@ -187,8 +187,21 @@ chart-sync: manifests ## Regenerate the chart's CRDs and RBAC rules from the Go 
 		  cat "$$crd"; } > "$$out"; \
 	done
 	@echo "Writing $(CHART_DIR)/rbac/manager-rules.yaml"
-	@{ echo "# Generated from the +kubebuilder:rbac markers in the controller sources."; \
-	   echo "# Regenerate with 'make chart-sync'; do not edit by hand."; \
+	@{ echo "# The rule list of the operator's manager ClusterRole: every API call the"; \
+	   echo "# reconciler makes is authorized against exactly these rules, because the"; \
+	   echo "# manager Pod authenticates as the ServiceAccount they are bound to."; \
+	   echo "#"; \
+	   echo "# templates/manager-rbac.yaml inlines this file under 'rules:' with .Files.Get"; \
+	   echo "# (Helm cannot read config/rbac/role.yaml from outside the chart directory)."; \
+	   echo "#"; \
+	   echo "# Note what is absent: no 'delete' anywhere, so the operator cannot remove a"; \
+	   echo "# StatefulSet or PVC; no 'secrets', because license and auth material reaches"; \
+	   echo "# the workload Pods via the kubelet, never through the operator; no 'pods',"; \
+	   echo "# because readiness gating reads StatefulSet status instead."; \
+	   echo "#"; \
+	   echo "# Generated from the +kubebuilder:rbac markers in the controller sources."; \
+	   echo "# Regenerate with 'make chart-sync'; do not edit by hand. To widen or tighten"; \
+	   echo "# the permissions, edit the markers -- 'make chart-verify' fails if the two drift."; \
 	   awk 'found { print } /^rules:$$/ { found = 1 }' config/rbac/role.yaml; \
 	 } > "$(CHART_DIR)/rbac/manager-rules.yaml"
 

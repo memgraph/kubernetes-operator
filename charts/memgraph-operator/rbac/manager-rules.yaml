@@ -1,5 +1,18 @@
+# The rule list of the operator's manager ClusterRole: every API call the
+# reconciler makes is authorized against exactly these rules, because the
+# manager Pod authenticates as the ServiceAccount they are bound to.
+#
+# templates/manager-rbac.yaml inlines this file under 'rules:' with .Files.Get
+# (Helm cannot read config/rbac/role.yaml from outside the chart directory).
+#
+# Note what is absent: no 'delete' anywhere, so the operator cannot remove a
+# StatefulSet or PVC; no 'secrets', because license and auth material reaches
+# the workload Pods via the kubelet, never through the operator; no 'pods',
+# because readiness gating reads StatefulSet status instead.
+#
 # Generated from the +kubebuilder:rbac markers in the controller sources.
-# Regenerate with 'make chart-sync'; do not edit by hand.
+# Regenerate with 'make chart-sync'; do not edit by hand. To widen or tighten
+# the permissions, edit the markers -- 'make chart-verify' fails if the two drift.
 - apiGroups:
   - ""
   resources:
