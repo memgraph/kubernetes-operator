@@ -1,0 +1,29 @@
+# The quickstart cluster from the repository README: three coordinators, two
+# data instances, a pinned Memgraph image, and a reference to the Secret
+# holding the enterprise license. Everything else — storage, ports, probes,
+# resources, cluster domain — takes its default; config/samples/
+# v1alpha1_memgraphcluster.yaml spells the full surface out.
+#
+# The e2e suite applies this file verbatim, so it is the manifest CI proves
+# boots a registered, MAIN-elected cluster.
+apiVersion: memgraph.com/v1alpha1
+kind: MemgraphCluster
+metadata:
+  name: memgraph
+spec:
+  # Both counts are immutable: v1alpha1 provisions and bootstraps a fixed
+  # topology, and admission rejects any later change. The coordinator count
+  # must be odd so the Raft quorum cannot split.
+  coordinators: 3
+  dataInstances: 2
+  image:
+    repository: docker.io/memgraph/memgraph
+    tag: "3.12.0"
+  # The Secret holding the enterprise license, which HA requires. Point name at
+  # your own Secret; the two key names are the defaults, spelled out here
+  # because they are what you change when your Secret stores them under
+  # different keys. The CR itself carries no secret material.
+  secrets:
+    name: memgraph-secrets
+    licenseKey: MEMGRAPH_ENTERPRISE_LICENSE
+    organizationKey: MEMGRAPH_ORGANIZATION_NAME
