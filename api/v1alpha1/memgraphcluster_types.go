@@ -32,6 +32,16 @@ const (
 	DefaultCoordinatorCount  int32 = 3
 	DefaultDataInstanceCount int32 = 2
 
+	// MaxCoordinatorCount bounds the Raft coordinator quorum. Beyond seven
+	// members a Raft cluster only pays more consensus latency for no extra
+	// fault tolerance, so a larger count is a typo rather than an intent.
+	MaxCoordinatorCount int32 = 7
+
+	// MaxDataInstanceCount bounds the data instances a single cluster
+	// replicates to. The limit exists to catch typos on a field that cannot be
+	// corrected afterwards, not to express a replication limit.
+	MaxDataInstanceCount int32 = 15
+
 	DefaultImageRepository = "docker.io/memgraph/memgraph"
 	DefaultImageTag        = "3.12.0-relwithdebinfo"
 	DefaultImagePullPolicy = corev1.PullIfNotPresent
@@ -86,13 +96,22 @@ const (
 
 // ImageSpec selects the Memgraph container image run by all cluster pods.
 type ImageSpec struct {
-	// repository is the Memgraph container image repository.
+	// repository is the Memgraph container image repository. It carries the
+	// optional registry host and the image path only; the version belongs in
+	// tag.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=255
+	// +kubebuilder:validation:XValidation:rule="!self.contains('@')",message="repository must not contain a digest; pin the image with tag instead"
+	// +kubebuilder:validation:XValidation:rule="!self.substring(self.lastIndexOf('/') + 1).contains(':')",message="repository must not contain a tag; set image.tag instead"
 	// +kubebuilder:default="docker.io/memgraph/memgraph"
 	// +optional
 	Repository string `json:"repository,omitempty"`
 
 	// tag is the Memgraph container image tag. Prefer pinning a specific
 	// Memgraph version over mutable tags such as "latest".
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=128
+	// +kubebuilder:validation:Pattern=`^[a-zA-Z0-9_][a-zA-Z0-9._-]*$`
 	// +kubebuilder:default="3.12.0-relwithdebinfo"
 	// +optional
 	Tag string `json:"tag,omitempty"`
@@ -108,19 +127,33 @@ type ImageSpec struct {
 // enterprise license and organization name. The block mirrors the
 // memgraph-high-availability Helm chart's secrets vocabulary; secret material
 // is consumed by reference only and never appears in the CR.
+//
+// The has() guards keep the rule evaluable against the block's empty object
+// default, which the API server checks before nested field defaults apply.
+//
+// +kubebuilder:validation:XValidation:rule="!has(self.licenseKey) || !has(self.organizationKey) || self.licenseKey != self.organizationKey",message="licenseKey and organizationKey must name different keys of the Secret"
 type SecretsSpec struct {
 	// name is the name of the Secret in the cluster's namespace.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
 	// +kubebuilder:default="memgraph-secrets"
 	// +optional
 	Name string `json:"name,omitempty"`
 
 	// licenseKey is the key within the Secret holding the enterprise license.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[-._a-zA-Z0-9]+$`
 	// +kubebuilder:default="MEMGRAPH_ENTERPRISE_LICENSE"
 	// +optional
 	LicenseKey string `json:"licenseKey,omitempty"`
 
 	// organizationKey is the key within the Secret holding the organization
 	// name the license was issued to.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[-._a-zA-Z0-9]+$`
 	// +kubebuilder:default="MEMGRAPH_ORGANIZATION_NAME"
 	// +optional
 	OrganizationKey string `json:"organizationKey,omitempty"`
@@ -131,14 +164,22 @@ type SecretsSpec struct {
 // Storage, port, and pod-tuning fields land in subsequent slices of the
 // operator MVP (see specs/operator-mvp/PRD.md).
 type MemgraphClusterSpec struct {
-	// coordinators is the number of Raft coordinator instances.
+	// coordinators is the number of Raft coordinator instances. It must be odd
+	// so the Raft quorum cannot split, and it is immutable: scaling is not
+	// supported in v1alpha1.
 	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=7
+	// +kubebuilder:validation:XValidation:rule="self % 2 == 1",message="coordinators must be an odd number (1, 3, 5 or 7) so the Raft quorum cannot split"
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="coordinators is immutable: changing the coordinator count of an existing MemgraphCluster is not supported in v1alpha1"
 	// +kubebuilder:default=3
 	// +optional
 	Coordinators *int32 `json:"coordinators,omitempty"`
 
-	// dataInstances is the number of data instances.
+	// dataInstances is the number of data instances. It is immutable: scaling
+	// is not supported in v1alpha1.
 	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=15
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="dataInstances is immutable: changing the data instance count of an existing MemgraphCluster is not supported in v1alpha1"
 	// +kubebuilder:default=2
 	// +optional
 	DataInstances *int32 `json:"dataInstances,omitempty"`
