@@ -144,6 +144,13 @@ const (
 	// SHOW INSTANCES, so the cluster state cannot be observed.
 	ReasonCoordinatorUnreachable = "CoordinatorUnreachable"
 
+	// ReasonNoCoordinatorLeader is set when coordinators answer SHOW INSTANCES
+	// but none of them reports a leader, so their views come from stale state
+	// machines and no management query would be accepted anyway. It is kept
+	// apart from CoordinatorUnreachable because the remedy differs: the pods are
+	// up and serving Bolt, what is missing is a Raft quorum.
+	ReasonNoCoordinatorLeader = "NoCoordinatorLeader"
+
 	// ReasonRegistrationInProgress is set while registration commands are being
 	// issued to converge the cluster toward the declared topology.
 	ReasonRegistrationInProgress = "RegistrationInProgress"
