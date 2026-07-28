@@ -27,6 +27,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -326,11 +327,16 @@ spec:
 		_, err := utils.RunWithInput(cmd, manifest)
 		Expect(err).NotTo(HaveOccurred(), "Failed to apply the MemgraphCluster")
 
-		By("waiting for the claims to be provisioned")
+		By("waiting for the claims to be provisioned and adopted by their StatefulSets")
 		// One lib and one log claim per pod: three coordinators and one data
-		// instance, the smallest topology admission accepts.
+		// instance, the smallest topology admission accepts. Adoption is what
+		// the spec has to wait for, not mere existence: the Delete policy
+		// reaches a claim as the StatefulSet owner reference the controller
+		// attaches a sync *after* it creates the claim, and a claim whose set
+		// is deleted before it is adopted is stranded for good, not merely
+		// collected late.
 		Eventually(func(g Gomega) {
-			claims, err := listPVCs(retentionNamespace)
+			claims, err := listAdoptedPVCs(retentionNamespace)
 			g.Expect(err).NotTo(HaveOccurred())
 			g.Expect(claims).To(HaveLen(8))
 		}, 5*time.Minute, 5*time.Second).Should(Succeed())
@@ -453,6 +459,36 @@ spec:
 		Expect(dataInstances).To(Equal("3"))
 	})
 })
+
+// listAdoptedPVCs returns the names of the PersistentVolumeClaims a
+// StatefulSet has taken ownership of. Only the owner reference makes a claim
+// follow its StatefulSet into deletion, so this is the precondition a spec
+// asserting the Delete retention policy must wait for before it deletes
+// anything. It gates a spec rather than asserting one — the retention
+// assertion itself stays on the claims a user would see.
+func listAdoptedPVCs(namespace string) ([]string, error) {
+	cmd := exec.Command("kubectl", "get", "pvc", "-n", namespace, "-o",
+		`jsonpath={range .items[*]}{.metadata.name}{"\t"}{.metadata.ownerReferences[*].kind}{"\n"}{end}`)
+	output, err := utils.Run(cmd)
+	if err != nil {
+		return nil, err
+	}
+
+	// An unadopted claim yields a line of "<name>\t": the separator is always
+	// emitted, so the split is total, and the kinds field is simply empty.
+	names := []string{}
+	for _, line := range utils.GetNonEmptyLines(output) {
+		name, ownerKinds, found := strings.Cut(line, "\t")
+		if !found {
+			return nil, fmt.Errorf("unexpected kubectl get pvc output line: %q", line)
+		}
+		if !slices.Contains(strings.Fields(ownerKinds), "StatefulSet") {
+			continue
+		}
+		names = append(names, strings.TrimSpace(name))
+	}
+	return names, nil
+}
 
 // listPVCs returns the names of the PersistentVolumeClaims in a namespace,
 // excluding any already marked for deletion — a claim with a deletion
