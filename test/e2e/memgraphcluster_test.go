@@ -484,20 +484,28 @@ spec:
 
 		By("waiting for the retiring instance to leave the cluster while its pod is still there")
 		Eventually(func(g Gomega) {
+			// The replica count is read before the registration view, and that
+			// order carries the whole assertion. A view read afterwards that still
+			// lists the retiring instance proves it was registered at a moment the
+			// StatefulSet had already been shrunk — the reverse order the operator
+			// must never produce, because the coordinators would be left expecting
+			// an instance whose pod is gone. Reading the view first would prove
+			// nothing: the operator's own UNREGISTER can land between the two
+			// reads, so a pre-unregistration view paired with a post-shrink count
+			// is the correct sequence misread as a violation.
+			replicas, err := shrunk.replicas("data")
+			g.Expect(err).NotTo(HaveOccurred())
+
 			view, err := shrunk.leaderView()
 			g.Expect(err).NotTo(HaveOccurred())
 			names := instanceNames(view)
-			if slices.Contains(names, retiring) {
-				// Unregistration comes first, so the coordinators never see a
-				// registered instance's pod disappear. Catching the reverse order
-				// is the point of this poll, and it is not something to retry.
-				replicas, err := shrunk.replicas("data")
-				g.Expect(err).NotTo(HaveOccurred())
-				if replicas != "3" {
-					StopTrying(fmt.Sprintf(
-						"the data StatefulSet was scaled to %s replicas while %s was still registered",
-						replicas, retiring)).Now()
-				}
+
+			if replicas != "3" && slices.Contains(names, retiring) {
+				// Not something to retry: the ordering this catches is broken for
+				// good by the time it is observable.
+				StopTrying(fmt.Sprintf(
+					"the data StatefulSet was scaled to %s replicas while %s was still registered",
+					replicas, retiring)).Now()
 			}
 			g.Expect(names).NotTo(ContainElement(retiring))
 		}, 10*time.Minute, 5*time.Second).Should(Succeed())
@@ -707,15 +715,17 @@ func removeCoordinatorRegistration() (string, error) {
 // dumpDiagnosticsOnFailure dumps everything needed to debug a broken cluster
 // from the CI logs alone: the pods, the resource itself, the namespace's events
 // and the operator's log.
-func dumpDiagnosticsOnFailure(namespace string) {
+// The operator's log comes from the namespace the operator is installed in, not
+// the cluster's — a parameter named namespace would shadow that constant.
+func dumpDiagnosticsOnFailure(clusterNamespace string) {
 	if !CurrentSpecReport().Failed() {
 		return
 	}
 	for _, args := range [][]string{
-		{"get", "pods", "-n", namespace, "-o", "wide"},
-		{"get", "memgraphclusters", "-n", namespace, "-o", "yaml"},
-		{"get", "events", "-n", namespace, "--sort-by=.lastTimestamp"},
-		{"logs", "deploy/" + controllerDeploymentName, "-n", namespace},
+		{"get", "pods", "-n", clusterNamespace, "-o", "wide"},
+		{"get", "memgraphclusters", "-n", clusterNamespace, "-o", "yaml"},
+		{"get", "events", "-n", clusterNamespace, "--sort-by=.lastTimestamp"},
+		{"logs", "deploy/" + controllerDeploymentName, "-n", namespace, "--tail=200"},
 	} {
 		cmd := exec.Command("kubectl", args...)
 		output, err := utils.Run(cmd)
