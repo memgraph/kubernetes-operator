@@ -100,7 +100,9 @@ type MemgraphClusterReconciler struct {
 // INSTANCES on the coordinator leader, diff against the declared topology, and
 // issue only the missing commands — which is all growing a live cluster takes,
 // because a raised count declares members the observed cluster does not have
-// registered yet.
+// registered yet. A lowered dataInstances count runs the same loop in reverse:
+// the members beyond the declared count are demoted if one of them holds MAIN,
+// unregistered, and only then are their pods shed.
 //
 // All interaction is read-before-write and idempotent, so an operator restart
 // mid-bootstrap is harmless. Registration reconciliation is continuous, not
@@ -125,39 +127,51 @@ func (r *MemgraphClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, err
 	}
 
-	desired := []client.Object{
+	if err := r.applyDesired(ctx, &cluster,
 		resources.CoordinatorHeadlessService(&cluster),
 		resources.DataHeadlessService(&cluster),
 		resources.CoordinatorStatefulSet(&cluster, replicas.coordinators.applied),
 		resources.DataStatefulSet(&cluster, replicas.data.applied),
-	}
-	for _, obj := range desired {
-		if err := controllerutil.SetControllerReference(&cluster, obj, r.Scheme); err != nil {
-			return ctrl.Result{}, fmt.Errorf("setting owner reference on %T %s: %w", obj, obj.GetName(), err)
-		}
-		if err := r.apply(ctx, obj); err != nil {
-			applyErr := fmt.Errorf("applying %T %s: %w", obj, obj.GetName(), err)
-			// A rejected apply is retried forever behind the scenes, so report
-			// it on the resource: without this the conditions keep describing
-			// the cluster that is still running while the declared spec never
-			// lands, and the rejection is only visible in the operator's log.
-			// Both conditions go False — the workloads are not the declared
-			// ones, so neither serving nor convergence can be claimed for the
-			// spec the user asked for.
-			msg := truncateMessage(applyErr.Error())
-			if statusErr := r.writeStatus(ctx, &cluster, lastObserved(&cluster),
-				notReadyCondition(memgraphcomv1alpha1.ReasonApplyFailed, msg),
-				notConvergedCondition(memgraphcomv1alpha1.ReasonApplyFailed, msg),
-			); statusErr != nil {
-				return ctrl.Result{}, errors.Join(applyErr, statusErr)
-			}
-			return ctrl.Result{}, applyErr
-		}
+	); err != nil {
+		return ctrl.Result{}, err
 	}
 
 	log.Info("Applied desired workload objects for MemgraphCluster", "memgraphcluster", req.NamespacedName)
 
 	return r.reconcileRegistration(ctx, &cluster, replicas)
+}
+
+// applyDesired server-side-applies the desired workload objects, each owned by
+// the cluster so garbage collection removes it with the CR.
+//
+// A rejected apply is retried forever behind the scenes, so it is reported on
+// the resource before the error is returned: without that the conditions keep
+// describing the cluster that is still running while the declared spec never
+// lands, and the rejection is only visible in the operator's log. Both
+// conditions go False — the workloads are not the declared ones, so neither
+// serving nor convergence can be claimed for the spec the user asked for.
+func (r *MemgraphClusterReconciler) applyDesired(
+	ctx context.Context,
+	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	desired ...client.Object,
+) error {
+	for _, obj := range desired {
+		if err := controllerutil.SetControllerReference(cluster, obj, r.Scheme); err != nil {
+			return fmt.Errorf("setting owner reference on %T %s: %w", obj, obj.GetName(), err)
+		}
+		if err := r.apply(ctx, obj); err != nil {
+			applyErr := fmt.Errorf("applying %T %s: %w", obj, obj.GetName(), err)
+			msg := truncateMessage(applyErr.Error())
+			if statusErr := r.writeStatus(ctx, cluster, lastObserved(cluster),
+				notReadyCondition(memgraphcomv1alpha1.ReasonApplyFailed, msg),
+				notConvergedCondition(memgraphcomv1alpha1.ReasonApplyFailed, msg),
+			); statusErr != nil {
+				return errors.Join(applyErr, statusErr)
+			}
+			return applyErr
+		}
+	}
+	return nil
 }
 
 // roleReplicas is one role's replica arithmetic for a reconcile pass: how many
@@ -192,13 +206,35 @@ func (c replicaCounts) scaleMessage() string {
 	return strings.Join(pending, "; ")
 }
 
+// retirementMessage names the data instances a lowered count is shedding, and is
+// empty when none are. It is non-empty for exactly as long as the retirement is
+// unfinished: the retiring set is derived from the replica count the operator's
+// own StatefulSet still runs, so it empties only once the shrink that removes
+// those pods has been applied.
+func retirementMessage(topology planner.Topology) string {
+	if len(topology.RetiringDataInstances) == 0 {
+		return ""
+	}
+	names := make([]string, 0, len(topology.RetiringDataInstances))
+	for _, instance := range topology.RetiringDataInstances {
+		names = append(names, instance.Name)
+	}
+	return "Retiring data instance(s) " + strings.Join(names, ", ") +
+		" before their pods are shed"
+}
+
 // replicaCounts resolves the replica count to apply per role: the declared count
 // while the cluster grows or holds its size, and deliberately the current count
 // while a lowered count would shrink it. Shedding pods means removing members
 // from the Memgraph cluster first — the coordinators otherwise keep expecting
-// instances whose pods are gone — and the operator has no removal path yet, so
-// it holds the size and reports the mismatch instead of acting on half of a
-// scale-down it cannot finish.
+// instances whose pods are gone — so this rule never shrinks anything, which
+// keeps it free of any knowledge about the cluster's state.
+//
+// Lowering the data-instance count is carried out at the end of the registration
+// phase instead, once the retiring members have actually left the cluster (see
+// reconcileRegistration). Lowering the coordinator count is not carried out at
+// all yet: the size is held and the mismatch reported, rather than acting on half
+// of a scale-down the operator cannot finish.
 func (r *MemgraphClusterReconciler) replicaCounts(
 	ctx context.Context,
 	cluster *memgraphcomv1alpha1.MemgraphCluster,
@@ -246,9 +282,21 @@ func (r *MemgraphClusterReconciler) currentReplicas(
 
 // reconcileRegistration converges cluster registration once the workloads are
 // ready: find the coordinator leader, plan against its SHOW INSTANCES view,
-// and execute the missing commands. Unreachable coordinators are retried on a
-// delay rather than surfaced as errors — Bolt endpoints lagging pod readiness
-// is a normal startup phase, not a failure.
+// and execute the planned commands against that one connection. Unreachable
+// coordinators are retried on a delay rather than surfaced as errors — Bolt
+// endpoints lagging pod readiness is a normal startup phase, not a failure.
+//
+// The readiness gate is deliberately strict about the pods a lowered count is
+// retiring too: they belong to the StatefulSet the operator is still holding at
+// its current size, so a retiring pod that cannot become ready blocks its own
+// removal, and the resource reports WorkloadsNotReady rather than the operator
+// acting on a half-known cluster.
+//
+// This is also where a data-instance scale-down finishes. Once the plan comes
+// back empty — meaning the retiring instances have left the cluster — the data
+// StatefulSet is applied at the declared count, shedding their pods. That is the
+// one place the operator ever lowers a replica count, so the coordinators never
+// see a registered instance's pod disappear.
 func (r *MemgraphClusterReconciler) reconcileRegistration(
 	ctx context.Context,
 	cluster *memgraphcomv1alpha1.MemgraphCluster,
@@ -273,6 +321,14 @@ func (r *MemgraphClusterReconciler) reconcileRegistration(
 	}
 
 	topology := resources.DeclaredTopology(cluster)
+	// The members a lowered count is shedding are the ordinals the operator's own
+	// previous apply still runs beyond the declared count, so the range is bounded
+	// by what the operator itself created.
+	topology.RetiringDataInstances = resources.RetiringDataInstances(cluster, replicas.data.applied)
+	// Whether a retirement is in flight is decided once per pass, from the
+	// topology alone: it is what both the condition and the shrink below key off.
+	retiring := retirementMessage(topology)
+
 	leader, observed, err := r.observeCluster(ctx, topology)
 	if err != nil {
 		log.Info("Deferred registration because no coordinator leader was usable", "reason", err.Error())
@@ -300,6 +356,25 @@ func (r *MemgraphClusterReconciler) reconcileRegistration(
 	latest := observe(topology, observed)
 	commands := planner.Plan(topology, observed)
 	if len(commands) == 0 {
+		// No retiring instance is a member of the cluster any more — the plan
+		// would carry an UNREGISTER INSTANCE otherwise — so their pods can go.
+		if retiring != "" {
+			if err := r.applyDesired(ctx, cluster,
+				resources.DataStatefulSet(cluster, replicas.data.declared)); err != nil {
+				return ctrl.Result{}, err
+			}
+			log.Info("Shrank the data StatefulSet to the declared replica count",
+				"statefulset", replicas.data.name, "replicas", replicas.data.declared)
+			if statusErr := r.writeStatus(ctx, cluster, latest, readyOrNot(latest.main),
+				notConvergedCondition(memgraphcomv1alpha1.ReasonRetirementInProgress, retiring),
+			); statusErr != nil {
+				return ctrl.Result{}, statusErr
+			}
+			// The shrink was applied, not yet observed back: the next pass sees the
+			// lowered count, finds nothing retiring, and reports convergence.
+			return ctrl.Result{RequeueAfter: requeueAfterRegistration}, nil
+		}
+
 		// Registration matches the declared topology. It is only converged once
 		// the StatefulSets run the declared replica counts too, so a scale the
 		// operator is holding back keeps the condition False and says which
@@ -328,9 +403,15 @@ func (r *MemgraphClusterReconciler) reconcileRegistration(
 
 	// Report the in-progress state before mutating the cluster: a MAIN already
 	// serving stays Ready while a lost registration is restored; a fresh
-	// bootstrap has no MAIN yet, so Ready is False until one is elected.
-	inProgress := notConvergedCondition(memgraphcomv1alpha1.ReasonRegistrationInProgress,
-		fmt.Sprintf("Issuing %d registration command(s) to converge the cluster", len(commands)))
+	// bootstrap has no MAIN yet, so Ready is False until one is elected. A
+	// retirement in flight is named as such — it is the more specific operation,
+	// and the one whose pending members a user wants to see.
+	reason := memgraphcomv1alpha1.ReasonRegistrationInProgress
+	message := fmt.Sprintf("Issuing %d registration command(s) to converge the cluster", len(commands))
+	if retiring != "" {
+		reason, message = memgraphcomv1alpha1.ReasonRetirementInProgress, retiring
+	}
+	inProgress := notConvergedCondition(reason, message)
 	if statusErr := r.writeStatus(ctx, cluster, latest, readyOrNot(latest.main), inProgress); statusErr != nil {
 		return ctrl.Result{}, statusErr
 	}

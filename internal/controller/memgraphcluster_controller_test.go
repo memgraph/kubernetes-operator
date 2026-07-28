@@ -636,11 +636,43 @@ var _ = Describe("MemgraphCluster Controller", func() {
 				resourceName, ordinal, resourceName, resourceNamespace)
 		}
 
+		// convergedWithMainOn is the fully registered default 3/2 topology with the
+		// data instance on the given ordinal elected MAIN, so a spec can put MAIN
+		// where it needs it before lowering a count.
+		convergedWithMainOn := func(mainOrdinal int) []memgraph.Instance {
+			instances := make([]memgraph.Instance, 0, 5)
+			for id := 1; id <= 3; id++ {
+				role := memgraph.RoleFollower
+				if id == 1 {
+					role = memgraph.RoleLeader
+				}
+				instances = append(instances, memgraph.Instance{
+					Name: fmt.Sprintf("coordinator_%d", id), BoltServer: coordinatorAddress(id - 1),
+					Health: memgraph.HealthUp, Role: role,
+				})
+			}
+			for ordinal := range 2 {
+				role := memgraph.RoleReplica
+				if ordinal == mainOrdinal {
+					role = memgraph.RoleMain
+				}
+				instances = append(instances, memgraph.Instance{
+					Name: fmt.Sprintf("instance_%d", ordinal), Health: memgraph.HealthUp, Role: role,
+				})
+			}
+			return instances
+		}
+
 		status := func() memgraphcomv1alpha1.MemgraphClusterStatus {
 			GinkgoHelper()
 			cluster := &memgraphcomv1alpha1.MemgraphCluster{}
 			get(resourceName, cluster)
 			return cluster.Status
+		}
+
+		convergedCondition := func() *metav1.Condition {
+			GinkgoHelper()
+			return apimeta.FindStatusCondition(status().Conditions, memgraphcomv1alpha1.ConditionConverged)
 		}
 
 		// setCounts edits the declared topology of the live cluster.
@@ -732,31 +764,136 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			Expect(converged.Reason).To(Equal(memgraphcomv1alpha1.ReasonAllInstancesRegistered))
 		})
 
-		It("should report Converged False while a StatefulSet has not reached the declared count", func() {
-			baseline := bootstrapped()
+		// Lowering the coordinator count is the scale the operator still cannot
+		// realize: removing a Raft member is not implemented, so the StatefulSet is
+		// held at its current size and the resource says so rather than the
+		// operator acting on half of a scale-down it cannot finish.
+		It("should report Converged False while a lowered coordinator count is held back", func() {
+			bootstrapped()
 
-			// A count the operator cannot realize yet: shedding pods means
-			// removing cluster members first, which it does not do, so the
-			// StatefulSet is held and the resource says so.
-			setCounts(3, 1)
+			By("growing the coordinators so there is a member to drop")
+			setCounts(5, 2)
+			reconcileCluster(resourceName)
+			markWorkloadsReady(resourceName)
+			reconcileCluster(resourceName)
+			reconcileCluster(resourceName)
+			Expect(apimeta.IsStatusConditionTrue(status().Conditions,
+				memgraphcomv1alpha1.ConditionConverged)).To(BeTrue())
+			grown := len(fake.executedCommands())
+
+			setCounts(3, 2)
 			reconcileCluster(resourceName)
 
-			Expect(replicas(dataSuffix)).To(Equal(int32(2)),
+			Expect(replicas(coordinatorSuffix)).To(Equal(int32(5)),
 				"a lower declared count must never shrink the applied StatefulSet")
-			converged := apimeta.FindStatusCondition(status().Conditions, memgraphcomv1alpha1.ConditionConverged)
+			converged := convergedCondition()
 			Expect(converged.Status).To(Equal(metav1.ConditionFalse))
 			Expect(converged.Reason).To(Equal(memgraphcomv1alpha1.ReasonScaleInProgress))
-			Expect(converged.Message).To(ContainSubstring(resourceName + dataSuffix))
-			Expect(sinceBootstrap(baseline)).To(BeEmpty(),
-				"the instance the lowered count drops stays registered: removal is not implemented")
+			Expect(converged.Message).To(ContainSubstring(resourceName + coordinatorSuffix))
+			Expect(sinceBootstrap(grown)).To(BeEmpty(),
+				"the coordinators the lowered count drops stay registered: removal is not implemented")
 
 			// Raising the count back matches what is running, which converges
 			// again without touching the cluster.
-			setCounts(3, 2)
+			setCounts(5, 2)
 			reconcileCluster(resourceName)
 
 			Expect(apimeta.IsStatusConditionTrue(status().Conditions,
 				memgraphcomv1alpha1.ConditionConverged)).To(BeTrue())
+		})
+
+		// The whole point of the shrink: the member beyond the declared count leaves
+		// the cluster before its pod does, so the coordinators never expect an
+		// instance whose pod is gone.
+		It("should unregister a retiring data instance and only then shed its pod", func() {
+			baseline := bootstrapped()
+			Expect(status().Main).To(Equal("instance_0"))
+
+			setCounts(3, 1)
+			reconcileCluster(resourceName)
+
+			leader := coordinatorAddress(0)
+			Expect(sinceBootstrap(baseline)).To(Equal([]string{
+				leader + ": UNREGISTER INSTANCE instance_1",
+			}), "the MAIN survives the shrink, so nothing but the removal is issued")
+			Expect(replicas(dataSuffix)).To(Equal(int32(2)),
+				"a pass with pending commands must never lower the replica count")
+			converged := convergedCondition()
+			Expect(converged.Status).To(Equal(metav1.ConditionFalse))
+			Expect(converged.Reason).To(Equal(memgraphcomv1alpha1.ReasonRetirementInProgress))
+			Expect(converged.Message).To(ContainSubstring("instance_1"),
+				"the condition must name the instance being retired")
+
+			By("shedding the pod once the instance has left the cluster")
+			reconcileCluster(resourceName)
+			Expect(replicas(dataSuffix)).To(Equal(int32(1)))
+			Expect(sinceBootstrap(baseline)).To(HaveLen(1), "the removal is not re-issued")
+			Expect(convergedCondition().Reason).To(Equal(memgraphcomv1alpha1.ReasonRetirementInProgress))
+
+			By("reporting the shrink as finished once the StatefulSet runs the declared count")
+			reconcileCluster(resourceName)
+			s := status()
+			Expect(s.DataInstances).To(Equal(int32(1)))
+			Expect(s.Main).To(Equal("instance_0"), "the surviving MAIN was never moved")
+			Expect(apimeta.IsStatusConditionTrue(s.Conditions,
+				memgraphcomv1alpha1.ConditionConverged)).To(BeTrue())
+		})
+
+		// Memgraph refuses to unregister the MAIN, so a retiring instance holding it
+		// is demoted and a survivor promoted in its place — within the same pass, on
+		// the same leader connection, so the cluster is MAIN-less for the time
+		// between two queries.
+		It("should move MAIN off a retiring data instance before unregistering it", func() {
+			fake.setInstances(convergedWithMainOn(1))
+			baseline := bootstrapped()
+			Expect(status().Main).To(Equal("instance_1"))
+
+			setCounts(3, 1)
+			reconcileCluster(resourceName)
+
+			leader := coordinatorAddress(0)
+			Expect(sinceBootstrap(baseline)).To(Equal([]string{
+				leader + ": DEMOTE INSTANCE instance_1",
+				leader + ": SET INSTANCE instance_0 TO MAIN",
+				leader + ": UNREGISTER INSTANCE instance_1",
+			}), "demote, promote and unregister issue in one pass against one leader")
+			Expect(replicas(dataSuffix)).To(Equal(int32(2)),
+				"a pass with pending commands must never lower the replica count")
+
+			reconcileCluster(resourceName)
+			Expect(replicas(dataSuffix)).To(Equal(int32(1)))
+			reconcileCluster(resourceName)
+
+			s := status()
+			Expect(s.Main).To(Equal("instance_0"), "MAIN moved to the surviving instance")
+			Expect(s.DataInstances).To(Equal(int32(1)))
+			Expect(apimeta.IsStatusConditionTrue(s.Conditions,
+				memgraphcomv1alpha1.ConditionConverged)).To(BeTrue())
+		})
+
+		// The readiness gate covers the pods on their way out too: they belong to
+		// the StatefulSet the operator is still holding at its current size. A
+		// retiring pod that cannot become ready therefore blocks its own removal,
+		// which is a deliberate trade — the alternative is acting on a cluster whose
+		// state is only half known.
+		It("should not retire anything while a pod of the held StatefulSet is unready", func() {
+			baseline := bootstrapped()
+
+			setCounts(3, 1)
+			sts := &appsv1.StatefulSet{}
+			get(resourceName+dataSuffix, sts)
+			sts.Status.ReadyReplicas = *sts.Spec.Replicas - 1
+			sts.Status.AvailableReplicas = sts.Status.ReadyReplicas
+			Expect(k8sClient.Status().Update(ctx, sts)).To(Succeed())
+
+			reconcileCluster(resourceName)
+
+			Expect(sinceBootstrap(baseline)).To(BeEmpty(),
+				"a half-known cluster is not written to, retirement included")
+			Expect(replicas(dataSuffix)).To(Equal(int32(2)))
+			converged := convergedCondition()
+			Expect(converged.Status).To(Equal(metav1.ConditionFalse))
+			Expect(converged.Reason).To(Equal(memgraphcomv1alpha1.ReasonWorkloadsNotReady))
 		})
 
 		It("should report the registered counts as observed, not as declared", func() {
