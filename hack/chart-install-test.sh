@@ -99,7 +99,7 @@ metadata:
   name: chart-test
   namespace: ${CLUSTER_NAMESPACE}
 spec:
-  coordinators: 1
+  coordinators: 3
   dataInstances: 1
   image:
     repository: docker.io/memgraph/memgraph

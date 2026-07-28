@@ -24,6 +24,19 @@ import (
 	"github.com/memgraph/kubernetes-operator/internal/planner"
 )
 
+// DeclaredCoordinators is the number of coordinators the spec declares, with
+// the CRD's schema default resolved so a spec that never passed admission reads
+// the same as one that did.
+func DeclaredCoordinators(cluster *memgraphcomv1alpha1.MemgraphCluster) int32 {
+	return normalize(cluster.Spec).coordinators
+}
+
+// DeclaredDataInstances is the number of data instances the spec declares, with
+// the CRD's schema default resolved.
+func DeclaredDataInstances(cluster *memgraphcomv1alpha1.MemgraphCluster) int32 {
+	return normalize(cluster.Spec).dataInstances
+}
+
 // DeclaredTopology derives the registration topology the planner drives the
 // cluster toward. Identity follows the pod ordinal exactly as the workload
 // pods advertise it: coordinator ordinal N is Raft coordinator N+1 (Memgraph

@@ -20,11 +20,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -93,10 +95,14 @@ type MemgraphClusterReconciler struct {
 // Reconcile drives the cluster toward the declared MemgraphCluster spec in
 // two stages. First it server-side-applies the builders' desired objects: one
 // StatefulSet per role (coordinators, data instances), each backed by a
-// headless Service. Then, once every pod is ready, it reconciles cluster
-// registration: observe SHOW INSTANCES on the coordinator leader, diff
-// against the declared topology, and issue only the missing commands. All
-// interaction is read-before-write and idempotent, so an operator restart
+// headless Service, at the replica counts replicaCounts derives. Then, once
+// every pod is ready, it reconciles cluster registration: observe SHOW
+// INSTANCES on the coordinator leader, diff against the declared topology, and
+// issue only the missing commands — which is all growing a live cluster takes,
+// because a raised count declares members the observed cluster does not have
+// registered yet.
+//
+// All interaction is read-before-write and idempotent, so an operator restart
 // mid-bootstrap is harmless. Registration reconciliation is continuous, not
 // one-shot: a converged cluster is re-observed on a periodic resync, so a
 // registration a pod loses (rescheduled, wiped storage) is re-issued without
@@ -114,11 +120,16 @@ func (r *MemgraphClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
+	replicas, err := r.replicaCounts(ctx, &cluster)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
 	desired := []client.Object{
 		resources.CoordinatorHeadlessService(&cluster),
 		resources.DataHeadlessService(&cluster),
-		resources.CoordinatorStatefulSet(&cluster),
-		resources.DataStatefulSet(&cluster),
+		resources.CoordinatorStatefulSet(&cluster, replicas.coordinators.applied),
+		resources.DataStatefulSet(&cluster, replicas.data.applied),
 	}
 	for _, obj := range desired {
 		if err := controllerutil.SetControllerReference(&cluster, obj, r.Scheme); err != nil {
@@ -134,7 +145,7 @@ func (r *MemgraphClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 			// ones, so neither serving nor convergence can be claimed for the
 			// spec the user asked for.
 			msg := truncateMessage(applyErr.Error())
-			if statusErr := r.writeStatus(ctx, &cluster, cluster.Status.Main,
+			if statusErr := r.writeStatus(ctx, &cluster, lastObserved(&cluster),
 				notReadyCondition(memgraphcomv1alpha1.ReasonApplyFailed, msg),
 				notConvergedCondition(memgraphcomv1alpha1.ReasonApplyFailed, msg),
 			); statusErr != nil {
@@ -146,7 +157,91 @@ func (r *MemgraphClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 
 	log.Info("Applied desired workload objects for MemgraphCluster", "memgraphcluster", req.NamespacedName)
 
-	return r.reconcileRegistration(ctx, &cluster)
+	return r.reconcileRegistration(ctx, &cluster, replicas)
+}
+
+// roleReplicas is one role's replica arithmetic for a reconcile pass: how many
+// replicas the spec declares, and how many the operator applies to the role's
+// StatefulSet.
+type roleReplicas struct {
+	// name is the StatefulSet's name, so a condition message names the object
+	// the user can look at.
+	name     string
+	declared int32
+	applied  int32
+}
+
+// replicaCounts is both roles' replica arithmetic.
+type replicaCounts struct {
+	coordinators roleReplicas
+	data         roleReplicas
+}
+
+// scaleMessage describes the roles whose StatefulSet does not run the declared
+// number of replicas, and is empty once both do — which is what widens
+// Converged from "registration matches the declared topology" to "the declared
+// topology is actually running".
+func (c replicaCounts) scaleMessage() string {
+	var pending []string
+	for _, role := range []roleReplicas{c.coordinators, c.data} {
+		if role.applied != role.declared {
+			pending = append(pending, fmt.Sprintf("StatefulSet %s runs %d replica(s) while %d are declared",
+				role.name, role.applied, role.declared))
+		}
+	}
+	return strings.Join(pending, "; ")
+}
+
+// replicaCounts resolves the replica count to apply per role: the declared count
+// while the cluster grows or holds its size, and deliberately the current count
+// while a lowered count would shrink it. Shedding pods means removing members
+// from the Memgraph cluster first — the coordinators otherwise keep expecting
+// instances whose pods are gone — and the operator has no removal path yet, so
+// it holds the size and reports the mismatch instead of acting on half of a
+// scale-down it cannot finish.
+func (r *MemgraphClusterReconciler) replicaCounts(
+	ctx context.Context,
+	cluster *memgraphcomv1alpha1.MemgraphCluster,
+) (replicaCounts, error) {
+	var counts replicaCounts
+	for _, role := range []struct {
+		name     string
+		declared int32
+		resolved *roleReplicas
+	}{
+		{resources.CoordinatorName(cluster), resources.DeclaredCoordinators(cluster), &counts.coordinators},
+		{resources.DataName(cluster), resources.DeclaredDataInstances(cluster), &counts.data},
+	} {
+		current, err := r.currentReplicas(ctx, cluster.Namespace, role.name)
+		if err != nil {
+			return replicaCounts{}, err
+		}
+		// The larger of the two, so growing applies the declared count while
+		// shrinking holds the current one.
+		*role.resolved = roleReplicas{
+			name: role.name, declared: role.declared, applied: max(role.declared, current),
+		}
+	}
+	return counts, nil
+}
+
+// currentReplicas is the replica count the operator's own previous apply left on
+// a role's StatefulSet, or zero when the cluster has not been provisioned yet.
+func (r *MemgraphClusterReconciler) currentReplicas(
+	ctx context.Context,
+	namespace, name string,
+) (int32, error) {
+	var sts appsv1.StatefulSet
+	if err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, &sts); err != nil {
+		if apierrors.IsNotFound(err) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("getting StatefulSet %s: %w", name, err)
+	}
+	if sts.Spec.Replicas == nil {
+		return 0, nil
+	}
+	return *sts.Spec.Replicas, nil
 }
 
 // reconcileRegistration converges cluster registration once the workloads are
@@ -157,6 +252,7 @@ func (r *MemgraphClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 func (r *MemgraphClusterReconciler) reconcileRegistration(
 	ctx context.Context,
 	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	replicas replicaCounts,
 ) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
@@ -167,7 +263,7 @@ func (r *MemgraphClusterReconciler) reconcileRegistration(
 	if !ready {
 		log.Info("Waited for workload pods to become ready before registration")
 		msg := "Waiting for all workload pods to become ready"
-		if statusErr := r.writeStatus(ctx, cluster, cluster.Status.Main,
+		if statusErr := r.writeStatus(ctx, cluster, lastObserved(cluster),
 			notReadyCondition(memgraphcomv1alpha1.ReasonWorkloadsNotReady, msg),
 			notConvergedCondition(memgraphcomv1alpha1.ReasonWorkloadsNotReady, msg),
 		); statusErr != nil {
@@ -187,7 +283,7 @@ func (r *MemgraphClusterReconciler) reconcileRegistration(
 			reason, msg = memgraphcomv1alpha1.ReasonNoCoordinatorLeader,
 				"No coordinator reported a leader, so the cluster has no Raft quorum"
 		}
-		if statusErr := r.writeStatus(ctx, cluster, cluster.Status.Main,
+		if statusErr := r.writeStatus(ctx, cluster, lastObserved(cluster),
 			notReadyCondition(reason, msg),
 			notConvergedCondition(reason, msg),
 		); statusErr != nil {
@@ -201,16 +297,30 @@ func (r *MemgraphClusterReconciler) reconcileRegistration(
 		}
 	}()
 
-	main := observedMain(observed)
+	latest := observe(topology, observed)
 	commands := planner.Plan(topology, observed)
 	if len(commands) == 0 {
+		// Registration matches the declared topology. It is only converged once
+		// the StatefulSets run the declared replica counts too, so a scale the
+		// operator is holding back keeps the condition False and says which
+		// role and by how much.
+		if pending := replicas.scaleMessage(); pending != "" {
+			log.Info("Held a StatefulSet short of the declared replica count", "reason", pending)
+			if statusErr := r.writeStatus(ctx, cluster, latest, readyOrNot(latest.main),
+				notConvergedCondition(memgraphcomv1alpha1.ReasonScaleInProgress, pending),
+			); statusErr != nil {
+				return ctrl.Result{}, statusErr
+			}
+			return ctrl.Result{RequeueAfter: resyncInterval}, nil
+		}
+
 		// Converged, but keep re-observing: a registration a pod loses later
 		// produces no watch event, so drift is only caught by resyncing.
 		log.Info("Confirmed cluster registration is converged")
 		converged := trueCondition(memgraphcomv1alpha1.ConditionConverged,
 			memgraphcomv1alpha1.ReasonAllInstancesRegistered,
 			fmt.Sprintf("All %d declared instances are registered", len(topology.Coordinators)+len(topology.DataInstances)))
-		if statusErr := r.writeStatus(ctx, cluster, main, readyOrNot(main), converged); statusErr != nil {
+		if statusErr := r.writeStatus(ctx, cluster, latest, readyOrNot(latest.main), converged); statusErr != nil {
 			return ctrl.Result{}, statusErr
 		}
 		return ctrl.Result{RequeueAfter: resyncInterval}, nil
@@ -221,7 +331,7 @@ func (r *MemgraphClusterReconciler) reconcileRegistration(
 	// bootstrap has no MAIN yet, so Ready is False until one is elected.
 	inProgress := notConvergedCondition(memgraphcomv1alpha1.ReasonRegistrationInProgress,
 		fmt.Sprintf("Issuing %d registration command(s) to converge the cluster", len(commands)))
-	if statusErr := r.writeStatus(ctx, cluster, main, readyOrNot(main), inProgress); statusErr != nil {
+	if statusErr := r.writeStatus(ctx, cluster, latest, readyOrNot(latest.main), inProgress); statusErr != nil {
 		return ctrl.Result{}, statusErr
 	}
 
@@ -235,6 +345,38 @@ func (r *MemgraphClusterReconciler) reconcileRegistration(
 	// Registration was issued, not yet observed back; verify convergence on a
 	// follow-up reconcile instead of assuming success.
 	return ctrl.Result{RequeueAfter: requeueAfterRegistration}, nil
+}
+
+// observation is everything a reconcile pass observed about the cluster that
+// reaches the resource's status: which data instance is MAIN, and how many of
+// each role's declared members are registered. It is observation only — no
+// reconcile decision reads it back off the status.
+type observation struct {
+	main                    string
+	registeredCoordinators  int32
+	registeredDataInstances int32
+}
+
+// observe reads the coordinator leader's cluster view into the status fields.
+func observe(topology planner.Topology, observed []memgraph.Instance) observation {
+	coordinators, dataInstances := planner.Registered(topology, observed)
+	return observation{
+		main:                    observedMain(observed),
+		registeredCoordinators:  coordinators,
+		registeredDataInstances: dataInstances,
+	}
+}
+
+// lastObserved is the observation already published on the resource. The paths
+// that could not observe the cluster this pass republish it: an unready pod or
+// an unreachable coordinator says nothing about what the last reachable leader
+// reported.
+func lastObserved(cluster *memgraphcomv1alpha1.MemgraphCluster) observation {
+	return observation{
+		main:                    cluster.Status.Main,
+		registeredCoordinators:  cluster.Status.Coordinators,
+		registeredDataInstances: cluster.Status.DataInstances,
+	}
 }
 
 // observedMain returns the name of the data instance reported as MAIN, or the
@@ -287,18 +429,20 @@ func notConvergedCondition(reason, message string) metav1.Condition {
 	}
 }
 
-// writeStatus patches the status subresource with the observed MAIN and the
+// writeStatus patches the status subresource with the pass's observation and the
 // given conditions. It uses the status subresource exclusively — spec is never
 // touched — and skips the patch when nothing changed, so a converged cluster
 // re-observed on every resync does not churn the resource version.
 func (r *MemgraphClusterReconciler) writeStatus(
 	ctx context.Context,
 	cluster *memgraphcomv1alpha1.MemgraphCluster,
-	main string,
+	observed observation,
 	conditions ...metav1.Condition,
 ) error {
 	base := cluster.DeepCopy()
-	cluster.Status.Main = main
+	cluster.Status.Main = observed.main
+	cluster.Status.Coordinators = observed.registeredCoordinators
+	cluster.Status.DataInstances = observed.registeredDataInstances
 	for _, condition := range conditions {
 		condition.ObservedGeneration = cluster.Generation
 		apimeta.SetStatusCondition(&cluster.Status.Conditions, condition)

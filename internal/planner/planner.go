@@ -32,10 +32,19 @@ import (
 )
 
 // Topology is the declared cluster registration state: every coordinator and
-// data instance the CR says must exist, with the addresses each advertises.
+// data instance the CR says must exist, with the addresses each advertises,
+// plus the members on their way out when a count was lowered.
 type Topology struct {
 	Coordinators  []memgraph.CoordinatorSpec
 	DataInstances []memgraph.DataInstanceSpec
+
+	// RetiringCoordinators and RetiringDataInstances are the members a lowered
+	// replica count is shedding: still registered and still running, but no
+	// longer declared. They are empty while a cluster grows or holds its size,
+	// which is every case the operator handles today — removing a member from
+	// the cluster is not implemented yet, so a plan issues no command for them.
+	RetiringCoordinators  []memgraph.CoordinatorSpec
+	RetiringDataInstances []memgraph.DataInstanceSpec
 }
 
 // Command is one registration step to execute against the coordinator leader.
@@ -92,19 +101,15 @@ func (c SetInstanceToMain) String() string {
 // promotion last. Instances the cluster knows but the topology does not
 // declare are left untouched — unregistration is out of scope for v1.
 func Plan(declared Topology, observed []memgraph.Instance) []Command {
-	registered := make(map[string]memgraph.Instance, len(observed))
+	registered := index(observed)
 	hasMain := false
 	for _, instance := range observed {
-		registered[instance.Name] = instance
 		hasMain = hasMain || instance.IsMain()
 	}
 
 	var commands []Command
 	for _, coordinator := range declared.Coordinators {
-		// A coordinator reports itself in SHOW INSTANCES with an empty
-		// bolt_server until ADD COORDINATOR is issued for its ID, so presence
-		// alone does not prove registration.
-		if observed, ok := registered[coordinator.Name()]; !ok || observed.BoltServer == "" {
+		if !coordinatorRegistered(registered, coordinator) {
 			commands = append(commands, AddCoordinator{Coordinator: coordinator})
 		}
 	}
@@ -114,7 +119,62 @@ func Plan(declared Topology, observed []memgraph.Instance) []Command {
 		}
 	}
 	if !hasMain && len(declared.DataInstances) > 0 {
-		commands = append(commands, SetInstanceToMain{Name: declared.DataInstances[0].Name})
+		commands = append(commands, SetInstanceToMain{Name: promotionTarget(declared, registered)})
 	}
 	return commands
+}
+
+// Registered reports how many of the declared coordinators and data instances
+// the observed cluster has registered. It is pure observation for the CR's
+// status, and it shares Plan's definition of "registered" — so a role's count
+// reaches its declared count exactly when Plan stops issuing registrations for
+// it.
+func Registered(declared Topology, observed []memgraph.Instance) (coordinators, dataInstances int32) {
+	registered := index(observed)
+	for _, coordinator := range declared.Coordinators {
+		if coordinatorRegistered(registered, coordinator) {
+			coordinators++
+		}
+	}
+	for _, instance := range declared.DataInstances {
+		if _, ok := registered[instance.Name]; ok {
+			dataInstances++
+		}
+	}
+	return coordinators, dataInstances
+}
+
+// index keys the observed cluster view by instance name.
+func index(observed []memgraph.Instance) map[string]memgraph.Instance {
+	registered := make(map[string]memgraph.Instance, len(observed))
+	for _, instance := range observed {
+		registered[instance.Name] = instance
+	}
+	return registered
+}
+
+// coordinatorRegistered reports whether the declared coordinator is a member of
+// the Raft cluster. A coordinator reports itself in SHOW INSTANCES with an
+// empty bolt_server until ADD COORDINATOR is issued for its ID, so presence
+// alone does not prove registration.
+func coordinatorRegistered(registered map[string]memgraph.Instance, coordinator memgraph.CoordinatorSpec) bool {
+	observed, ok := registered[coordinator.Name()]
+	return ok && observed.BoltServer != ""
+}
+
+// promotionTarget picks the data instance to promote when the cluster has no
+// MAIN: the lowest-ordinal declared instance the cluster observes as up.
+// Promoting a down instance would only write the intent to Raft and leave the
+// cluster MAIN-less until the coordinators retried it, so an instance that is
+// known to be reachable is preferred over a lower-ordinal one that is not.
+//
+// The first declared instance is the fallback, which is what a fresh bootstrap
+// uses: nothing is observed yet at the point its registrations are planned.
+func promotionTarget(declared Topology, registered map[string]memgraph.Instance) string {
+	for _, instance := range declared.DataInstances {
+		if observed, ok := registered[instance.Name]; ok && observed.IsUp() {
+			return instance.Name
+		}
+	}
+	return declared.DataInstances[0].Name
 }

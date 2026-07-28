@@ -73,7 +73,36 @@ var (
 	memgraphImage = example.Spec.Image.Repository + ":" + example.Spec.Image.Tag
 
 	licenseSecretName = example.Spec.Secrets.Name
+
+	// quickstartCluster is the cluster the example manifest boots, which most of
+	// the specs below observe.
+	quickstartCluster = clusterUnderTest{
+		namespace:     clusterNamespace,
+		name:          clusterName,
+		coordinators:  coordinatorCount,
+		dataInstances: dataInstanceCount,
+	}
 )
+
+// clusterUnderTest is one MemgraphCluster a spec observes, together with the
+// topology it declares. The suite runs several differently-shaped clusters —
+// the quickstart one, the retention one, the one that is scaled — so every
+// helper below takes its cluster rather than reaching for the quickstart
+// globals.
+type clusterUnderTest struct {
+	namespace     string
+	name          string
+	coordinators  int32
+	dataInstances int32
+}
+
+// grownTo returns the same cluster with a different declared topology, which is
+// what the assertions switch to after a scale.
+func (c clusterUnderTest) grownTo(coordinators, dataInstances int32) clusterUnderTest {
+	c.coordinators = coordinators
+	c.dataInstances = dataInstances
+	return c
+}
 
 // declaredCount reads a replica count the example must state outright: the
 // counts drive the assertions, and a count left to the CRD's default would
@@ -108,12 +137,12 @@ func loadExample() *memgraphcomv1alpha1.MemgraphCluster {
 // instance must appear under in SHOW INSTANCES once the operator has converged
 // registration: coordinator ordinal N registers as coordinator_N+1, data
 // ordinal N as instance_N.
-func declaredInstances() []string {
-	names := make([]string, 0, coordinatorCount+dataInstanceCount)
-	for ordinal := range coordinatorCount {
+func (c clusterUnderTest) declaredInstances() []string {
+	names := make([]string, 0, c.coordinators+c.dataInstances)
+	for ordinal := range c.coordinators {
 		names = append(names, fmt.Sprintf("coordinator_%d", ordinal+1))
 	}
-	for ordinal := range dataInstanceCount {
+	for ordinal := range c.dataInstances {
 		names = append(names, fmt.Sprintf("instance_%d", ordinal))
 	}
 	return names
@@ -131,33 +160,13 @@ func declaredInstances() []string {
 // same pattern — no pipeline changes.
 var _ = Describe("MemgraphCluster", Ordered, func() {
 	BeforeAll(func() {
-		license := os.Getenv(licenseEnvVar)
-		organization := os.Getenv(organizationEnvVar)
-		Expect(license).NotTo(BeEmpty(),
-			"%s must be set: the e2e suite boots a licensed Memgraph HA cluster", licenseEnvVar)
-		Expect(organization).NotTo(BeEmpty(),
-			"%s must be set: the e2e suite boots a licensed Memgraph HA cluster", organizationEnvVar)
+		license, organization := licenseFromEnv()
 
-		By("preloading the Memgraph image into the Kind cluster")
-		cmd := exec.Command("docker", "pull", memgraphImage)
-		_, err := utils.Run(cmd)
-		Expect(err).NotTo(HaveOccurred(), "Failed to pull the Memgraph image")
-		Expect(utils.LoadImageToKindClusterWithName(memgraphImage)).To(Succeed(),
-			"Failed to load the Memgraph image into Kind")
-
-		By("creating the cluster namespace")
-		cmd = exec.Command("kubectl", "create", "ns", clusterNamespace)
-		_, err = utils.Run(cmd)
-		Expect(err).NotTo(HaveOccurred(), "Failed to create namespace")
-
-		By("labeling the namespace to enforce the restricted security policy")
-		cmd = exec.Command("kubectl", "label", "--overwrite", "ns", clusterNamespace,
-			"pod-security.kubernetes.io/enforce=restricted")
-		_, err = utils.Run(cmd)
-		Expect(err).NotTo(HaveOccurred(), "Failed to label namespace with restricted policy")
+		preloadMemgraphImage()
+		createClusterNamespace(clusterNamespace)
 
 		By("creating the enterprise license Secret")
-		createLicenseSecret(license, organization)
+		createLicenseSecret(clusterNamespace, license, organization)
 
 		By("applying the MemgraphCluster")
 		applyMemgraphCluster()
@@ -170,30 +179,12 @@ var _ = Describe("MemgraphCluster", Ordered, func() {
 		_, _ = utils.Run(cmd)
 	})
 
-	// On failure, dump everything needed to debug a broken bootstrap from CI
-	// logs alone.
 	AfterEach(func() {
-		if !CurrentSpecReport().Failed() {
-			return
-		}
-		for _, args := range [][]string{
-			{"get", "pods", "-n", clusterNamespace, "-o", "wide"},
-			{"get", "memgraphclusters", "-n", clusterNamespace, "-o", "yaml"},
-			{"get", "events", "-n", clusterNamespace, "--sort-by=.lastTimestamp"},
-			{"logs", "deploy/" + controllerDeploymentName, "-n", namespace},
-		} {
-			cmd := exec.Command("kubectl", args...)
-			output, err := utils.Run(cmd)
-			if err != nil {
-				_, _ = fmt.Fprintf(GinkgoWriter, "Failed to collect diagnostics %v: %s\n", args, err)
-				continue
-			}
-			_, _ = fmt.Fprintf(GinkgoWriter, "Diagnostics kubectl %v:\n%s\n", args, output)
-		}
+		dumpDiagnosticsOnFailure(clusterNamespace)
 	})
 
 	It("bootstraps every declared instance registered with exactly one MAIN", func() {
-		Eventually(verifyClusterRegistered, 10*time.Minute, 10*time.Second).Should(Succeed())
+		Eventually(quickstartCluster.verifyRegistered, 10*time.Minute, 10*time.Second).Should(Succeed())
 	})
 
 	// The operator's reason to exist over the chart's one-shot Job: a data
@@ -204,13 +195,13 @@ var _ = Describe("MemgraphCluster", Ordered, func() {
 		const wiped = "instance_1"
 
 		By("confirming the cluster is converged before wiping a registration")
-		Eventually(verifyClusterRegistered, 10*time.Minute, 10*time.Second).Should(Succeed())
+		Eventually(quickstartCluster.verifyRegistered, 10*time.Minute, 10*time.Second).Should(Succeed())
 
 		By("unregistering a data instance on the coordinator leader")
 		Expect(wipeInstanceRegistration(wiped)).To(Succeed())
 
 		By("confirming the instance really left the cluster view")
-		view, err := leaderView()
+		view, err := quickstartCluster.leaderView()
 		Expect(err).NotTo(HaveOccurred())
 		names := make([]string, 0, len(view))
 		for _, instance := range view {
@@ -220,7 +211,7 @@ var _ = Describe("MemgraphCluster", Ordered, func() {
 			"the wipe must actually remove the registration for the test to be meaningful")
 
 		By("waiting for the operator to converge the cluster back to fully registered")
-		Eventually(verifyClusterRegistered, 10*time.Minute, 10*time.Second).Should(Succeed())
+		Eventually(quickstartCluster.verifyRegistered, 10*time.Minute, 10*time.Second).Should(Succeed())
 	})
 
 	// The coordinator analogue of the data-instance re-registration: a
@@ -231,14 +222,14 @@ var _ = Describe("MemgraphCluster", Ordered, func() {
 	// converged cluster.
 	It("re-adds a coordinator that was removed from the cluster", func() {
 		By("confirming the cluster is converged before removing a coordinator")
-		Eventually(verifyClusterRegistered, 10*time.Minute, 10*time.Second).Should(Succeed())
+		Eventually(quickstartCluster.verifyRegistered, 10*time.Minute, 10*time.Second).Should(Succeed())
 
 		By("removing a follower coordinator on the coordinator leader")
 		removed, err := removeCoordinatorRegistration()
 		Expect(err).NotTo(HaveOccurred())
 
 		By("confirming the coordinator really left the cluster view")
-		view, err := leaderView()
+		view, err := quickstartCluster.leaderView()
 		Expect(err).NotTo(HaveOccurred())
 		names := make([]string, 0, len(view))
 		for _, instance := range view {
@@ -248,7 +239,7 @@ var _ = Describe("MemgraphCluster", Ordered, func() {
 			"the removal must actually drop the coordinator for the test to be meaningful")
 
 		By("waiting for the operator to converge the cluster back to fully registered")
-		Eventually(verifyClusterRegistered, 10*time.Minute, 10*time.Second).Should(Succeed())
+		Eventually(quickstartCluster.verifyRegistered, 10*time.Minute, 10*time.Second).Should(Succeed())
 	})
 
 	// Storage survives the cluster under the default retention policy: an
@@ -256,7 +247,7 @@ var _ = Describe("MemgraphCluster", Ordered, func() {
 	// it. This deletes the CR, so it runs last in this Ordered container.
 	It("leaves the PVCs behind when the default-retention CR is deleted", func() {
 		By("confirming the cluster is converged before deleting it")
-		Eventually(verifyClusterRegistered, 10*time.Minute, 10*time.Second).Should(Succeed())
+		Eventually(quickstartCluster.verifyRegistered, 10*time.Minute, 10*time.Second).Should(Succeed())
 
 		By("recording the provisioned PVCs")
 		before, err := listPVCs(clusterNamespace)
@@ -322,7 +313,7 @@ metadata:
   name: %s
   namespace: %s
 spec:
-  coordinators: 1
+  coordinators: 3
   dataInstances: 1
   image:
     repository: %s
@@ -336,12 +327,12 @@ spec:
 		Expect(err).NotTo(HaveOccurred(), "Failed to apply the MemgraphCluster")
 
 		By("waiting for the claims to be provisioned")
-		// One lib and one log claim for the single coordinator and the single
-		// data instance.
+		// One lib and one log claim per pod: three coordinators and one data
+		// instance, the smallest topology admission accepts.
 		Eventually(func(g Gomega) {
 			claims, err := listPVCs(retentionNamespace)
 			g.Expect(err).NotTo(HaveOccurred())
-			g.Expect(claims).To(HaveLen(4))
+			g.Expect(claims).To(HaveLen(8))
 		}, 5*time.Minute, 5*time.Second).Should(Succeed())
 
 		By("deleting the MemgraphCluster")
@@ -356,6 +347,110 @@ spec:
 			g.Expect(err).NotTo(HaveOccurred())
 			g.Expect(claims).To(BeEmpty())
 		}, 5*time.Minute, 5*time.Second).Should(Succeed())
+	})
+})
+
+// Growing a live cluster: the end-to-end proof that raising either count
+// registers the members it adds without human action. It gets its own container
+// and namespace because it needs a cluster it may reshape, and its teardown is
+// awaited — eight Memgraph pods are a large share of a Kind cluster's capacity,
+// which the scenarios that may run after it need back.
+var _ = Describe("MemgraphCluster topology scale-up", Ordered, func() {
+	const scalingNamespace = "memgraph-e2e-scaling"
+	const scalingClusterName = "scaling"
+
+	// The cluster starts at the default topology and grows to five coordinators
+	// and three data instances.
+	initial := clusterUnderTest{
+		namespace: scalingNamespace, name: scalingClusterName, coordinators: 3, dataInstances: 2,
+	}
+	grown := initial.grownTo(5, 3)
+
+	BeforeAll(func() {
+		license, organization := licenseFromEnv()
+
+		preloadMemgraphImage()
+		createClusterNamespace(scalingNamespace)
+
+		By("creating the enterprise license Secret")
+		createLicenseSecret(scalingNamespace, license, organization)
+
+		By("applying the MemgraphCluster to scale")
+		// No log claim and explicit small requests: this cluster runs up to eight
+		// pods on the same Kind nodes as the other scenarios', so it asks for as
+		// little as it can while still being a real HA cluster.
+		manifest := fmt.Sprintf(`apiVersion: memgraph.com/v1alpha1
+kind: MemgraphCluster
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  coordinators: %d
+  dataInstances: %d
+  image:
+    repository: %s
+    tag: %s
+  secrets:
+    name: %s
+  storage:
+    coordinators:
+      createLogStorageClaim: false
+    data:
+      createLogStorageClaim: false
+  resources:
+    coordinators:
+      requests:
+        cpu: 50m
+        memory: 200Mi
+    data:
+      requests:
+        cpu: 50m
+        memory: 300Mi
+`, scalingClusterName, scalingNamespace, initial.coordinators, initial.dataInstances,
+			example.Spec.Image.Repository, example.Spec.Image.Tag, licenseSecretName)
+		cmd := exec.Command("kubectl", "apply", "-f", "-")
+		_, err := utils.RunWithInput(cmd, manifest)
+		Expect(err).NotTo(HaveOccurred(), "Failed to apply the MemgraphCluster")
+	})
+
+	AfterAll(func() {
+		By("removing the cluster namespace and waiting for its pods to go")
+		cmd := exec.Command("kubectl", "delete", "ns", scalingNamespace,
+			"--ignore-not-found", "--wait=true", "--timeout=5m")
+		_, _ = utils.Run(cmd)
+	})
+
+	AfterEach(func() {
+		dumpDiagnosticsOnFailure(scalingNamespace)
+	})
+
+	It("bootstraps the initial topology", func() {
+		Eventually(initial.verifyRegistered, 10*time.Minute, 10*time.Second).Should(Succeed())
+		initial.awaitConverged(2 * time.Minute)
+	})
+
+	// Both counts are raised in one edit, in different step sizes, which is the
+	// whole contract: nothing constrains a change beyond the target counts
+	// themselves.
+	It("grows both roles in one edit and registers every added member", func() {
+		By("raising both counts on the live cluster")
+		cmd := exec.Command("kubectl", "patch", "memgraphcluster", scalingClusterName,
+			"-n", scalingNamespace, "--type=merge", "-p",
+			fmt.Sprintf(`{"spec":{"coordinators":%d,"dataInstances":%d}}`,
+				grown.coordinators, grown.dataInstances))
+		_, err := utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred(), "the operator must accept a raised topology count")
+
+		By("waiting for every member of the grown topology to be registered")
+		Eventually(grown.verifyRegistered, 10*time.Minute, 10*time.Second).Should(Succeed())
+
+		By("confirming the resource reports the scale as finished")
+		grown.awaitConverged(5 * time.Minute)
+		Expect(grown.replicas("coordinator")).To(Equal("5"))
+		Expect(grown.replicas("data")).To(Equal("3"))
+		coordinators, dataInstances := grown.registeredCounts()
+		Expect(coordinators).To(Equal("5"))
+		Expect(dataInstances).To(Equal("3"))
 	})
 })
 
@@ -387,11 +482,11 @@ func listPVCs(namespace string) ([]string, error) {
 	return names, nil
 }
 
-// verifyClusterRegistered asserts the coordinator leader reports every declared
+// verifyRegistered asserts the coordinator leader reports every declared
 // instance registered and healthy with exactly one MAIN — the converged steady
-// state both the bootstrap and re-registration specs check for.
-func verifyClusterRegistered(g Gomega) {
-	view, err := leaderView()
+// state the bootstrap, re-registration and scaling specs all check for.
+func (c clusterUnderTest) verifyRegistered(g Gomega) {
+	view, err := c.leaderView()
 	g.Expect(err).NotTo(HaveOccurred())
 
 	names := make([]string, 0, len(view))
@@ -404,8 +499,43 @@ func verifyClusterRegistered(g Gomega) {
 			mains = append(mains, instance.name)
 		}
 	}
-	g.Expect(names).To(ConsistOf(declaredInstances()))
+	g.Expect(names).To(ConsistOf(c.declaredInstances()))
 	g.Expect(mains).To(HaveLen(1), "expected exactly one MAIN, got %v", mains)
+}
+
+// awaitConverged waits for the operator to report the declared topology as
+// realized: every declared instance registered and both StatefulSets at the
+// declared replica count. It is what a user gates a scale on.
+func (c clusterUnderTest) awaitConverged(timeout time.Duration) {
+	GinkgoHelper()
+	cmd := exec.Command("kubectl", "wait", "--for=condition=Converged",
+		"memgraphcluster/"+c.name, "-n", c.namespace, "--timeout="+timeout.String())
+	_, err := utils.Run(cmd)
+	Expect(err).NotTo(HaveOccurred(), "the MemgraphCluster never reported Converged")
+}
+
+// registeredCounts reads the registered coordinator and data-instance counts the
+// operator publishes on the resource's status.
+func (c clusterUnderTest) registeredCounts() (string, string) {
+	GinkgoHelper()
+	read := func(field string) string {
+		cmd := exec.Command("kubectl", "get", "memgraphcluster", c.name, "-n", c.namespace,
+			"-o", fmt.Sprintf("jsonpath={.status.%s}", field))
+		output, err := utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred(), "Failed to read status.%s", field)
+		return strings.TrimSpace(output)
+	}
+	return read("coordinators"), read("dataInstances")
+}
+
+// replicas reads the replica count the operator applied to a role's StatefulSet.
+func (c clusterUnderTest) replicas(component string) string {
+	GinkgoHelper()
+	cmd := exec.Command("kubectl", "get", "statefulset", c.name+"-"+component, "-n", c.namespace,
+		"-o", "jsonpath={.spec.replicas}")
+	output, err := utils.Run(cmd)
+	Expect(err).NotTo(HaveOccurred(), "Failed to read the %s StatefulSet's replicas", component)
+	return strings.TrimSpace(output)
 }
 
 // wipeInstanceRegistration unregisters the named data instance on the
@@ -417,7 +547,7 @@ func wipeInstanceRegistration(name string) error {
 	var errs []error
 	for ordinal := range coordinatorCount {
 		pod := fmt.Sprintf("%s-coordinator-%d", clusterName, ordinal)
-		view, err := showInstances(pod)
+		view, err := quickstartCluster.showInstances(pod)
 		if err != nil {
 			errs = append(errs, err)
 			continue
@@ -454,7 +584,7 @@ func removeCoordinatorRegistration() (string, error) {
 	var errs []error
 	for ordinal := range coordinatorCount {
 		pod := fmt.Sprintf("%s-coordinator-%d", clusterName, ordinal)
-		view, err := showInstances(pod)
+		view, err := quickstartCluster.showInstances(pod)
 		if err != nil {
 			errs = append(errs, err)
 			continue
@@ -487,16 +617,84 @@ func removeCoordinatorRegistration() (string, error) {
 	return "", fmt.Errorf("no coordinator leader found to remove a coordinator: %w", errors.Join(errs...))
 }
 
+// dumpDiagnosticsOnFailure dumps everything needed to debug a broken cluster
+// from the CI logs alone: the pods, the resource itself, the namespace's events
+// and the operator's log.
+func dumpDiagnosticsOnFailure(namespace string) {
+	if !CurrentSpecReport().Failed() {
+		return
+	}
+	for _, args := range [][]string{
+		{"get", "pods", "-n", namespace, "-o", "wide"},
+		{"get", "memgraphclusters", "-n", namespace, "-o", "yaml"},
+		{"get", "events", "-n", namespace, "--sort-by=.lastTimestamp"},
+		{"logs", "deploy/" + controllerDeploymentName, "-n", namespace},
+	} {
+		cmd := exec.Command("kubectl", args...)
+		output, err := utils.Run(cmd)
+		if err != nil {
+			_, _ = fmt.Fprintf(GinkgoWriter, "Failed to collect diagnostics %v: %s\n", args, err)
+			continue
+		}
+		_, _ = fmt.Fprintf(GinkgoWriter, "Diagnostics kubectl %v:\n%s\n", args, output)
+	}
+}
+
+// licenseFromEnv reads the enterprise license every HA cluster in this suite
+// needs, following the HA Helm chart's CI convention of repository secrets
+// exported into the job environment.
+func licenseFromEnv() (string, string) {
+	GinkgoHelper()
+	license := os.Getenv(licenseEnvVar)
+	organization := os.Getenv(organizationEnvVar)
+	Expect(license).NotTo(BeEmpty(),
+		"%s must be set: the e2e suite boots a licensed Memgraph HA cluster", licenseEnvVar)
+	Expect(organization).NotTo(BeEmpty(),
+		"%s must be set: the e2e suite boots a licensed Memgraph HA cluster", organizationEnvVar)
+	return license, organization
+}
+
+// preloadMemgraphImage puts the Memgraph image on the Kind nodes, so a cluster's
+// pods do not each wait on a registry pull. It is idempotent, so every scenario
+// container that boots Memgraph can call it without depending on another's
+// setup.
+func preloadMemgraphImage() {
+	GinkgoHelper()
+	By("preloading the Memgraph image into the Kind cluster")
+	cmd := exec.Command("docker", "pull", memgraphImage)
+	_, err := utils.Run(cmd)
+	Expect(err).NotTo(HaveOccurred(), "Failed to pull the Memgraph image")
+	Expect(utils.LoadImageToKindClusterWithName(memgraphImage)).To(Succeed(),
+		"Failed to load the Memgraph image into Kind")
+}
+
+// createClusterNamespace creates a namespace for a MemgraphCluster and enforces
+// the restricted Pod Security Standard in it, so every scenario proves the
+// operator's workloads run under the policy a security review demands.
+func createClusterNamespace(namespace string) {
+	GinkgoHelper()
+	By("creating the cluster namespace " + namespace)
+	cmd := exec.Command("kubectl", "create", "ns", namespace)
+	_, err := utils.Run(cmd)
+	Expect(err).NotTo(HaveOccurred(), "Failed to create namespace")
+
+	By("labeling the namespace to enforce the restricted security policy")
+	cmd = exec.Command("kubectl", "label", "--overwrite", "ns", namespace,
+		"pod-security.kubernetes.io/enforce=restricted")
+	_, err = utils.Run(cmd)
+	Expect(err).NotTo(HaveOccurred(), "Failed to label namespace with restricted policy")
+}
+
 // createLicenseSecret applies the Secret the MemgraphCluster references, under
 // the name and keys the example points at. The manifest is piped over stdin so
 // no secret material ever reaches the logged command line.
-func createLicenseSecret(license, organization string) {
+func createLicenseSecret(namespace, license, organization string) {
 	secret := map[string]any{
 		"apiVersion": "v1",
 		"kind":       "Secret",
 		"metadata": map[string]any{
 			"name":      licenseSecretName,
-			"namespace": clusterNamespace,
+			"namespace": namespace,
 		},
 		"stringData": map[string]string{
 			example.Spec.Secrets.LicenseKey:      license,
@@ -532,11 +730,11 @@ type instanceRow struct {
 // reports a MAIN. Only the coordinator leader health-checks data instances and
 // reports their roles (followers show them as unknown), so a view containing a
 // MAIN is the leader's authoritative view.
-func leaderView() ([]instanceRow, error) {
+func (c clusterUnderTest) leaderView() ([]instanceRow, error) {
 	var errs []error
-	for ordinal := range coordinatorCount {
-		pod := fmt.Sprintf("%s-coordinator-%d", clusterName, ordinal)
-		view, err := showInstances(pod)
+	for ordinal := range c.coordinators {
+		pod := fmt.Sprintf("%s-coordinator-%d", c.name, ordinal)
+		view, err := c.showInstances(pod)
 		if err != nil {
 			errs = append(errs, err)
 			continue
@@ -554,8 +752,8 @@ func leaderView() ([]instanceRow, error) {
 // showInstances runs SHOW INSTANCES through mgconsole inside the given
 // coordinator pod (the Memgraph image ships the client) and parses the CSV
 // output.
-func showInstances(pod string) ([]instanceRow, error) {
-	cmd := exec.Command("kubectl", "exec", pod, "-n", clusterNamespace, "-c", "memgraph", "--",
+func (c clusterUnderTest) showInstances(pod string) ([]instanceRow, error) {
+	cmd := exec.Command("kubectl", "exec", pod, "-n", c.namespace, "-c", "memgraph", "--",
 		"bash", "-c", "echo 'SHOW INSTANCES;' | mgconsole --output-format=csv")
 	output, err := utils.Run(cmd)
 	if err != nil {

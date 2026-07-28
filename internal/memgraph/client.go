@@ -36,6 +36,11 @@ const (
 	RoleReplica  = "replica"
 )
 
+// HealthUp is the SHOW INSTANCES health of an instance the coordinator leader
+// currently reaches. Anything else — "down", or "unknown" from a coordinator
+// that does not health-check the data plane — means it does not.
+const HealthUp = "up"
+
 // Instance is one row of SHOW INSTANCES: a coordinator or data instance the
 // cluster currently knows about.
 type Instance struct {
@@ -55,6 +60,11 @@ func (i Instance) IsLeader() bool {
 // IsMain reports whether the instance is the current MAIN data instance.
 func (i Instance) IsMain() bool {
 	return strings.EqualFold(i.Role, RoleMain)
+}
+
+// IsUp reports whether the coordinator leader currently reaches the instance.
+func (i Instance) IsUp() bool {
+	return strings.EqualFold(i.Health, HealthUp)
 }
 
 // CoordinatorSpec declares one coordinator to add to the cluster. Servers are

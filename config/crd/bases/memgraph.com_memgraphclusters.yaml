@@ -23,6 +23,14 @@ spec:
     - jsonPath: .spec.dataInstances
       name: Data
       type: integer
+    - jsonPath: .status.coordinators
+      name: Registered-Coordinators
+      priority: 1
+      type: integer
+    - jsonPath: .status.dataInstances
+      name: Registered-Data
+      priority: 1
+      type: integer
     - jsonPath: .status.main
       name: Main
       type: string
@@ -74,18 +82,18 @@ spec:
                 default: 3
                 description: |-
                   coordinators is the number of Raft coordinator instances. It must be odd
-                  so the Raft quorum cannot split, and it is immutable: scaling is not
-                  supported in v1alpha1.
+                  so the Raft quorum cannot split, and at least three, which is the
+                  smallest quorum that survives losing a coordinator — this operator
+                  builds real HA clusters, so the floor holds at creation as well as on an
+                  update. Raising the count on a live cluster grows it: the operator adds
+                  the new coordinators to the Raft cluster as their pods become ready.
                 format: int32
-                minimum: 1
+                minimum: 3
                 type: integer
                 x-kubernetes-validations:
                 - message: coordinators must be an odd number so the Raft quorum cannot
                     split
                   rule: self % 2 == 1
-                - message: 'coordinators is immutable: changing the coordinator count
-                    of an existing MemgraphCluster is not supported in v1alpha1'
-                  rule: self == oldSelf
               coreDumps:
                 default: {}
                 description: |-
@@ -329,15 +337,12 @@ spec:
               dataInstances:
                 default: 2
                 description: |-
-                  dataInstances is the number of data instances. It is immutable: scaling
-                  is not supported in v1alpha1.
+                  dataInstances is the number of data instances. Raising the count on a
+                  live cluster grows it: the operator registers the new instances as their
+                  pods become ready.
                 format: int32
                 minimum: 1
                 type: integer
-                x-kubernetes-validations:
-                - message: 'dataInstances is immutable: changing the data instance
-                    count of an existing MemgraphCluster is not supported in v1alpha1'
-                  rule: self == oldSelf
               extraArgs:
                 description: extraArgs passes additional Memgraph flags to both roles.
                 properties:
@@ -1347,6 +1352,21 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              coordinators:
+                description: |-
+                  coordinators is how many of the declared coordinators the coordinator
+                  leader reports as registered members of the Raft cluster. It reaches
+                  spec.coordinators once registration has converged, so it is what a scale
+                  is watched through.
+                format: int32
+                type: integer
+              dataInstances:
+                description: |-
+                  dataInstances is how many of the declared data instances the coordinator
+                  leader reports as registered. It reaches spec.dataInstances once
+                  registration has converged.
+                format: int32
+                type: integer
               main:
                 description: |-
                   main is the name of the data instance currently observed as MAIN, as

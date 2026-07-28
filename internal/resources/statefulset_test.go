@@ -82,6 +82,19 @@ func minimalCluster() *memgraphcomv1alpha1.MemgraphCluster {
 	}
 }
 
+// coordinatorStatefulSet and dataStatefulSet build a role's StatefulSet at the
+// replica count the spec declares — the count the controller derives for a
+// cluster that is growing or holding its size. The count a shrinking cluster is
+// held at is the controller's decision, so the cases that cover it pass it to
+// the builder directly.
+func coordinatorStatefulSet(cluster *memgraphcomv1alpha1.MemgraphCluster) *appsv1.StatefulSet {
+	return resources.CoordinatorStatefulSet(cluster, resources.DeclaredCoordinators(cluster))
+}
+
+func dataStatefulSet(cluster *memgraphcomv1alpha1.MemgraphCluster) *appsv1.StatefulSet {
+	return resources.DataStatefulSet(cluster, resources.DeclaredDataInstances(cluster))
+}
+
 func specifiedCluster() *memgraphcomv1alpha1.MemgraphCluster {
 	return &memgraphcomv1alpha1.MemgraphCluster{
 		ObjectMeta: metav1.ObjectMeta{Name: clusterName, Namespace: testNamespace},
@@ -290,12 +303,15 @@ func expectedClaimTemplates() []corev1.PersistentVolumeClaim {
 	}
 }
 
+// expectedRetentionPolicy is the claim retention policy both roles get: the one
+// retention knob decides both halves, so a claim orphaned by deleting the
+// cluster and one orphaned by scaling a role down are treated alike.
 func expectedRetentionPolicy(
-	whenDeleted appsv1.PersistentVolumeClaimRetentionPolicyType,
+	policy appsv1.PersistentVolumeClaimRetentionPolicyType,
 ) *appsv1.StatefulSetPersistentVolumeClaimRetentionPolicy {
 	return &appsv1.StatefulSetPersistentVolumeClaimRetentionPolicy{
-		WhenDeleted: whenDeleted,
-		WhenScaled:  appsv1.RetainPersistentVolumeClaimRetentionPolicyType,
+		WhenDeleted: policy,
+		WhenScaled:  policy,
 	}
 }
 
@@ -385,7 +401,7 @@ func TestCoordinatorStatefulSetDefaults(t *testing.T) {
 		},
 	}
 
-	got := resources.CoordinatorStatefulSet(minimalCluster())
+	got := coordinatorStatefulSet(minimalCluster())
 	if diff := cmp.Diff(want, got); diff != "" {
 		t.Errorf("CoordinatorStatefulSet() mismatch (-want +got):\n%s", diff)
 	}
@@ -442,9 +458,58 @@ func TestDataStatefulSetDefaults(t *testing.T) {
 		},
 	}
 
-	got := resources.DataStatefulSet(minimalCluster())
+	got := dataStatefulSet(minimalCluster())
 	if diff := cmp.Diff(want, got); diff != "" {
 		t.Errorf("DataStatefulSet() mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestStatefulSetReplicasFollowTheArgument pins the replica count to the
+// builder's argument rather than to the spec. That separation is what lets the
+// controller hold a role at its current size while a lowered count is being
+// retired, without the builders having to know anything about the live cluster.
+func TestStatefulSetReplicasFollowTheArgument(t *testing.T) {
+	// The spec declares fewer replicas than the cluster currently runs, which is
+	// the count the controller passes so a shrink never sheds pods on its own.
+	cluster := minimalCluster()
+	cluster.Spec.Coordinators = ptr.To(int32(3))
+	cluster.Spec.DataInstances = ptr.To(int32(2))
+
+	tests := []struct {
+		name string
+		sts  *appsv1.StatefulSet
+		want int32
+	}{
+		{name: coordinatorComponent, sts: resources.CoordinatorStatefulSet(cluster, 5), want: 5},
+		{name: dataComponent, sts: resources.DataStatefulSet(cluster, 3), want: 3},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := *tc.sts.Spec.Replicas; got != tc.want {
+				t.Errorf("replicas = %d, want the given %d, not the declared count", got, tc.want)
+			}
+		})
+	}
+}
+
+// The declared counts are what the controller passes for a cluster that is not
+// shrinking, so they resolve the same schema defaults the builders do.
+func TestDeclaredCounts(t *testing.T) {
+	if got := resources.DeclaredCoordinators(minimalCluster()); got != memgraphcomv1alpha1.DefaultCoordinatorCount {
+		t.Errorf("DeclaredCoordinators() = %d, want the schema default %d",
+			got, memgraphcomv1alpha1.DefaultCoordinatorCount)
+	}
+	if got := resources.DeclaredDataInstances(minimalCluster()); got != memgraphcomv1alpha1.DefaultDataInstanceCount {
+		t.Errorf("DeclaredDataInstances() = %d, want the schema default %d",
+			got, memgraphcomv1alpha1.DefaultDataInstanceCount)
+	}
+
+	cluster := specifiedCluster()
+	if got := resources.DeclaredCoordinators(cluster); got != 5 {
+		t.Errorf("DeclaredCoordinators() = %d, want 5", got)
+	}
+	if got := resources.DeclaredDataInstances(cluster); got != 3 {
+		t.Errorf("DeclaredDataInstances() = %d, want 3", got)
 	}
 }
 
@@ -456,8 +521,8 @@ func TestStatefulSetSpecOverrides(t *testing.T) {
 		sts      *appsv1.StatefulSet
 		replicas int32
 	}{
-		{name: coordinatorComponent, sts: resources.CoordinatorStatefulSet(cluster), replicas: 5},
-		{name: dataComponent, sts: resources.DataStatefulSet(cluster), replicas: 3},
+		{name: coordinatorComponent, sts: coordinatorStatefulSet(cluster), replicas: 5},
+		{name: dataComponent, sts: dataStatefulSet(cluster), replicas: 3},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -506,7 +571,7 @@ func TestStatefulSetStorageOverrides(t *testing.T) {
 	}{
 		{
 			name: coordinatorComponent,
-			sts:  resources.CoordinatorStatefulSet(cluster),
+			sts:  coordinatorStatefulSet(cluster),
 			want: []corev1.PersistentVolumeClaim{
 				expectedClaimTemplate("lib-storage", "4Gi", corev1.ReadWriteOncePod, ptr.To("fast-ssd")),
 				// An empty storage class is passed through verbatim: it means
@@ -516,7 +581,7 @@ func TestStatefulSetStorageOverrides(t *testing.T) {
 		},
 		{
 			name: dataComponent,
-			sts:  resources.DataStatefulSet(cluster),
+			sts:  dataStatefulSet(cluster),
 			want: []corev1.PersistentVolumeClaim{
 				expectedClaimTemplate("lib-storage", "100Gi", corev1.ReadWriteOnce, ptr.To("gp3")),
 				// Untouched by the spec, so it keeps every schema default.
@@ -551,7 +616,7 @@ func TestStatefulSetWithoutLogStorageClaim(t *testing.T) {
 	}
 
 	t.Run(coordinatorComponent, func(t *testing.T) {
-		sts := resources.CoordinatorStatefulSet(cluster)
+		sts := coordinatorStatefulSet(cluster)
 
 		wantClaims := []corev1.PersistentVolumeClaim{
 			expectedClaimTemplate("lib-storage", "1Gi", corev1.ReadWriteOnce, nil),
@@ -583,7 +648,7 @@ exec /usr/lib/memgraph/memgraph \
 	})
 
 	t.Run(dataComponent, func(t *testing.T) {
-		sts := resources.DataStatefulSet(cluster)
+		sts := dataStatefulSet(cluster)
 
 		if diff := cmp.Diff(expectedClaimTemplates(), sts.Spec.VolumeClaimTemplates); diff != "" {
 			t.Errorf("volume claim templates mismatch (-want +got):\n%s", diff)
@@ -604,8 +669,8 @@ exec /usr/lib/memgraph/memgraph \
 // init container, no sidecar.
 func TestStatefulSetCoreDumpsDisabledByDefault(t *testing.T) {
 	for _, sts := range []*appsv1.StatefulSet{
-		resources.CoordinatorStatefulSet(minimalCluster()),
-		resources.DataStatefulSet(minimalCluster()),
+		coordinatorStatefulSet(minimalCluster()),
+		dataStatefulSet(minimalCluster()),
 	} {
 		t.Run(sts.Name, func(t *testing.T) {
 			for _, claim := range sts.Spec.VolumeClaimTemplates {
@@ -638,7 +703,7 @@ func TestStatefulSetCoreDumps(t *testing.T) {
 	}
 
 	t.Run(dataComponent, func(t *testing.T) {
-		sts := resources.DataStatefulSet(cluster)
+		sts := dataStatefulSet(cluster)
 
 		wantClaims := append(expectedClaimTemplates(),
 			expectedClaimTemplate(coreDumpsVolume, "20Gi", corev1.ReadWriteOnce, ptr.To("cheap-hdd")))
@@ -680,7 +745,7 @@ func TestStatefulSetCoreDumps(t *testing.T) {
 
 	// The knob is per role: coordinators asked for nothing and get nothing.
 	t.Run(coordinatorComponent, func(t *testing.T) {
-		sts := resources.CoordinatorStatefulSet(cluster)
+		sts := coordinatorStatefulSet(cluster)
 
 		if diff := cmp.Diff(expectedClaimTemplates(), sts.Spec.VolumeClaimTemplates); diff != "" {
 			t.Errorf("volume claim templates mismatch (-want +got):\n%s", diff)
@@ -701,7 +766,7 @@ func TestStatefulSetCoreDumpsWithoutCorePattern(t *testing.T) {
 		ConfigureCorePattern: ptr.To(false),
 	}
 
-	sts := resources.DataStatefulSet(cluster)
+	sts := dataStatefulSet(cluster)
 	podSpec := sts.Spec.Template.Spec
 
 	if got := podSpec.InitContainers; len(got) != 0 {
@@ -742,7 +807,7 @@ func TestStatefulSetCoreDumpsUploader(t *testing.T) {
 		},
 	}
 
-	containers := resources.DataStatefulSet(cluster).Spec.Template.Spec.Containers
+	containers := dataStatefulSet(cluster).Spec.Template.Spec.Containers
 	if len(containers) != 2 {
 		t.Fatalf("containers = %d, want Memgraph plus the uploader", len(containers))
 	}
@@ -780,7 +845,7 @@ func TestStatefulSetCoreDumpsUploader(t *testing.T) {
 
 	// Coordinators collect no dumps, so the shared uploader has nothing to read
 	// in their pods and must not be injected there.
-	coordinators := resources.CoordinatorStatefulSet(cluster).Spec.Template.Spec.Containers
+	coordinators := coordinatorStatefulSet(cluster).Spec.Template.Spec.Containers
 	if len(coordinators) != 1 {
 		t.Errorf("coordinator containers = %d, want only Memgraph's: the role collects no dumps",
 			len(coordinators))
@@ -808,7 +873,7 @@ func TestStatefulSetExtraVolumes(t *testing.T) {
 	}
 
 	t.Run(dataComponent, func(t *testing.T) {
-		podSpec := resources.DataStatefulSet(cluster).Spec.Template.Spec
+		podSpec := dataStatefulSet(cluster).Spec.Template.Spec
 
 		wantVolumes := append(expectedVolumes(), certVolume)
 		if diff := cmp.Diff(wantVolumes, podSpec.Volumes); diff != "" {
@@ -821,7 +886,7 @@ func TestStatefulSetExtraVolumes(t *testing.T) {
 	})
 
 	t.Run(coordinatorComponent, func(t *testing.T) {
-		podSpec := resources.CoordinatorStatefulSet(cluster).Spec.Template.Spec
+		podSpec := coordinatorStatefulSet(cluster).Spec.Template.Spec
 
 		if diff := cmp.Diff(expectedVolumes(), podSpec.Volumes); diff != "" {
 			t.Errorf("volumes mismatch (-want +got):\n%s", diff)
@@ -842,7 +907,7 @@ func TestStatefulSetExtraVolumeWithoutMount(t *testing.T) {
 		VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
 	}}
 
-	podSpec := resources.CoordinatorStatefulSet(cluster).Spec.Template.Spec
+	podSpec := coordinatorStatefulSet(cluster).Spec.Template.Spec
 	if len(podSpec.Volumes) != 2 {
 		t.Errorf("volumes = %v, want the scratch volume alongside tmp", podSpec.Volumes)
 	}
@@ -853,28 +918,29 @@ func TestStatefulSetExtraVolumeWithoutMount(t *testing.T) {
 
 // TestStatefulSetRetentionPolicy pins the mapping from the spec's retention
 // policy onto the StatefulSet machinery that is the only deleter of this
-// cluster's storage. whenScaled stays Retain regardless: both replica counts
-// are immutable, so nothing ever scales down.
+// cluster's storage. Both whenDeleted and whenScaled follow it: the claim of a
+// pod a scale-down removes is the same data as the claim of a pod a cluster
+// deletion removes, so one knob answers for both.
 func TestStatefulSetRetentionPolicy(t *testing.T) {
 	tests := []struct {
-		name        string
-		policy      memgraphcomv1alpha1.StorageRetentionPolicy
-		whenDeleted appsv1.PersistentVolumeClaimRetentionPolicyType
+		name     string
+		policy   memgraphcomv1alpha1.StorageRetentionPolicy
+		expected appsv1.PersistentVolumeClaimRetentionPolicyType
 	}{
 		{
-			name:        "unset defaults to retain",
-			policy:      "",
-			whenDeleted: appsv1.RetainPersistentVolumeClaimRetentionPolicyType,
+			name:     "unset defaults to retain",
+			policy:   "",
+			expected: appsv1.RetainPersistentVolumeClaimRetentionPolicyType,
 		},
 		{
-			name:        "retain",
-			policy:      memgraphcomv1alpha1.RetentionPolicyRetain,
-			whenDeleted: appsv1.RetainPersistentVolumeClaimRetentionPolicyType,
+			name:     "retain",
+			policy:   memgraphcomv1alpha1.RetentionPolicyRetain,
+			expected: appsv1.RetainPersistentVolumeClaimRetentionPolicyType,
 		},
 		{
-			name:        "delete",
-			policy:      memgraphcomv1alpha1.RetentionPolicyDelete,
-			whenDeleted: appsv1.DeletePersistentVolumeClaimRetentionPolicyType,
+			name:     "delete",
+			policy:   memgraphcomv1alpha1.RetentionPolicyDelete,
+			expected: appsv1.DeletePersistentVolumeClaimRetentionPolicyType,
 		},
 	}
 	for _, tc := range tests {
@@ -882,10 +948,10 @@ func TestStatefulSetRetentionPolicy(t *testing.T) {
 			cluster := minimalCluster()
 			cluster.Spec.Storage.RetentionPolicy = tc.policy
 
-			want := expectedRetentionPolicy(tc.whenDeleted)
+			want := expectedRetentionPolicy(tc.expected)
 			for _, sts := range []*appsv1.StatefulSet{
-				resources.CoordinatorStatefulSet(cluster),
-				resources.DataStatefulSet(cluster),
+				coordinatorStatefulSet(cluster),
+				dataStatefulSet(cluster),
 			} {
 				got := sts.Spec.PersistentVolumeClaimRetentionPolicy
 				if diff := cmp.Diff(want, got); diff != "" {
@@ -921,7 +987,7 @@ func TestStatefulSetPortsAndClusterDomain(t *testing.T) {
 	cluster := tunedCluster()
 
 	t.Run(coordinatorComponent, func(t *testing.T) {
-		container := resources.CoordinatorStatefulSet(cluster).Spec.Template.Spec.Containers[0]
+		container := coordinatorStatefulSet(cluster).Spec.Template.Spec.Containers[0]
 
 		wantPorts := []corev1.ContainerPort{
 			{Name: boltPortName, ContainerPort: customBoltPort},
@@ -948,7 +1014,7 @@ func TestStatefulSetPortsAndClusterDomain(t *testing.T) {
 	})
 
 	t.Run(dataComponent, func(t *testing.T) {
-		container := resources.DataStatefulSet(cluster).Spec.Template.Spec.Containers[0]
+		container := dataStatefulSet(cluster).Spec.Template.Spec.Containers[0]
 
 		wantPorts := []corev1.ContainerPort{
 			{Name: boltPortName, ContainerPort: customBoltPort},
@@ -997,7 +1063,7 @@ func TestStatefulSetProbeOverrides(t *testing.T) {
 	}{
 		{
 			name: coordinatorComponent,
-			sts:  resources.CoordinatorStatefulSet(cluster),
+			sts:  coordinatorStatefulSet(cluster),
 			// Only the failure threshold was raised, so the timings default.
 			startup: tunedTCPProbe(customCoordinatorPort, 30, 10, 5),
 			// Timings tightened, failure threshold left at its default.
@@ -1006,7 +1072,7 @@ func TestStatefulSetProbeOverrides(t *testing.T) {
 		},
 		{
 			name:      dataComponent,
-			sts:       resources.DataStatefulSet(cluster),
+			sts:       dataStatefulSet(cluster),
 			startup:   tunedTCPProbe(customBoltPort, 4320, 15, 10),
 			readiness: tunedTCPProbe(customBoltPort, 20, 10, 5),
 			liveness:  tunedTCPProbe(customBoltPort, 6, 10, 5),
@@ -1038,7 +1104,7 @@ func TestStatefulSetResourceOverrides(t *testing.T) {
 	}{
 		{
 			name: coordinatorComponent,
-			sts:  resources.CoordinatorStatefulSet(cluster),
+			sts:  coordinatorStatefulSet(cluster),
 			want: corev1.ResourceRequirements{
 				Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("100m")},
 				Limits:   corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("512Mi")},
@@ -1046,7 +1112,7 @@ func TestStatefulSetResourceOverrides(t *testing.T) {
 		},
 		{
 			name: dataComponent,
-			sts:  resources.DataStatefulSet(cluster),
+			sts:  dataStatefulSet(cluster),
 			want: corev1.ResourceRequirements{
 				Requests: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("4Gi")},
 			},
@@ -1077,14 +1143,14 @@ func TestStatefulSetLabelOverrides(t *testing.T) {
 	}{
 		{
 			name:      coordinatorComponent,
-			sts:       resources.CoordinatorStatefulSet(cluster),
+			sts:       coordinatorStatefulSet(cluster),
 			component: coordinatorComponent,
 			stsLabels: map[string]string{tierLabel: "control"},
 			podLabels: map[string]string{teamLabel: platformTeam},
 		},
 		{
 			name:      dataComponent,
-			sts:       resources.DataStatefulSet(cluster),
+			sts:       dataStatefulSet(cluster),
 			component: dataComponent,
 			stsLabels: map[string]string{tierLabel: "storage"},
 			podLabels: map[string]string{teamLabel: dataComponent},
@@ -1126,7 +1192,7 @@ func TestStatefulSetCustomLabelsCannotOverrideIdentity(t *testing.T) {
 	}
 
 	want := expectedLabelsWith(coordinatorComponent, map[string]string{teamLabel: platformTeam})
-	sts := resources.CoordinatorStatefulSet(cluster)
+	sts := coordinatorStatefulSet(cluster)
 	for name, got := range map[string]map[string]string{
 		statefulSetKind: sts.Labels,
 		"pod":           sts.Spec.Template.Labels,
@@ -1151,7 +1217,7 @@ func TestStatefulSetExtraEnv(t *testing.T) {
 	}{
 		{
 			name: coordinatorComponent,
-			sts:  resources.CoordinatorStatefulSet(cluster),
+			sts:  coordinatorStatefulSet(cluster),
 			want: append(
 				append([]corev1.EnvVar{{
 					Name: "POD_NAME",
@@ -1164,7 +1230,7 @@ func TestStatefulSetExtraEnv(t *testing.T) {
 		},
 		{
 			name: dataComponent,
-			sts:  resources.DataStatefulSet(cluster),
+			sts:  dataStatefulSet(cluster),
 			want: append(
 				licenseEnv("memgraph-secrets", "MEMGRAPH_ENTERPRISE_LICENSE", "MEMGRAPH_ORGANIZATION_NAME"),
 				corev1.EnvVar{Name: "DATA_LABEL_ONE", Value: "one"},
