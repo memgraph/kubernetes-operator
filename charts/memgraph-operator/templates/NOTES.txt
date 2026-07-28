@@ -22,6 +22,11 @@ referencing a Secret that holds your Memgraph enterprise license:
       licenseKey: MEMGRAPH_ENTERPRISE_LICENSE
       organizationKey: MEMGRAPH_ORGANIZATION_NAME
 
+Save it as cluster.yaml and create it with apply, so that later edits — growing
+the cluster, for instance — stay a clean apply too:
+
+  kubectl apply -f cluster.yaml
+
 Follow the cluster reaching a registered, MAIN-elected state with:
 
   kubectl get mgc -w
