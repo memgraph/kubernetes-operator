@@ -27,6 +27,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -96,9 +97,9 @@ type clusterUnderTest struct {
 	dataInstances int32
 }
 
-// grownTo returns the same cluster with a different declared topology, which is
-// what the assertions switch to after a scale.
-func (c clusterUnderTest) grownTo(coordinators, dataInstances int32) clusterUnderTest {
+// withTopology returns the same cluster with a different declared topology,
+// which is what the assertions switch to after a scale in either direction.
+func (c clusterUnderTest) withTopology(coordinators, dataInstances int32) clusterUnderTest {
 	c.coordinators = coordinators
 	c.dataInstances = dataInstances
 	return c
@@ -350,12 +351,14 @@ spec:
 	})
 })
 
-// Growing a live cluster: the end-to-end proof that raising either count
-// registers the members it adds without human action. It gets its own container
-// and namespace because it needs a cluster it may reshape, and its teardown is
-// awaited — eight Memgraph pods are a large share of a Kind cluster's capacity,
-// which the scenarios that may run after it need back.
-var _ = Describe("MemgraphCluster topology scale-up", Ordered, func() {
+// Scaling a live cluster in both directions: the end-to-end proof that raising a
+// count registers the members it adds, and that lowering the data-instance count
+// retires the members it drops safely — MAIN moved off them, unregistered before
+// their pods go. It gets its own container and namespace because it needs a
+// cluster it may reshape, and its teardown is awaited — eight Memgraph pods are a
+// large share of a Kind cluster's capacity, which the scenarios that may run
+// after it need back.
+var _ = Describe("MemgraphCluster topology scaling", Ordered, func() {
 	const scalingNamespace = "memgraph-e2e-scaling"
 	const scalingClusterName = "scaling"
 
@@ -364,7 +367,7 @@ var _ = Describe("MemgraphCluster topology scale-up", Ordered, func() {
 	initial := clusterUnderTest{
 		namespace: scalingNamespace, name: scalingClusterName, coordinators: 3, dataInstances: 2,
 	}
-	grown := initial.grownTo(5, 3)
+	grown := initial.withTopology(5, 3)
 
 	BeforeAll(func() {
 		license, organization := licenseFromEnv()
@@ -452,6 +455,74 @@ spec:
 		Expect(coordinators).To(Equal("5"))
 		Expect(dataInstances).To(Equal("3"))
 	})
+
+	// The shrink, against the 5/3 cluster the growth spec left behind (Ordered),
+	// with MAIN deliberately parked on the ordinal that has to go — the case the
+	// whole safety argument is about: Memgraph refuses to unregister a MAIN, so the
+	// operator has to move it first, and it has to unregister before the pod goes
+	// or the coordinators are left expecting an instance that is not there.
+	It("retires a data instance holding MAIN and only then sheds its pod", func() {
+		shrunk := grown.withTopology(5, 2)
+		const retiring = "instance_2"
+
+		By("parking MAIN on the data instance the shrink retires")
+		// Retried as a whole: the operator promotes a survivor itself if it
+		// observes the cluster MAIN-less between the two statements.
+		Eventually(func(g Gomega) {
+			g.Expect(grown.makeMain(retiring)).To(Succeed())
+			view, err := grown.leaderView()
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(mainOf(view)).To(Equal(retiring))
+		}, 5*time.Minute, 10*time.Second).Should(Succeed())
+
+		By("lowering the data-instance count on the live cluster")
+		cmd := exec.Command("kubectl", "patch", "memgraphcluster", scalingClusterName,
+			"-n", scalingNamespace, "--type=merge", "-p",
+			fmt.Sprintf(`{"spec":{"dataInstances":%d}}`, shrunk.dataInstances))
+		_, err := utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred(), "the operator must accept a lowered topology count")
+
+		By("waiting for the retiring instance to leave the cluster while its pod is still there")
+		Eventually(func(g Gomega) {
+			view, err := shrunk.leaderView()
+			g.Expect(err).NotTo(HaveOccurred())
+			names := instanceNames(view)
+			if slices.Contains(names, retiring) {
+				// Unregistration comes first, so the coordinators never see a
+				// registered instance's pod disappear. Catching the reverse order
+				// is the point of this poll, and it is not something to retry.
+				replicas, err := shrunk.replicas("data")
+				g.Expect(err).NotTo(HaveOccurred())
+				if replicas != "3" {
+					StopTrying(fmt.Sprintf(
+						"the data StatefulSet was scaled to %s replicas while %s was still registered",
+						replicas, retiring)).Now()
+				}
+			}
+			g.Expect(names).NotTo(ContainElement(retiring))
+		}, 10*time.Minute, 5*time.Second).Should(Succeed())
+
+		By("waiting for its pod to be shed")
+		Eventually(func(g Gomega) {
+			g.Expect(shrunk.replicas("data")).To(Equal("2"))
+			g.Expect(shrunk.podExists("data", 2)).To(BeFalse())
+		}, 5*time.Minute, 5*time.Second).Should(Succeed())
+
+		By("confirming the shrunk cluster is registered, converged, and led by a survivor")
+		Eventually(shrunk.verifyRegistered, 10*time.Minute, 10*time.Second).Should(Succeed())
+		shrunk.awaitConverged(5 * time.Minute)
+		_, dataInstances := shrunk.registeredCounts()
+		Expect(dataInstances).To(Equal("2"))
+		view, err := shrunk.leaderView()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(mainOf(view)).To(BeElementOf("instance_0", "instance_1"))
+
+		By("confirming the retired instance's claims are kept by the default retention policy")
+		claims, err := listPVCs(scalingNamespace)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(claims).To(ContainElement(fmt.Sprintf("lib-storage-%s-data-2", scalingClusterName)),
+			"whenScaled follows spec.storage.retentionPolicy, which defaults to Retain")
+	})
 })
 
 // listPVCs returns the names of the PersistentVolumeClaims in a namespace,
@@ -529,13 +600,29 @@ func (c clusterUnderTest) registeredCounts() (string, string) {
 }
 
 // replicas reads the replica count the operator applied to a role's StatefulSet.
-func (c clusterUnderTest) replicas(component string) string {
-	GinkgoHelper()
+// The error is returned rather than asserted so the value can be read inside a
+// polled assertion, where a transient kubectl failure has to retry.
+func (c clusterUnderTest) replicas(component string) (string, error) {
 	cmd := exec.Command("kubectl", "get", "statefulset", c.name+"-"+component, "-n", c.namespace,
 		"-o", "jsonpath={.spec.replicas}")
 	output, err := utils.Run(cmd)
-	Expect(err).NotTo(HaveOccurred(), "Failed to read the %s StatefulSet's replicas", component)
-	return strings.TrimSpace(output)
+	if err != nil {
+		return "", fmt.Errorf("reading the %s StatefulSet's replicas: %w", component, err)
+	}
+	return strings.TrimSpace(output), nil
+}
+
+// podExists reports whether the pod with the given ordinal of a role's
+// StatefulSet is still there at all — the state a shed pod leaves behind once the
+// StatefulSet controller is done with it.
+func (c clusterUnderTest) podExists(component string, ordinal int32) (bool, error) {
+	cmd := exec.Command("kubectl", "get", "pod", fmt.Sprintf("%s-%s-%d", c.name, component, ordinal),
+		"-n", c.namespace, "--ignore-not-found", "-o", "name")
+	output, err := utils.Run(cmd)
+	if err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(output) != "", nil
 }
 
 // wipeInstanceRegistration unregisters the named data instance on the
@@ -731,6 +818,15 @@ type instanceRow struct {
 // reports their roles (followers show them as unknown), so a view containing a
 // MAIN is the leader's authoritative view.
 func (c clusterUnderTest) leaderView() ([]instanceRow, error) {
+	_, view, err := c.leaderPod()
+	return view, err
+}
+
+// leaderPod locates the coordinator leader — the coordinator whose view reports a
+// MAIN — and returns its pod name together with that view. Management queries a
+// test issues by hand have to run there: only the leader holds the authoritative
+// cluster state and accepts a mutation of it.
+func (c clusterUnderTest) leaderPod() (string, []instanceRow, error) {
 	var errs []error
 	for ordinal := range c.coordinators {
 		pod := fmt.Sprintf("%s-coordinator-%d", c.name, ordinal)
@@ -739,14 +835,58 @@ func (c clusterUnderTest) leaderView() ([]instanceRow, error) {
 			errs = append(errs, err)
 			continue
 		}
-		for _, instance := range view {
-			if instance.role == roleMain {
-				return view, nil
-			}
+		if mainOf(view) != "" {
+			return pod, view, nil
 		}
 		errs = append(errs, fmt.Errorf("%s reports no MAIN among %d instances", pod, len(view)))
 	}
-	return nil, errors.Join(errs...)
+	return "", nil, errors.Join(errs...)
+}
+
+// makeMain moves MAIN onto the named data instance by hand, which is how a spec
+// arranges for the instance a scale-down retires to be the one holding MAIN.
+//
+// The demotion and the promotion go out as one mgconsole invocation because the
+// operator promotes a survivor itself the moment it observes a MAIN-less cluster:
+// the window between the two statements is the whole point of keeping them
+// together. It is a no-op when the instance already is MAIN, so a caller can
+// simply retry it.
+func (c clusterUnderTest) makeMain(name string) error {
+	pod, view, err := c.leaderPod()
+	if err != nil {
+		return err
+	}
+	main := mainOf(view)
+	if main == name {
+		return nil
+	}
+	query := fmt.Sprintf("DEMOTE INSTANCE %s; SET INSTANCE %s TO MAIN;", main, name)
+	cmd := exec.Command("kubectl", "exec", pod, "-n", c.namespace, "-c", "memgraph", "--",
+		"bash", "-c", fmt.Sprintf("echo '%s' | mgconsole", query))
+	if _, err := utils.Run(cmd); err != nil {
+		return fmt.Errorf("moving MAIN from %s to %s on %s: %w", main, name, pod, err)
+	}
+	return nil
+}
+
+// mainOf returns the name of the data instance a view reports as MAIN, or the
+// empty string when it reports none.
+func mainOf(view []instanceRow) string {
+	for _, instance := range view {
+		if instance.role == roleMain {
+			return instance.name
+		}
+	}
+	return ""
+}
+
+// instanceNames are the instance names a SHOW INSTANCES view lists.
+func instanceNames(view []instanceRow) []string {
+	names := make([]string, 0, len(view))
+	for _, instance := range view {
+		names = append(names, instance.name)
+	}
+	return names
 }
 
 // showInstances runs SHOW INSTANCES through mgconsole inside the given

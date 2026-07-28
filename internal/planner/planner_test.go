@@ -30,9 +30,14 @@ import (
 	"github.com/memgraph/kubernetes-operator/internal/resources"
 )
 
-// firstInstance is the data instance the planner promotes at bootstrap: the
-// first one the topology declares.
-const firstInstance = "instance_0"
+// The data instances the cases below name. firstInstance is the one a bootstrap
+// promotes — the first the topology declares — and the one a shrink keeps; the
+// higher ordinals are what a lowered count retires.
+const (
+	firstInstance  = "instance_0"
+	secondInstance = "instance_1"
+	thirdInstance  = "instance_2"
+)
 
 // declaredTopology is the canonical 3-coordinator, 2-data-instance fixture
 // the cases below diff observed cluster states against.
@@ -44,6 +49,25 @@ func declaredTopology() planner.Topology {
 // coordinators and 3 data instances.
 func grownTopology() planner.Topology {
 	return topologyOf(5, 3)
+}
+
+// shrunkTopology is a cluster whose dataInstances count was lowered to the given
+// number while its StatefulSet still runs `running` data pods: the ordinals in
+// between are retiring.
+func shrunkTopology(declared, running int) planner.Topology {
+	topology := topologyOf(3, declared)
+	for i := declared; i < running; i++ {
+		topology.RetiringDataInstances = append(topology.RetiringDataInstances, dataInstanceSpec(i))
+	}
+	return topology
+}
+
+// mixedTopology is one edit moving both counts in opposite directions: the
+// coordinators grow from 3 to 5 while the data instances shrink from 3 to 2.
+func mixedTopology() planner.Topology {
+	topology := topologyOf(5, 2)
+	topology.RetiringDataInstances = append(topology.RetiringDataInstances, dataInstanceSpec(2))
+	return topology
 }
 
 func topologyOf(coordinators int32, dataInstances int) planner.Topology {
@@ -238,7 +262,7 @@ func TestPlan(t *testing.T) {
 				observedDataInstance(1, memgraph.RoleReplica),
 			},
 			want: []planner.Command{
-				planner.SetInstanceToMain{Name: "instance_1"},
+				planner.SetInstanceToMain{Name: secondInstance},
 			},
 		},
 		{
@@ -301,6 +325,139 @@ func TestPlan(t *testing.T) {
 				observedDataInstance(2, memgraph.RoleReplica),
 			},
 			want: nil,
+		},
+		// A lowered count with MAIN on a survivor needs nothing but the removal:
+		// the cluster keeps serving from the instance it is already serving from.
+		{
+			name: "a retiring instance is unregistered with the surviving MAIN untouched",
+			observed: []memgraph.Instance{
+				observedCoordinator(1, memgraph.RoleLeader),
+				observedCoordinator(2, memgraph.RoleFollower),
+				observedCoordinator(3, memgraph.RoleFollower),
+				observedDataInstance(0, memgraph.RoleMain),
+				observedDataInstance(1, memgraph.RoleReplica),
+				observedDataInstance(2, memgraph.RoleReplica),
+			},
+			declared: ptr.To(shrunkTopology(2, 3)),
+			want: []planner.Command{
+				planner.UnregisterInstance{Name: thirdInstance},
+			},
+		},
+		// MAIN on the ordinal that is going away: Memgraph refuses to unregister
+		// the MAIN, so it is demoted, a survivor is promoted in its place, and only
+		// then is it removed — all in this one plan.
+		{
+			name: "a retiring MAIN is demoted, a survivor promoted, and only then unregistered",
+			observed: []memgraph.Instance{
+				observedCoordinator(1, memgraph.RoleLeader),
+				observedCoordinator(2, memgraph.RoleFollower),
+				observedCoordinator(3, memgraph.RoleFollower),
+				observedDataInstance(0, memgraph.RoleReplica),
+				observedDataInstance(1, memgraph.RoleReplica),
+				observedDataInstance(2, memgraph.RoleMain),
+			},
+			declared: ptr.To(shrunkTopology(2, 3)),
+			want: []planner.Command{
+				planner.DemoteInstance{Name: thirdInstance},
+				planner.SetInstanceToMain{Name: firstInstance},
+				planner.UnregisterInstance{Name: thirdInstance},
+			},
+		},
+		// The promotion follows the same rule as at bootstrap, so a survivor the
+		// leader cannot reach is not the one that gets MAIN.
+		{
+			name: "a retiring MAIN hands MAIN to the lowest reachable survivor",
+			observed: []memgraph.Instance{
+				observedCoordinator(1, memgraph.RoleLeader),
+				observedCoordinator(2, memgraph.RoleFollower),
+				observedCoordinator(3, memgraph.RoleFollower),
+				downDataInstance(0),
+				observedDataInstance(1, memgraph.RoleReplica),
+				observedDataInstance(2, memgraph.RoleMain),
+			},
+			declared: ptr.To(shrunkTopology(2, 3)),
+			want: []planner.Command{
+				planner.DemoteInstance{Name: thirdInstance},
+				planner.SetInstanceToMain{Name: secondInstance},
+				planner.UnregisterInstance{Name: thirdInstance},
+			},
+		},
+		{
+			name: "several retiring instances are removed down to a single survivor",
+			observed: []memgraph.Instance{
+				observedCoordinator(1, memgraph.RoleLeader),
+				observedCoordinator(2, memgraph.RoleFollower),
+				observedCoordinator(3, memgraph.RoleFollower),
+				observedDataInstance(0, memgraph.RoleReplica),
+				observedDataInstance(1, memgraph.RoleMain),
+				observedDataInstance(2, memgraph.RoleReplica),
+			},
+			declared: ptr.To(shrunkTopology(1, 3)),
+			want: []planner.Command{
+				planner.DemoteInstance{Name: secondInstance},
+				planner.SetInstanceToMain{Name: firstInstance},
+				planner.UnregisterInstance{Name: secondInstance},
+				planner.UnregisterInstance{Name: thirdInstance},
+			},
+		},
+		// Read-before-write: a retiring member the cluster no longer knows about
+		// gets no command, so a reconcile that crashed between the unregistration
+		// and the shrink re-plans to just the rest of the work.
+		{
+			name: "an already-unregistered retiring instance is not unregistered again",
+			observed: []memgraph.Instance{
+				observedCoordinator(1, memgraph.RoleLeader),
+				observedCoordinator(2, memgraph.RoleFollower),
+				observedCoordinator(3, memgraph.RoleFollower),
+				observedDataInstance(0, memgraph.RoleMain),
+				observedDataInstance(1, memgraph.RoleReplica),
+				observedDataInstance(2, memgraph.RoleReplica),
+			},
+			declared: ptr.To(shrunkTopology(2, 4)),
+			want: []planner.Command{
+				planner.UnregisterInstance{Name: thirdInstance},
+			},
+		},
+		// Both counts change in one edit, in opposite directions: the coordinators
+		// grow while the data instances shrink, and each role's work is planned
+		// independently of the other's.
+		{
+			name: "a mixed grow-and-shrink adds coordinators and retires a data instance",
+			observed: []memgraph.Instance{
+				observedCoordinator(1, memgraph.RoleLeader),
+				observedCoordinator(2, memgraph.RoleFollower),
+				observedCoordinator(3, memgraph.RoleFollower),
+				observedDataInstance(0, memgraph.RoleReplica),
+				observedDataInstance(1, memgraph.RoleReplica),
+				observedDataInstance(2, memgraph.RoleMain),
+			},
+			declared: ptr.To(mixedTopology()),
+			want: []planner.Command{
+				planner.AddCoordinator{Coordinator: coordinatorSpec(4)},
+				planner.AddCoordinator{Coordinator: coordinatorSpec(5)},
+				planner.DemoteInstance{Name: thirdInstance},
+				planner.SetInstanceToMain{Name: firstInstance},
+				planner.UnregisterInstance{Name: thirdInstance},
+			},
+		},
+		// The retiring range is bounded by the operator's own prior apply, which is
+		// what keeps an instance a human registered out of it — even one at a
+		// higher ordinal than everything the operator ever ran.
+		{
+			name: "an undeclared instance outside the retiring range is left registered",
+			observed: []memgraph.Instance{
+				observedCoordinator(1, memgraph.RoleLeader),
+				observedCoordinator(2, memgraph.RoleFollower),
+				observedCoordinator(3, memgraph.RoleFollower),
+				observedDataInstance(0, memgraph.RoleMain),
+				observedDataInstance(1, memgraph.RoleReplica),
+				observedDataInstance(2, memgraph.RoleReplica),
+				observedDataInstance(3, memgraph.RoleReplica),
+			},
+			declared: ptr.To(shrunkTopology(2, 3)),
+			want: []planner.Command{
+				planner.UnregisterInstance{Name: thirdInstance},
+			},
 		},
 	}
 

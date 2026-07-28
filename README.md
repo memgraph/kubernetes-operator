@@ -86,7 +86,7 @@ memgraph   3              2      instance_0   True    True        4m12s
 - **`READY`** is True once a MAIN is elected, i.e. the cluster serves writes.
 - **`CONVERGED`** is True once every declared coordinator and data instance is registered and reported healthy, and both StatefulSets run the declared number of replicas.
 
-`kubectl get mgc -n memgraph -o wide` adds how many of each role's declared members the cluster actually has registered (`REGISTERED-COORDINATORS`, `REGISTERED-DATA`), which is what a scale-up is watched through.
+`kubectl get mgc -n memgraph -o wide` adds how many of each role's declared members the cluster actually has registered (`REGISTERED-COORDINATORS`, `REGISTERED-DATA`), which is what a scale is watched through.
 
 To block a script or a GitOps step on the cluster being usable:
 
@@ -175,21 +175,27 @@ The MVP is deliberately "provision, bootstrap, observe". It does:
 - bootstrap HA: add the coordinators, register the data instances, and promote the initial MAIN once;
 - re-register continuously: every reconcile compares `SHOW INSTANCES` on the coordinator leader against the declared topology and issues only the missing registrations, so an instance that loses its registration state (say, after being rescheduled onto a fresh node) rejoins without human action;
 - **grow a live cluster**: raise `coordinators` or `dataInstances` (both in one edit if you like, in any step size) and the added pods are provisioned and registered by the same diff that restores a lost registration — no manual `ADD COORDINATOR` or `REGISTER INSTANCE`;
+- **shrink the data instances**: lower `dataInstances` and the instances above the new count are retired — MAIN moved off them if one of them holds it, then `UNREGISTER INSTANCE`, and only then are their pods shed, so the coordinators never expect an instance whose pod is gone;
 - report the observed MAIN, the registered member counts, and the readiness and convergence conditions on the resource's status.
 
-Growing is one edit, and `Converged` tells you when it is finished:
+Scaling is one edit, and `Converged` tells you when it is finished:
 
 ```sh
 kubectl patch mgc memgraph -n memgraph --type=merge -p '{"spec":{"coordinators":5,"dataInstances":3}}'
 kubectl wait --namespace memgraph --for=condition=Converged memgraphcluster/memgraph --timeout=10m
 ```
 
+A scale-down reports `Converged=False` with reason `RetirementInProgress`, naming the instances on their way out, until their pods are gone. Two things to know about it:
+
+- **A retiring pod that cannot become ready blocks its own removal.** The operator only touches the cluster when every pod of both StatefulSets is ready, and until the shrink is applied the retiring pods still belong to the data StatefulSet. So an instance that is stuck (crash-looping, unschedulable, wedged in a snapshot restore) keeps its own retirement waiting, and the resource reports `WorkloadsNotReady` rather than the operator writing to a cluster whose state it only half knows. Fix the pod, or delete it if it is genuinely unrecoverable, and the retirement continues.
+- **The claims of a retired instance follow `spec.storage.retentionPolicy`**, the same knob that decides what happens to storage when the cluster is deleted — `Retain` (the default) keeps them, so a shrink made by accident loses no data, and re-raising the count reattaches them.
+
 What it does not do yet:
 
-- **Scaling down.** `coordinators` must stay odd and at or above three, `dataInstances` at or above one — both enforced at creation and on every update. *Lowering* a count is accepted by admission but not carried out: taking a pod away means unregistering a cluster member first, and the operator has no removal path yet, so it holds the StatefulSet at its current size and reports `Converged=False` with reason `ScaleInProgress` until the count is raised back. Scale-down with MAIN- and quorum-safety is the next item on the roadmap.
-- **Failover.** The operator issues `SET INSTANCE TO MAIN` exactly once, at bootstrap, when no MAIN exists. After that, leadership belongs entirely to the Raft coordinators; the operator only observes and reports it, so two control systems never fight over which instance is MAIN.
+- **Scaling the coordinators down.** `coordinators` must stay odd and at or above three, `dataInstances` at or above one — all enforced at creation and on every update. Lowering `coordinators` is accepted by admission but not carried out: dropping a coordinator means removing a Raft member, which the operator does not do yet, so it holds the StatefulSet at its current size and reports `Converged=False` with reason `ScaleInProgress` until the count is raised back.
+- **Failover.** The operator promotes a MAIN only when the cluster has none: once at bootstrap, and once more when it demotes an instance that is retiring. It never overrides a MAIN that is staying — leadership belongs to the Raft coordinators, so two control systems never fight over which instance is MAIN.
 - **Other day-2 operations**: orchestrated or rolling version upgrades, backup and restore, storage-mode changes.
-- **Removing instances**: there is no `REMOVE COORDINATOR` or `UNREGISTER INSTANCE`, and no finalizer-based storage cleanup. The operator has no destructive code path.
+- **Removing coordinators**: there is no `REMOVE COORDINATOR`, and no finalizer-based storage cleanup — deleting storage is left entirely to the StatefulSet's own retention policy.
 - **External access** of any kind — no LoadBalancer, NodePort, ingress or gateway. Access is in-cluster (or `kubectl port-forward`) only; the approach is expected to change, so it was deliberately deferred rather than shipped and broken later.
 - **TLS**, for Bolt or intra-cluster traffic.
 - **Bolt authentication** — the operator connects to the coordinators unauthenticated, so clusters must not enable auth yet.

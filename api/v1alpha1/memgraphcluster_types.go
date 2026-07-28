@@ -168,6 +168,13 @@ const (
 	// declares, so the declared topology is not fully realized yet.
 	ReasonScaleInProgress = "ScaleInProgress"
 
+	// ReasonRetirementInProgress is set while a lowered dataInstances count is
+	// being carried out: the instances beyond the declared count are still
+	// members of the cluster, or their pods are still being shed. The message
+	// names them, so a scale-down that stalls says which instance it is waiting
+	// on.
+	ReasonRetirementInProgress = "RetirementInProgress"
+
 	// ReasonMainElected is set when a data instance is observed as MAIN.
 	ReasonMainElected = "MainElected"
 

@@ -64,6 +64,20 @@ func TestSetInstanceToMainQuery(t *testing.T) {
 	}
 }
 
+func TestDemoteInstanceQuery(t *testing.T) {
+	got := demoteInstanceQuery(testInstanceName)
+	if want := "DEMOTE INSTANCE instance_1"; got != want {
+		t.Errorf("demoteInstanceQuery() = %q, want %q", got, want)
+	}
+}
+
+func TestUnregisterInstanceQuery(t *testing.T) {
+	got := unregisterInstanceQuery(testInstanceName)
+	if want := "UNREGISTER INSTANCE instance_1"; got != want {
+		t.Errorf("unregisterInstanceQuery() = %q, want %q", got, want)
+	}
+}
+
 func TestInstanceFromRecord(t *testing.T) {
 	record := &db.Record{
 		Keys: []string{

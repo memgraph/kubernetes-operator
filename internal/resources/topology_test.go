@@ -22,11 +22,18 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"k8s.io/utils/ptr"
 
+	memgraphcomv1alpha1 "github.com/memgraph/kubernetes-operator/api/v1alpha1"
 	"github.com/memgraph/kubernetes-operator/internal/memgraph"
 	"github.com/memgraph/kubernetes-operator/internal/planner"
 	"github.com/memgraph/kubernetes-operator/internal/resources"
 )
+
+// secondDataInstance is the data instance on pod ordinal 1: the one the default
+// topology's second replica registers as, and the first one a lowered count
+// retires.
+const secondDataInstance = "instance_1"
 
 func TestDeclaredTopologyDefaults(t *testing.T) {
 	got := resources.DeclaredTopology(minimalCluster())
@@ -67,7 +74,7 @@ func TestDeclaredTopologyDefaults(t *testing.T) {
 				ReplicationServer: dataFQDN(0) + ":20000",
 			},
 			{
-				Name:              "instance_1",
+				Name:              secondDataInstance,
 				BoltServer:        dataFQDN(1) + ":7687",
 				ManagementServer:  dataFQDN(1) + ":10000",
 				ReplicationServer: dataFQDN(1) + ":20000",
@@ -88,6 +95,81 @@ func TestDeclaredTopologyFollowsReplicaCounts(t *testing.T) {
 	}
 	if len(got.DataInstances) != 3 {
 		t.Errorf("DeclaredTopology() declared %d data instances, want 3", len(got.DataInstances))
+	}
+}
+
+// TestRetiringDataInstances covers the range a lowered dataInstances count
+// sheds: the pod ordinals the applied StatefulSet still runs beyond the declared
+// count, and nothing else. The bounds are what keep an instance the operator did
+// not create out of the range, so they are pinned in both directions.
+func TestRetiringDataInstances(t *testing.T) {
+	cases := []struct {
+		name    string
+		cluster *memgraphcomv1alpha1.MemgraphCluster
+		applied int32
+		want    []string
+	}{
+		{
+			name:    "a cluster holding its size retires nothing",
+			cluster: minimalCluster(),
+			applied: 2,
+		},
+		{
+			name:    "a growing cluster retires nothing",
+			cluster: minimalCluster(),
+			applied: 1,
+		},
+		{
+			name:    "the highest ordinal retires when the count drops by one",
+			cluster: dataInstancesCluster(2),
+			applied: 3,
+			want:    []string{"instance_2"},
+		},
+		{
+			name:    "every ordinal above the declared count retires at once",
+			cluster: dataInstancesCluster(1),
+			applied: 4,
+			want:    []string{secondDataInstance, "instance_2", "instance_3"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var names []string
+			for _, instance := range resources.RetiringDataInstances(tc.cluster, tc.applied) {
+				names = append(names, instance.Name)
+			}
+			if diff := cmp.Diff(tc.want, names); diff != "" {
+				t.Errorf("RetiringDataInstances() mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// dataInstancesCluster is the minimal cluster with a lowered dataInstances count,
+// the spec side of a scale-down.
+func dataInstancesCluster(dataInstances int32) *memgraphcomv1alpha1.MemgraphCluster {
+	cluster := minimalCluster()
+	cluster.Spec.DataInstances = ptr.To(dataInstances)
+	return cluster
+}
+
+// A retiring instance is registered under the addresses the operator registered
+// it with, so it must be described exactly as the declared instance on the same
+// ordinal was — otherwise the plan would aim its removal at a name the cluster
+// does not know.
+func TestRetiringDataInstanceMatchesItsDeclaredForm(t *testing.T) {
+	// The tuned cluster (non-default ports and cluster domain) declares two
+	// instances. Lowering the count to one leaves instance_1 retiring, which must
+	// equal the instance_1 the same spec declared before the edit, verbatim.
+	declared := resources.DeclaredTopology(tunedCluster()).DataInstances
+
+	shrunk := tunedCluster()
+	shrunk.Spec.DataInstances = ptr.To(int32(1))
+	got := resources.RetiringDataInstances(shrunk, int32(len(declared)))
+
+	if diff := cmp.Diff(declared[1:], got); diff != "" {
+		t.Errorf("RetiringDataInstances() mismatch (-want +got):\n%s", diff)
 	}
 }
 
@@ -156,7 +238,7 @@ func TestDeclaredTopologyPortsAndClusterDomain(t *testing.T) {
 				ReplicationServer: dataFQDN(0) + ":20001",
 			},
 			{
-				Name:              "instance_1",
+				Name:              secondDataInstance,
 				BoltServer:        dataFQDN(1) + ":7777",
 				ManagementServer:  dataFQDN(1) + ":10001",
 				ReplicationServer: dataFQDN(1) + ":20001",

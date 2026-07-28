@@ -18,10 +18,15 @@ limitations under the License.
 // observed Memgraph HA cluster toward its declared topology. The logic is a
 // pure diff — declared topology plus observed SHOW INSTANCES output in,
 // commands out (empty when converged) — so reconciliation stays idempotent
-// and read-before-write: only missing registrations are re-issued, and the
-// initial MAIN promotion happens exactly once, when no MAIN exists. After
-// bootstrap, failover belongs to the Raft coordinators; the planner never
-// overrides an existing MAIN.
+// and read-before-write: only missing registrations are re-issued, and a MAIN is
+// promoted only when the cluster has none. After bootstrap, failover belongs to
+// the Raft coordinators; the planner never overrides a MAIN that is staying.
+//
+// Members a lowered replica count is retiring are the one thing the planner
+// removes, and it can order the whole removal in a single pass because it
+// predicts every intermediate state: a retiring MAIN is demoted, a survivor is
+// promoted in its place, and the retiring members are then unregistered — so no
+// UNREGISTER INSTANCE is ever aimed at a MAIN, which Memgraph would refuse.
 package planner
 
 import (
@@ -40,9 +45,12 @@ type Topology struct {
 
 	// RetiringCoordinators and RetiringDataInstances are the members a lowered
 	// replica count is shedding: still registered and still running, but no
-	// longer declared. They are empty while a cluster grows or holds its size,
-	// which is every case the operator handles today — removing a member from
-	// the cluster is not implemented yet, so a plan issues no command for them.
+	// longer declared. They are empty while a cluster grows or holds its size.
+	//
+	// A retiring data instance is demoted if it holds MAIN and then
+	// unregistered, so the cluster stops expecting it before its pod goes.
+	// RetiringCoordinators is still always empty: removing a Raft member is not
+	// implemented yet, so a plan issues no command for one.
 	RetiringCoordinators  []memgraph.CoordinatorSpec
 	RetiringDataInstances []memgraph.DataInstanceSpec
 }
@@ -81,7 +89,8 @@ func (c RegisterInstance) String() string {
 	return "REGISTER INSTANCE " + c.Instance.Name
 }
 
-// SetInstanceToMain promotes the named data instance to MAIN at bootstrap.
+// SetInstanceToMain promotes the named data instance to MAIN: at bootstrap,
+// when the cluster has no MAIN yet, and after a retiring MAIN was demoted.
 type SetInstanceToMain struct {
 	Name string
 }
@@ -95,16 +104,59 @@ func (c SetInstanceToMain) String() string {
 	return fmt.Sprintf("SET INSTANCE %s TO MAIN", c.Name)
 }
 
+// DemoteInstance turns a retiring MAIN back into a replica, which is what makes
+// it unregisterable. It is only ever aimed at an instance on its way out of the
+// cluster: demoting one that is staying would be the operator overriding a
+// failover decision that belongs to the coordinators.
+type DemoteInstance struct {
+	Name string
+}
+
+// Run implements Command.
+func (c DemoteInstance) Run(ctx context.Context, client memgraph.Client) error {
+	return client.DemoteInstance(ctx, c.Name)
+}
+
+func (c DemoteInstance) String() string {
+	return "DEMOTE INSTANCE " + c.Name
+}
+
+// UnregisterInstance removes a retiring data instance from the cluster, so the
+// coordinators stop expecting it before its pod is shed.
+type UnregisterInstance struct {
+	Name string
+}
+
+// Run implements Command.
+func (c UnregisterInstance) Run(ctx context.Context, client memgraph.Client) error {
+	return client.UnregisterInstance(ctx, c.Name)
+}
+
+func (c UnregisterInstance) String() string {
+	return "UNREGISTER INSTANCE " + c.Name
+}
+
 // Plan diffs the declared topology against the observed instances and returns
 // the commands still needed, in execution order: coordinators before data
-// instances (registration requires a formed Raft cluster), the initial MAIN
-// promotion last. Instances the cluster knows but the topology does not
-// declare are left untouched — unregistration is out of scope for v1.
+// instances (registration requires a formed Raft cluster), then the retirement
+// of the members a lowered count sheds — demote a retiring MAIN, promote a
+// survivor in its place, unregister every retiring member. The promotion sits
+// between the two so that no UNREGISTER INSTANCE is ever aimed at an observed
+// MAIN, and so the cluster is MAIN-less only for the few milliseconds between
+// two queries of the same pass.
+//
+// Instances the cluster knows but the topology neither declares nor retires are
+// left untouched: the retiring set is bounded by the operator's own prior apply,
+// so an instance a human registered is never removed.
 func Plan(declared Topology, observed []memgraph.Instance) []Command {
 	registered := index(observed)
+	retiring := retiringNames(declared)
+
+	// A MAIN on its way out does not count as one: it is demoted below, and the
+	// cluster needs a survivor promoted in its place.
 	hasMain := false
 	for _, instance := range observed {
-		hasMain = hasMain || instance.IsMain()
+		hasMain = hasMain || (instance.IsMain() && !retiring[instance.Name])
 	}
 
 	var commands []Command
@@ -118,8 +170,18 @@ func Plan(declared Topology, observed []memgraph.Instance) []Command {
 			commands = append(commands, RegisterInstance{Instance: instance})
 		}
 	}
+	for _, instance := range declared.RetiringDataInstances {
+		if observed, ok := registered[instance.Name]; ok && observed.IsMain() {
+			commands = append(commands, DemoteInstance{Name: instance.Name})
+		}
+	}
 	if !hasMain && len(declared.DataInstances) > 0 {
 		commands = append(commands, SetInstanceToMain{Name: promotionTarget(declared, registered)})
+	}
+	for _, instance := range declared.RetiringDataInstances {
+		if _, ok := registered[instance.Name]; ok {
+			commands = append(commands, UnregisterInstance{Name: instance.Name})
+		}
 	}
 	return commands
 }
@@ -142,6 +204,16 @@ func Registered(declared Topology, observed []memgraph.Instance) (coordinators, 
 		}
 	}
 	return coordinators, dataInstances
+}
+
+// retiringNames is the set of data instances the topology is shedding, keyed by
+// the name they are registered under.
+func retiringNames(declared Topology) map[string]bool {
+	retiring := make(map[string]bool, len(declared.RetiringDataInstances))
+	for _, instance := range declared.RetiringDataInstances {
+		retiring[instance.Name] = true
+	}
+	return retiring
 }
 
 // index keys the observed cluster view by instance name.
@@ -167,6 +239,10 @@ func coordinatorRegistered(registered map[string]memgraph.Instance, coordinator 
 // Promoting a down instance would only write the intent to Raft and leave the
 // cluster MAIN-less until the coordinators retried it, so an instance that is
 // known to be reachable is preferred over a lower-ordinal one that is not.
+//
+// Only declared instances are candidates, which is what makes the rule serve a
+// retirement too: promoting a survivor is the same choice as promoting at
+// bootstrap, and a member on its way out can never be the target.
 //
 // The first declared instance is the fallback, which is what a fresh bootstrap
 // uses: nothing is observed yet at the point its registrations are planned.

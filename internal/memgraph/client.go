@@ -16,9 +16,10 @@ limitations under the License.
 
 // Package memgraph provides the narrow client surface the operator uses to
 // drive a Memgraph high-availability cluster over Bolt: show instances, add
-// coordinator, register instance, set main. All higher layers depend on the
-// Client and Connector interfaces, never on the Bolt driver — this package is
-// the mock seam for testing and the only place the driver is referenced.
+// coordinator, register instance, set main, and — for a data instance a lowered
+// replica count is retiring — demote and unregister. All higher layers depend on
+// the Client and Connector interfaces, never on the Bolt driver — this package
+// is the mock seam for testing and the only place the driver is referenced.
 package memgraph
 
 import (
@@ -98,6 +99,18 @@ type Client interface {
 	AddCoordinator(ctx context.Context, coordinator CoordinatorSpec) error
 	RegisterInstance(ctx context.Context, instance DataInstanceSpec) error
 	SetInstanceToMain(ctx context.Context, name string) error
+
+	// DemoteInstance turns the named MAIN back into a replica, which is what
+	// makes a MAIN on its way out of the cluster unregisterable: Memgraph
+	// refuses to unregister the MAIN. It deliberately leaves the cluster
+	// MAIN-less — the coordinators fail over only on a leadership change or a
+	// failed ping, so the caller promotes a survivor itself.
+	DemoteInstance(ctx context.Context, name string) error
+
+	// UnregisterInstance removes the named data instance from the cluster, so
+	// the coordinators stop expecting it before its pod goes away.
+	UnregisterInstance(ctx context.Context, name string) error
+
 	Close(ctx context.Context) error
 }
 

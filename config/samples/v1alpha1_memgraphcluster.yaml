@@ -9,9 +9,16 @@ spec:
   # Raising either count on a live cluster grows it: the operator provisions the
   # new pods and registers them with the cluster. The coordinator count must be
   # odd so the Raft quorum cannot split, and at least three — a quorum of one
-  # cannot survive losing itself. Lowering a count is not supported yet: it is
-  # accepted at admission but the operator holds the StatefulSet at its current
-  # size and reports Converged=False with reason ScaleInProgress.
+  # cannot survive losing itself.
+  #
+  # Lowering dataInstances shrinks the cluster: the instances above the new count
+  # are retired (MAIN moved off them, then UNREGISTER INSTANCE) before their pods
+  # are shed, reported as Converged=False with reason RetirementInProgress. Note
+  # that the operator only touches the cluster while every pod is ready, so a
+  # retiring pod that cannot become ready blocks its own removal. Lowering
+  # coordinators is not supported yet: it is accepted at admission but the
+  # operator holds the StatefulSet at its current size and reports
+  # Converged=False with reason ScaleInProgress.
   coordinators: 3
   dataInstances: 2
   # repository carries the registry host and image path only — the version

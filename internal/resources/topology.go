@@ -60,15 +60,51 @@ func DeclaredTopology(cluster *memgraphcomv1alpha1.MemgraphCluster) planner.Topo
 		})
 	}
 	for ordinal := range spec.dataInstances {
-		fqdn := podFQDN(cluster, DataName(cluster), spec, ordinal)
-		topology.DataInstances = append(topology.DataInstances, memgraph.DataInstanceSpec{
-			Name:              fmt.Sprintf("instance_%d", ordinal),
-			BoltServer:        hostPort(fqdn, spec.ports.bolt),
-			ManagementServer:  hostPort(fqdn, spec.ports.management),
-			ReplicationServer: hostPort(fqdn, spec.ports.replication),
-		})
+		topology.DataInstances = append(topology.DataInstances, dataInstance(cluster, spec, ordinal))
 	}
 	return topology
+}
+
+// RetiringDataInstances is the data instances a lowered dataInstances count is
+// shedding: pod ordinals [declared, applied), where applied is the replica count
+// the operator's own previous apply left on the data StatefulSet. It is empty
+// while a cluster grows or holds its size.
+//
+// The operator never picks which member retires. A StatefulSet sheds its highest
+// ordinals and nothing else, so the range is fully determined by the two counts —
+// which is also what keeps an instance the operator did not create out of it.
+func RetiringDataInstances(
+	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	applied int32,
+) []memgraph.DataInstanceSpec {
+	spec := normalize(cluster.Spec)
+	if applied <= spec.dataInstances {
+		return nil
+	}
+
+	retiring := make([]memgraph.DataInstanceSpec, 0, applied-spec.dataInstances)
+	for ordinal := spec.dataInstances; ordinal < applied; ordinal++ {
+		retiring = append(retiring, dataInstance(cluster, spec, ordinal))
+	}
+	return retiring
+}
+
+// dataInstance describes the data instance running on the given pod ordinal, as
+// the pod itself advertises it. Retiring instances are described the same way as
+// declared ones: they are registered under the addresses the operator registered
+// them with, whether or not the spec still declares them.
+func dataInstance(
+	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	spec normalizedSpec,
+	ordinal int32,
+) memgraph.DataInstanceSpec {
+	fqdn := podFQDN(cluster, DataName(cluster), spec, ordinal)
+	return memgraph.DataInstanceSpec{
+		Name:              fmt.Sprintf("instance_%d", ordinal),
+		BoltServer:        hostPort(fqdn, spec.ports.bolt),
+		ManagementServer:  hostPort(fqdn, spec.ports.management),
+		ReplicationServer: hostPort(fqdn, spec.ports.replication),
+	}
 }
 
 // podFQDNSuffix returns the DNS suffix a pod name is appended to for pods of

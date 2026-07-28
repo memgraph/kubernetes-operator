@@ -75,6 +75,16 @@ func (c *boltClient) SetInstanceToMain(ctx context.Context, name string) error {
 	return err
 }
 
+func (c *boltClient) DemoteInstance(ctx context.Context, name string) error {
+	_, err := c.run(ctx, demoteInstanceQuery(name))
+	return err
+}
+
+func (c *boltClient) UnregisterInstance(ctx context.Context, name string) error {
+	_, err := c.run(ctx, unregisterInstanceQuery(name))
+	return err
+}
+
 func (c *boltClient) Close(ctx context.Context) error {
 	return c.driver.Close(ctx)
 }

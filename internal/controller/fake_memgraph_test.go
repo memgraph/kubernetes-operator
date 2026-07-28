@@ -202,6 +202,44 @@ func (c *fakeClient) SetInstanceToMain(_ context.Context, name string) error {
 	})
 }
 
+// DemoteInstance turns the named MAIN back into a replica, and — like the real
+// thing — refuses an instance that is not MAIN, so the operator's read-before-write
+// is what has to keep this call meaningful.
+func (c *fakeClient) DemoteInstance(_ context.Context, name string) error {
+	return c.execute("DEMOTE INSTANCE "+name, func() error {
+		for i, instance := range c.cluster.instances {
+			if instance.Name != name {
+				continue
+			}
+			if !instance.IsMain() {
+				return fmt.Errorf("fake memgraph: instance %s is not MAIN", name)
+			}
+			c.cluster.instances[i].Role = memgraph.RoleReplica
+			return nil
+		}
+		return fmt.Errorf("fake memgraph: instance %s is not registered", name)
+	})
+}
+
+// UnregisterInstance removes the named data instance from the cluster view. It
+// rejects an unregistered name and, as Memgraph does, the MAIN — so a plan that
+// aims an unregistration at a MAIN fails the suite loudly.
+func (c *fakeClient) UnregisterInstance(_ context.Context, name string) error {
+	return c.execute("UNREGISTER INSTANCE "+name, func() error {
+		for i, instance := range c.cluster.instances {
+			if instance.Name != name {
+				continue
+			}
+			if instance.IsMain() {
+				return fmt.Errorf("fake memgraph: instance %s is MAIN", name)
+			}
+			c.cluster.instances = slices.Delete(c.cluster.instances, i, i+1)
+			return nil
+		}
+		return fmt.Errorf("fake memgraph: instance %s is not registered", name)
+	})
+}
+
 func (c *fakeClient) Close(context.Context) error {
 	c.cluster.mu.Lock()
 	defer c.cluster.mu.Unlock()

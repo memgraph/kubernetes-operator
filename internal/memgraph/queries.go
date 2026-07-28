@@ -48,3 +48,11 @@ func registerInstanceQuery(instance DataInstanceSpec) string {
 func setInstanceToMainQuery(name string) string {
 	return fmt.Sprintf("SET INSTANCE %s TO MAIN", name)
 }
+
+func demoteInstanceQuery(name string) string {
+	return fmt.Sprintf("DEMOTE INSTANCE %s", name)
+}
+
+func unregisterInstanceQuery(name string) string {
+	return fmt.Sprintf("UNREGISTER INSTANCE %s", name)
+}
