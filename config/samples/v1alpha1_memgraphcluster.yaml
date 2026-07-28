@@ -6,9 +6,12 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
   name: memgraphcluster-sample
 spec:
-  # Both counts are immutable: v1alpha1 provisions and bootstraps a fixed
-  # topology, and admission rejects any later change. The coordinator count
-  # must be odd so the Raft quorum cannot split.
+  # Raising either count on a live cluster grows it: the operator provisions the
+  # new pods and registers them with the cluster. The coordinator count must be
+  # odd so the Raft quorum cannot split, and at least three — a quorum of one
+  # cannot survive losing itself. Lowering a count is not supported yet: it is
+  # accepted at admission but the operator holds the StatefulSet at its current
+  # size and reports Converged=False with reason ScaleInProgress.
   coordinators: 3
   dataInstances: 2
   # repository carries the registry host and image path only — the version
@@ -26,8 +29,9 @@ spec:
     organizationKey: MEMGRAPH_ORGANIZATION_NAME
   storage:
     # Retain (the default) leaves the PersistentVolumeClaims behind when this
-    # resource is deleted, so the data survives an accidental delete. Switch to
-    # Delete on dev clusters that should clean up after themselves.
+    # resource is deleted — or when a role is scaled down — so the data survives
+    # an accidental delete. Switch to Delete on dev clusters that should clean up
+    # after themselves.
     retentionPolicy: Retain
     # Each pod of a role gets a lib claim (Memgraph's data directory) and a log
     # claim. The storage class names have no default and are commented out on

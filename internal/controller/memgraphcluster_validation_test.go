@@ -215,14 +215,14 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 			Expect(stored.Spec.Storage.Data.LogStorageClassName).To(BeNil())
 		})
 
-		DescribeTable("should accept any odd coordinator count and any positive data instance count",
+		DescribeTable("should accept any odd coordinator count from three up and any positive data instance count",
 			func(name string, coordinators, dataInstances int32) {
 				createAccepted(name, memgraphcomv1alpha1.MemgraphClusterSpec{
 					Coordinators:  ptr.To(coordinators),
 					DataInstances: ptr.To(dataInstances),
 				})
 			},
-			Entry("single coordinator, single data instance", "valid-topology-min", int32(1), int32(1)),
+			Entry("the smallest quorum and a single data instance", "valid-topology-min", int32(3), int32(1)),
 			Entry("a quorum and replica count beyond the former upper bounds", "valid-topology-large",
 				int32(9), int32(16)),
 		)
@@ -366,9 +366,14 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 			},
 			Entry("zero coordinators", "invalid-coordinators-zero",
 				memgraphcomv1alpha1.MemgraphClusterSpec{Coordinators: ptr.To(int32(0))},
-				"should be greater than or equal to 1"),
+				"should be greater than or equal to 3"),
+			// A single coordinator is a quorum of one: it cannot survive losing
+			// itself, which is the whole point of running HA.
+			Entry("a coordinator count below the HA floor", "invalid-coordinators-below-floor",
+				memgraphcomv1alpha1.MemgraphClusterSpec{Coordinators: ptr.To(int32(1))},
+				"should be greater than or equal to 3"),
 			Entry("an even coordinator count", "invalid-coordinators-even",
-				memgraphcomv1alpha1.MemgraphClusterSpec{Coordinators: ptr.To(int32(2))},
+				memgraphcomv1alpha1.MemgraphClusterSpec{Coordinators: ptr.To(int32(4))},
 				"coordinators must be an odd number"),
 			Entry("zero data instances", "invalid-data-zero",
 				memgraphcomv1alpha1.MemgraphClusterSpec{DataInstances: ptr.To(int32(0))},
@@ -585,78 +590,103 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 			return k8sClient.Update(ctx, stored)
 		}
 
-		expectImmutable := func(name string, mutate func(*memgraphcomv1alpha1.MemgraphCluster), field string) {
+		// expectRejectedUpdate asserts that admission refused a topology change
+		// and said what is wrong with the new value.
+		expectRejectedUpdate := func(
+			name string,
+			mutate func(*memgraphcomv1alpha1.MemgraphCluster),
+			wantMessage string,
+		) {
 			GinkgoHelper()
 			err := update(name, mutate)
 			Expect(err).To(HaveOccurred(), "expected admission to reject the topology change")
 			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "expected an Invalid error, got %v", err)
-			Expect(err.Error()).To(ContainSubstring(field + " is immutable"))
-			Expect(err.Error()).To(ContainSubstring("not supported in v1alpha1"))
+			Expect(err.Error()).To(ContainSubstring(wantMessage))
 		}
 
-		It("should reject growing or shrinking the coordinator count", func() {
-			createAccepted("immutable-coordinators", memgraphcomv1alpha1.MemgraphClusterSpec{
-				Coordinators: ptr.To(int32(3)),
-			})
-
-			expectImmutable("immutable-coordinators", func(c *memgraphcomv1alpha1.MemgraphCluster) {
-				c.Spec.Coordinators = ptr.To(int32(5))
-			}, "coordinators")
-			expectImmutable("immutable-coordinators", func(c *memgraphcomv1alpha1.MemgraphCluster) {
-				c.Spec.Coordinators = ptr.To(int32(1))
-			}, "coordinators")
-		})
-
-		It("should reject growing or shrinking the data instance count", func() {
-			createAccepted("immutable-data", memgraphcomv1alpha1.MemgraphClusterSpec{
-				DataInstances: ptr.To(int32(2)),
-			})
-
-			expectImmutable("immutable-data", func(c *memgraphcomv1alpha1.MemgraphCluster) {
-				c.Spec.DataInstances = ptr.To(int32(3))
-			}, "dataInstances")
-			expectImmutable("immutable-data", func(c *memgraphcomv1alpha1.MemgraphCluster) {
-				c.Spec.DataInstances = ptr.To(int32(1))
-			}, "dataInstances")
-		})
-
-		It("should reject a count change that arrives as a field removal", func() {
-			// Dropping a non-default count from the manifest re-defaults it,
-			// which is a topology change dressed up as a deletion.
-			createAccepted("immutable-omitted", memgraphcomv1alpha1.MemgraphClusterSpec{
-				Coordinators: ptr.To(int32(5)),
-			})
-
-			expectImmutable("immutable-omitted", func(c *memgraphcomv1alpha1.MemgraphCluster) {
-				c.Spec.Coordinators = nil
-			}, "coordinators")
-		})
-
-		It("should accept an update that leaves the counts alone", func() {
-			createAccepted("immutable-unchanged", memgraphcomv1alpha1.MemgraphClusterSpec{
+		It("should accept growing both counts in one edit", func() {
+			createAccepted("scale-up-both", memgraphcomv1alpha1.MemgraphClusterSpec{
 				Coordinators:  ptr.To(int32(3)),
 				DataInstances: ptr.To(int32(2)),
 			})
 
-			Expect(update("immutable-unchanged", func(c *memgraphcomv1alpha1.MemgraphCluster) {
+			Expect(update("scale-up-both", func(c *memgraphcomv1alpha1.MemgraphCluster) {
+				c.Spec.Coordinators = ptr.To(int32(5))
+				c.Spec.DataInstances = ptr.To(int32(3))
+			})).To(Succeed(), "both counts are mutable, in any step size, in one edit")
+
+			stored := &memgraphcomv1alpha1.MemgraphCluster{}
+			Expect(k8sClient.Get(ctx,
+				types.NamespacedName{Name: "scale-up-both", Namespace: resourceNamespace}, stored)).To(Succeed())
+			Expect(stored.Spec.Coordinators).To(HaveValue(Equal(int32(5))))
+			Expect(stored.Spec.DataInstances).To(HaveValue(Equal(int32(3))))
+		})
+
+		It("should accept lowering either count", func() {
+			createAccepted("scale-down-both", memgraphcomv1alpha1.MemgraphClusterSpec{
+				Coordinators:  ptr.To(int32(5)),
+				DataInstances: ptr.To(int32(3)),
+			})
+
+			Expect(update("scale-down-both", func(c *memgraphcomv1alpha1.MemgraphCluster) {
+				c.Spec.Coordinators = ptr.To(int32(3))
+				c.Spec.DataInstances = ptr.To(int32(1))
+			})).To(Succeed(), "admission constrains the target counts, nothing about the direction")
+		})
+
+		It("should accept a count change that arrives as a field removal", func() {
+			// Dropping a non-default count from the manifest re-defaults it,
+			// which is a real topology change and no longer refused.
+			createAccepted("scale-omitted", memgraphcomv1alpha1.MemgraphClusterSpec{
+				Coordinators: ptr.To(int32(5)),
+			})
+
+			Expect(update("scale-omitted", func(c *memgraphcomv1alpha1.MemgraphCluster) {
+				c.Spec.Coordinators = nil
+			})).To(Succeed())
+
+			stored := &memgraphcomv1alpha1.MemgraphCluster{}
+			Expect(k8sClient.Get(ctx,
+				types.NamespacedName{Name: "scale-omitted", Namespace: resourceNamespace}, stored)).To(Succeed())
+			Expect(stored.Spec.Coordinators).To(HaveValue(Equal(memgraphcomv1alpha1.DefaultCoordinatorCount)))
+		})
+
+		It("should accept an update that leaves the counts alone", func() {
+			createAccepted("scale-unchanged", memgraphcomv1alpha1.MemgraphClusterSpec{
+				Coordinators:  ptr.To(int32(3)),
+				DataInstances: ptr.To(int32(2)),
+			})
+
+			Expect(update("scale-unchanged", func(c *memgraphcomv1alpha1.MemgraphCluster) {
 				c.Spec.Image.Tag = customImageTag
 				c.Spec.Secrets.Name = "another-license"
 			})).To(Succeed())
-
-			Expect(update("immutable-unchanged", func(c *memgraphcomv1alpha1.MemgraphCluster) {
-				c.Spec.Coordinators = ptr.To(int32(3))
-				c.Spec.DataInstances = ptr.To(int32(2))
-			})).To(Succeed(), "re-applying the same counts is not a topology change")
 		})
 
-		It("should accept an update that omits a count matching the default", func() {
-			createAccepted("immutable-omitted-default", memgraphcomv1alpha1.MemgraphClusterSpec{
-				Coordinators: ptr.To(memgraphcomv1alpha1.DefaultCoordinatorCount),
-			})
+		// The floors and the odd rule are creation-time validation that keeps
+		// applying on every update: a live cluster cannot be edited into a
+		// topology it could not have been created with.
+		DescribeTable("should reject a topology change that breaks a floor",
+			func(name string, mutate func(*memgraphcomv1alpha1.MemgraphCluster), wantMessage string) {
+				createAccepted(name, memgraphcomv1alpha1.MemgraphClusterSpec{
+					Coordinators:  ptr.To(int32(5)),
+					DataInstances: ptr.To(int32(2)),
+				})
 
-			Expect(update("immutable-omitted-default", func(c *memgraphcomv1alpha1.MemgraphCluster) {
-				c.Spec.Coordinators = nil
-			})).To(Succeed(), "defaulting restores the same count, so the topology is unchanged")
-		})
+				expectRejectedUpdate(name, mutate, wantMessage)
+			},
+			Entry("coordinators below the HA floor", "scale-floor-coordinators",
+				func(c *memgraphcomv1alpha1.MemgraphCluster) {
+					c.Spec.Coordinators = ptr.To(int32(1))
+				}, "should be greater than or equal to 3"),
+			Entry("an even coordinator count", "scale-floor-coordinators-even",
+				func(c *memgraphcomv1alpha1.MemgraphCluster) {
+					c.Spec.Coordinators = ptr.To(int32(4))
+				}, "coordinators must be an odd number"),
+			Entry("no data instances left", "scale-floor-data",
+				func(c *memgraphcomv1alpha1.MemgraphCluster) {
+					c.Spec.DataInstances = ptr.To(int32(0))
+				}, "should be greater than or equal to 1"),
+		)
 	})
 })

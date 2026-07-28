@@ -113,17 +113,21 @@ const (
 
 // Condition types reported on MemgraphCluster status. Both use normal-True
 // polarity: True is the healthy state. Ready answers "is the cluster serving"
-// (a MAIN is elected and reachable); Converged answers "does registration
-// match the declared topology" (every coordinator and data instance is
-// registered). A cluster can be Ready but not Converged — a MAIN still serves
-// while a lost replica registration is being restored.
+// (a MAIN is elected and reachable); Converged answers "does the cluster match
+// the declared topology" (every declared coordinator and data instance is
+// registered, and both StatefulSets run the declared number of replicas). A
+// cluster can be Ready but not Converged — a MAIN still serves while a lost
+// replica registration is being restored, or while a scale finishes.
 const (
 	// ConditionReady is True when a MAIN data instance is elected and the
 	// coordinator leader is reachable.
 	ConditionReady = "Ready"
 
 	// ConditionConverged is True when the observed cluster matches the declared
-	// topology and no registration commands are pending.
+	// topology: no registration commands are pending and both StatefulSets'
+	// replica counts equal the declared counts. `kubectl wait
+	// --for=condition=Converged` therefore means a scale is genuinely finished,
+	// not merely accepted.
 	ConditionConverged = "Converged"
 )
 
@@ -158,6 +162,11 @@ const (
 	// ReasonAllInstancesRegistered is set when the observed cluster matches the
 	// declared topology.
 	ReasonAllInstancesRegistered = "AllInstancesRegistered"
+
+	// ReasonScaleInProgress is set when registration has converged but a
+	// StatefulSet still runs a different number of replicas than the spec
+	// declares, so the declared topology is not fully realized yet.
+	ReasonScaleInProgress = "ScaleInProgress"
 
 	// ReasonMainElected is set when a data instance is observed as MAIN.
 	ReasonMainElected = "MainElected"
@@ -745,19 +754,21 @@ type ExtraArgsSpec struct {
 // MemgraphClusterSpec defines the desired state of MemgraphCluster.
 type MemgraphClusterSpec struct {
 	// coordinators is the number of Raft coordinator instances. It must be odd
-	// so the Raft quorum cannot split, and it is immutable: scaling is not
-	// supported in v1alpha1.
-	// +kubebuilder:validation:Minimum=1
+	// so the Raft quorum cannot split, and at least three, which is the
+	// smallest quorum that survives losing a coordinator — this operator
+	// builds real HA clusters, so the floor holds at creation as well as on an
+	// update. Raising the count on a live cluster grows it: the operator adds
+	// the new coordinators to the Raft cluster as their pods become ready.
+	// +kubebuilder:validation:Minimum=3
 	// +kubebuilder:validation:XValidation:rule="self % 2 == 1",message="coordinators must be an odd number so the Raft quorum cannot split"
-	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="coordinators is immutable: changing the coordinator count of an existing MemgraphCluster is not supported in v1alpha1"
 	// +kubebuilder:default=3
 	// +optional
 	Coordinators *int32 `json:"coordinators,omitempty"`
 
-	// dataInstances is the number of data instances. It is immutable: scaling
-	// is not supported in v1alpha1.
+	// dataInstances is the number of data instances. Raising the count on a
+	// live cluster grows it: the operator registers the new instances as their
+	// pods become ready.
 	// +kubebuilder:validation:Minimum=1
-	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="dataInstances is immutable: changing the data instance count of an existing MemgraphCluster is not supported in v1alpha1"
 	// +kubebuilder:default=2
 	// +optional
 	DataInstances *int32 `json:"dataInstances,omitempty"`
@@ -844,6 +855,19 @@ type MemgraphClusterStatus struct {
 	// +optional
 	Main string `json:"main,omitempty"`
 
+	// coordinators is how many of the declared coordinators the coordinator
+	// leader reports as registered members of the Raft cluster. It reaches
+	// spec.coordinators once registration has converged, so it is what a scale
+	// is watched through.
+	// +optional
+	Coordinators int32 `json:"coordinators,omitempty"`
+
+	// dataInstances is how many of the declared data instances the coordinator
+	// leader reports as registered. It reaches spec.dataInstances once
+	// registration has converged.
+	// +optional
+	DataInstances int32 `json:"dataInstances,omitempty"`
+
 	// conditions represent the current state of the MemgraphCluster resource.
 	// Each condition has a unique type and reflects the status of a specific aspect of the resource.
 	//
@@ -864,6 +888,8 @@ type MemgraphClusterStatus struct {
 // +kubebuilder:resource:shortName=mgc
 // +kubebuilder:printcolumn:name="Coordinators",type=integer,JSONPath=`.spec.coordinators`
 // +kubebuilder:printcolumn:name="Data",type=integer,JSONPath=`.spec.dataInstances`
+// +kubebuilder:printcolumn:name="Registered-Coordinators",type=integer,JSONPath=`.status.coordinators`,priority=1
+// +kubebuilder:printcolumn:name="Registered-Data",type=integer,JSONPath=`.status.dataInstances`,priority=1
 // +kubebuilder:printcolumn:name="Main",type=string,JSONPath=`.status.main`
 // +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
 // +kubebuilder:printcolumn:name="Converged",type=string,JSONPath=`.status.conditions[?(@.type=="Converged")].status`

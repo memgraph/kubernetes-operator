@@ -84,7 +84,9 @@ memgraph   3              2      instance_0   True    True        4m12s
 
 - **`MAIN`** is the data instance the coordinators elected as MAIN — the one that accepts writes. It is observed, not decided by the operator, so it changes on failover.
 - **`READY`** is True once a MAIN is elected, i.e. the cluster serves writes.
-- **`CONVERGED`** is True once every declared coordinator and data instance is registered and reported healthy.
+- **`CONVERGED`** is True once every declared coordinator and data instance is registered and reported healthy, and both StatefulSets run the declared number of replicas.
+
+`kubectl get mgc -n memgraph -o wide` adds how many of each role's declared members the cluster actually has registered (`REGISTERED-COORDINATORS`, `REGISTERED-DATA`), which is what a scale-up is watched through.
 
 To block a script or a GitOps step on the cluster being usable:
 
@@ -172,11 +174,19 @@ The MVP is deliberately "provision, bootstrap, observe". It does:
 - provision one StatefulSet and headless Service per role, with per-pod identity derived from the pod ordinal;
 - bootstrap HA: add the coordinators, register the data instances, and promote the initial MAIN once;
 - re-register continuously: every reconcile compares `SHOW INSTANCES` on the coordinator leader against the declared topology and issues only the missing registrations, so an instance that loses its registration state (say, after being rescheduled onto a fresh node) rejoins without human action;
-- report the observed MAIN and the readiness and convergence conditions on the resource's status.
+- **grow a live cluster**: raise `coordinators` or `dataInstances` (both in one edit if you like, in any step size) and the added pods are provisioned and registered by the same diff that restores a lost registration — no manual `ADD COORDINATOR` or `REGISTER INSTANCE`;
+- report the observed MAIN, the registered member counts, and the readiness and convergence conditions on the resource's status.
+
+Growing is one edit, and `Converged` tells you when it is finished:
+
+```sh
+kubectl patch mgc memgraph -n memgraph --type=merge -p '{"spec":{"coordinators":5,"dataInstances":3}}'
+kubectl wait --namespace memgraph --for=condition=Converged memgraphcluster/memgraph --timeout=10m
+```
 
 What it does not do yet:
 
-- **Scaling.** `coordinators` and `dataInstances` are **immutable after creation** — admission rejects a change with a clear message. Changing the topology means creating a new cluster. Mutable counts are the first item on the post-v1 roadmap.
+- **Scaling down.** `coordinators` must stay odd and at or above three, `dataInstances` at or above one — both enforced at creation and on every update. *Lowering* a count is accepted by admission but not carried out: taking a pod away means unregistering a cluster member first, and the operator has no removal path yet, so it holds the StatefulSet at its current size and reports `Converged=False` with reason `ScaleInProgress` until the count is raised back. Scale-down with MAIN- and quorum-safety is the next item on the roadmap.
 - **Failover.** The operator issues `SET INSTANCE TO MAIN` exactly once, at bootstrap, when no MAIN exists. After that, leadership belongs entirely to the Raft coordinators; the operator only observes and reports it, so two control systems never fight over which instance is MAIN.
 - **Other day-2 operations**: orchestrated or rolling version upgrades, backup and restore, storage-mode changes.
 - **Removing instances**: there is no `REMOVE COORDINATOR` or `UNREGISTER INSTANCE`, and no finalizer-based storage cleanup. The operator has no destructive code path.

@@ -228,8 +228,9 @@ var _ = Describe("MemgraphCluster Controller", func() {
 						"claim %s must fall back to the cluster's default StorageClass", name)
 				}
 
-				// The default keeps data safe from an accidental CR delete, and
-				// nothing ever scales down because both counts are immutable.
+				// The default keeps data safe from an accidental CR delete and
+				// from a scale-down alike: one retention knob, both halves of
+				// the policy.
 				Expect(sts.Spec.PersistentVolumeClaimRetentionPolicy).To(HaveValue(Equal(
 					appsv1.StatefulSetPersistentVolumeClaimRetentionPolicy{
 						WhenDeleted: appsv1.RetainPersistentVolumeClaimRetentionPolicyType,
@@ -286,7 +287,7 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			cr := &memgraphcomv1alpha1.MemgraphCluster{
 				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: resourceNamespace},
 				Spec: memgraphcomv1alpha1.MemgraphClusterSpec{
-					Coordinators:  ptr.To(int32(1)),
+					Coordinators:  ptr.To(int32(3)),
 					DataInstances: ptr.To(int32(1)),
 					Image: memgraphcomv1alpha1.ImageSpec{
 						Repository: "registry.example.com/memgraph",
@@ -322,10 +323,11 @@ var _ = Describe("MemgraphCluster Controller", func() {
 		It("should propagate spec values into the workload objects", func() {
 			reconcileCluster(resourceName)
 
-			for _, suffix := range []string{coordinatorSuffix, dataSuffix} {
+			for suffix, replicas := range map[string]int32{coordinatorSuffix: 3, dataSuffix: 1} {
 				sts := &appsv1.StatefulSet{}
 				get(resourceName+suffix, sts)
-				Expect(sts.Spec.Replicas).To(HaveValue(Equal(int32(1))))
+				Expect(sts.Spec.Replicas).To(HaveValue(Equal(replicas)),
+					"each role's StatefulSet runs the count its own spec field declares")
 
 				container := sts.Spec.Template.Spec.Containers[0]
 				Expect(container.Image).To(Equal("registry.example.com/memgraph:3.13.0"))
@@ -338,8 +340,11 @@ var _ = Describe("MemgraphCluster Controller", func() {
 				Expect(organizationRef.Name).To(Equal(customSecretName))
 				Expect(organizationRef.Key).To(Equal("organization"))
 
-				Expect(sts.Spec.PersistentVolumeClaimRetentionPolicy.WhenDeleted).To(
-					Equal(appsv1.DeletePersistentVolumeClaimRetentionPolicyType))
+				Expect(sts.Spec.PersistentVolumeClaimRetentionPolicy).To(HaveValue(Equal(
+					appsv1.StatefulSetPersistentVolumeClaimRetentionPolicy{
+						WhenDeleted: appsv1.DeletePersistentVolumeClaimRetentionPolicyType,
+						WhenScaled:  appsv1.DeletePersistentVolumeClaimRetentionPolicyType,
+					})), "the Delete policy covers the claims a scale-down orphans too")
 			}
 		})
 
@@ -623,6 +628,162 @@ var _ = Describe("MemgraphCluster Controller", func() {
 		})
 	})
 
+	Context("when scaling the topology of a live cluster", func() {
+		const resourceName = "mgc-scale"
+
+		coordinatorAddress := func(ordinal int) string {
+			return fmt.Sprintf("%s-coordinator-%d.%s-coordinator.%s.svc.cluster.local:7687",
+				resourceName, ordinal, resourceName, resourceNamespace)
+		}
+
+		status := func() memgraphcomv1alpha1.MemgraphClusterStatus {
+			GinkgoHelper()
+			cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+			get(resourceName, cluster)
+			return cluster.Status
+		}
+
+		// setCounts edits the declared topology of the live cluster.
+		setCounts := func(coordinators, dataInstances int32) {
+			GinkgoHelper()
+			cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+			get(resourceName, cluster)
+			cluster.Spec.Coordinators = ptr.To(coordinators)
+			cluster.Spec.DataInstances = ptr.To(dataInstances)
+			Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
+		}
+
+		replicas := func(suffix string) int32 {
+			GinkgoHelper()
+			sts := &appsv1.StatefulSet{}
+			get(resourceName+suffix, sts)
+			Expect(sts.Spec.Replicas).NotTo(BeNil())
+			return *sts.Spec.Replicas
+		}
+
+		// bootstrapped drives the default 3/2 cluster to converged, so the specs
+		// below start from a live, fully registered cluster. It returns how many
+		// commands that took, which is the baseline sinceBootstrap counts from.
+		bootstrapped := func() int {
+			GinkgoHelper()
+			reconcileCluster(resourceName)
+			markWorkloadsReady(resourceName)
+			reconcileCluster(resourceName)
+			reconcileCluster(resourceName)
+			cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+			get(resourceName, cluster)
+			Expect(apimeta.IsStatusConditionTrue(cluster.Status.Conditions,
+				memgraphcomv1alpha1.ConditionConverged)).To(BeTrue())
+			return len(fake.executedCommands())
+		}
+
+		// sinceBootstrap is the commands the spec's own topology edit caused, so
+		// the assertions are not about the bootstrap that set the scene.
+		sinceBootstrap := func(baseline int) []string {
+			GinkgoHelper()
+			executed := fake.executedCommands()
+			Expect(len(executed)).To(BeNumerically(">=", baseline))
+			return executed[baseline:]
+		}
+
+		BeforeEach(func() {
+			resource := &memgraphcomv1alpha1.MemgraphCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: resourceNamespace},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+		})
+
+		AfterEach(func() {
+			cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+			get(resourceName, cluster)
+			Expect(k8sClient.Delete(ctx, cluster)).To(Succeed())
+			deleteOwned(resourceName)
+		})
+
+		It("should grow both roles and register only the added members", func() {
+			baseline := bootstrapped()
+
+			setCounts(5, 3)
+			// The added pods are not ready yet, so this pass only widens the
+			// StatefulSets.
+			reconcileCluster(resourceName)
+			Expect(replicas(coordinatorSuffix)).To(Equal(int32(5)))
+			Expect(replicas(dataSuffix)).To(Equal(int32(3)))
+			Expect(sinceBootstrap(baseline)).To(BeEmpty(),
+				"registration waits until every pod of the grown topology is ready")
+
+			markWorkloadsReady(resourceName)
+			reconcileCluster(resourceName)
+
+			leader := coordinatorAddress(0)
+			Expect(sinceBootstrap(baseline)).To(Equal([]string{
+				leader + ": ADD COORDINATOR 4",
+				leader + ": ADD COORDINATOR 5",
+				leader + ": REGISTER INSTANCE instance_2",
+			}), "the members the cluster already has are left alone, and no MAIN is re-promoted")
+
+			reconcileCluster(resourceName)
+			s := status()
+			Expect(s.Coordinators).To(Equal(int32(5)))
+			Expect(s.DataInstances).To(Equal(int32(3)))
+			Expect(s.Main).To(Equal("instance_0"), "growing the cluster does not move MAIN")
+			converged := apimeta.FindStatusCondition(s.Conditions, memgraphcomv1alpha1.ConditionConverged)
+			Expect(converged.Status).To(Equal(metav1.ConditionTrue))
+			Expect(converged.Reason).To(Equal(memgraphcomv1alpha1.ReasonAllInstancesRegistered))
+		})
+
+		It("should report Converged False while a StatefulSet has not reached the declared count", func() {
+			baseline := bootstrapped()
+
+			// A count the operator cannot realize yet: shedding pods means
+			// removing cluster members first, which it does not do, so the
+			// StatefulSet is held and the resource says so.
+			setCounts(3, 1)
+			reconcileCluster(resourceName)
+
+			Expect(replicas(dataSuffix)).To(Equal(int32(2)),
+				"a lower declared count must never shrink the applied StatefulSet")
+			converged := apimeta.FindStatusCondition(status().Conditions, memgraphcomv1alpha1.ConditionConverged)
+			Expect(converged.Status).To(Equal(metav1.ConditionFalse))
+			Expect(converged.Reason).To(Equal(memgraphcomv1alpha1.ReasonScaleInProgress))
+			Expect(converged.Message).To(ContainSubstring(resourceName + dataSuffix))
+			Expect(sinceBootstrap(baseline)).To(BeEmpty(),
+				"the instance the lowered count drops stays registered: removal is not implemented")
+
+			// Raising the count back matches what is running, which converges
+			// again without touching the cluster.
+			setCounts(3, 2)
+			reconcileCluster(resourceName)
+
+			Expect(apimeta.IsStatusConditionTrue(status().Conditions,
+				memgraphcomv1alpha1.ConditionConverged)).To(BeTrue())
+		})
+
+		It("should report the registered counts as observed, not as declared", func() {
+			bootstrapped()
+			Expect(status().DataInstances).To(Equal(int32(2)))
+
+			// instance_1 loses its registration: the count reports what the
+			// cluster has, which is what makes it worth watching during a scale.
+			fake.setInstances([]memgraph.Instance{
+				{
+					Name: "coordinator_1", BoltServer: coordinatorAddress(0),
+					Health: memgraph.HealthUp, Role: memgraph.RoleLeader,
+				},
+				{
+					Name: "coordinator_2", BoltServer: coordinatorAddress(1),
+					Health: memgraph.HealthUp, Role: memgraph.RoleFollower,
+				},
+				{Name: "instance_0", Health: memgraph.HealthUp, Role: memgraph.RoleMain},
+			})
+			reconcileCluster(resourceName)
+
+			s := status()
+			Expect(s.Coordinators).To(Equal(int32(2)), "coordinator_3 is no longer a member")
+			Expect(s.DataInstances).To(Equal(int32(1)))
+		})
+	})
+
 	Context("when reporting status and conditions", func() {
 		const resourceName = "mgc-status"
 
@@ -777,6 +938,8 @@ var _ = Describe("MemgraphCluster Controller", func() {
 
 			s := status()
 			Expect(s.Main).To(Equal("instance_0"))
+			Expect(s.Coordinators).To(Equal(int32(3)), "every declared coordinator is registered")
+			Expect(s.DataInstances).To(Equal(int32(2)))
 			ready := condition(memgraphcomv1alpha1.ConditionReady)
 			Expect(ready.Status).To(Equal(metav1.ConditionTrue))
 			Expect(ready.Reason).To(Equal(memgraphcomv1alpha1.ReasonMainElected))

@@ -59,7 +59,17 @@ const (
 // coordinator instances. Per-pod identity (coordinator ID, advertised FQDN)
 // is derived from the pod ordinal at startup, so the pod template stays
 // uniform across replicas.
-func CoordinatorStatefulSet(cluster *memgraphcomv1alpha1.MemgraphCluster) *appsv1.StatefulSet {
+//
+// The replica count is an argument rather than read off the spec because the
+// count to apply is a decision about the live cluster, not about the spec: it
+// is the declared count while the cluster grows, and the current count while a
+// lowered one is still being retired. Keeping that decision in the controller
+// keeps this builder pure. DeclaredCoordinators is the count for a cluster that
+// is not shrinking.
+func CoordinatorStatefulSet(
+	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	replicas int32,
+) *appsv1.StatefulSet {
 	spec := normalize(cluster.Spec)
 	role := spec.coordinatorRole
 
@@ -85,11 +95,13 @@ func CoordinatorStatefulSet(cluster *memgraphcomv1alpha1.MemgraphCluster) *appsv
 	container.ReadinessProbe = tcpProbe(spec.ports.coordinator, role.readinessProbe)
 	container.LivenessProbe = tcpProbe(spec.ports.coordinator, role.livenessProbe)
 
-	return statefulSet(cluster, coordinatorComponent, CoordinatorName(cluster), spec, role, spec.coordinators, container)
+	return statefulSet(cluster, coordinatorComponent, CoordinatorName(cluster), spec, role, replicas, container)
 }
 
-// DataStatefulSet builds the single StatefulSet running all data instances.
-func DataStatefulSet(cluster *memgraphcomv1alpha1.MemgraphCluster) *appsv1.StatefulSet {
+// DataStatefulSet builds the single StatefulSet running all data instances. The
+// replica count is an argument for the reason CoordinatorStatefulSet documents;
+// DeclaredDataInstances is the count for a cluster that is not shrinking.
+func DataStatefulSet(cluster *memgraphcomv1alpha1.MemgraphCluster, replicas int32) *appsv1.StatefulSet {
 	spec := normalize(cluster.Spec)
 	role := spec.dataRole
 
@@ -104,7 +116,7 @@ func DataStatefulSet(cluster *memgraphcomv1alpha1.MemgraphCluster) *appsv1.State
 	container.ReadinessProbe = tcpProbe(spec.ports.bolt, role.readinessProbe)
 	container.LivenessProbe = tcpProbe(spec.ports.bolt, role.livenessProbe)
 
-	return statefulSet(cluster, dataComponent, DataName(cluster), spec, role, spec.dataInstances, container)
+	return statefulSet(cluster, dataComponent, DataName(cluster), spec, role, replicas, container)
 }
 
 // coordinatorStartScript derives the coordinator's identity from its pod
@@ -378,12 +390,13 @@ func statefulSet(
 			Selector:            &metav1.LabelSelector{MatchLabels: selectorLabels(cluster, component)},
 			// The StatefulSet controller is the only thing that ever deletes
 			// this cluster's storage; the operator owns no finalizer and runs
-			// no cleanup of its own. whenScaled is always Retain because both
-			// replica counts are immutable in v1alpha1 — nothing scales down,
-			// so no claim is ever orphaned by scaling.
+			// no cleanup of its own. Both halves of the policy follow the one
+			// retention knob: whether a claim is orphaned by deleting the
+			// cluster or by scaling a role down, the user asked the same
+			// question — keep this cluster's data, or do not.
 			PersistentVolumeClaimRetentionPolicy: &appsv1.StatefulSetPersistentVolumeClaimRetentionPolicy{
 				WhenDeleted: retentionType(spec.retentionPolicy),
-				WhenScaled:  appsv1.RetainPersistentVolumeClaimRetentionPolicyType,
+				WhenScaled:  retentionType(spec.retentionPolicy),
 			},
 			VolumeClaimTemplates: volumeClaimTemplates(role),
 			Template: corev1.PodTemplateSpec{

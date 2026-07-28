@@ -37,11 +37,21 @@ const firstInstance = "instance_0"
 // declaredTopology is the canonical 3-coordinator, 2-data-instance fixture
 // the cases below diff observed cluster states against.
 func declaredTopology() planner.Topology {
+	return topologyOf(3, 2)
+}
+
+// grownTopology is the same cluster after both counts were raised: 5
+// coordinators and 3 data instances.
+func grownTopology() planner.Topology {
+	return topologyOf(5, 3)
+}
+
+func topologyOf(coordinators int32, dataInstances int) planner.Topology {
 	topology := planner.Topology{}
-	for id := int32(1); id <= 3; id++ {
+	for id := int32(1); id <= coordinators; id++ {
 		topology.Coordinators = append(topology.Coordinators, coordinatorSpec(id))
 	}
-	for i := range 2 {
+	for i := range dataInstances {
 		topology.DataInstances = append(topology.DataInstances, dataInstanceSpec(i))
 	}
 	return topology
@@ -87,17 +97,26 @@ func observedDataInstance(i int, role string) memgraph.Instance {
 		Name:             spec.Name,
 		BoltServer:       spec.BoltServer,
 		ManagementServer: spec.ManagementServer,
-		Health:           "up",
+		Health:           memgraph.HealthUp,
 		Role:             role,
 	}
 }
 
-func TestPlan(t *testing.T) {
-	declared := declaredTopology()
+// downDataInstance is a registered data instance the coordinator leader cannot
+// reach — the state a promotion must route around.
+func downDataInstance(i int) memgraph.Instance {
+	instance := observedDataInstance(i, memgraph.RoleReplica)
+	instance.Health = "down"
+	return instance
+}
 
+func TestPlan(t *testing.T) {
 	cases := []struct {
 		name     string
 		observed []memgraph.Instance
+		// declared overrides the canonical fixture for the cases about a
+		// topology whose counts changed.
+		declared *planner.Topology
 		want     []planner.Command
 	}{
 		{
@@ -206,6 +225,70 @@ func TestPlan(t *testing.T) {
 				planner.RegisterInstance{Instance: dataInstanceSpec(0)},
 			},
 		},
+		// Promoting a down instance only writes the intent to Raft: the cluster
+		// stays MAIN-less until the coordinators retry it. A registered instance
+		// the leader can reach is the better target even at a higher ordinal.
+		{
+			name: "a down instance_0 is skipped in favor of the lowest reachable instance",
+			observed: []memgraph.Instance{
+				observedCoordinator(1, memgraph.RoleLeader),
+				observedCoordinator(2, memgraph.RoleFollower),
+				observedCoordinator(3, memgraph.RoleFollower),
+				downDataInstance(0),
+				observedDataInstance(1, memgraph.RoleReplica),
+			},
+			want: []planner.Command{
+				planner.SetInstanceToMain{Name: "instance_1"},
+			},
+		},
+		{
+			name: "a reachable instance_0 is promoted ahead of its higher-ordinal peers",
+			observed: []memgraph.Instance{
+				observedCoordinator(1, memgraph.RoleLeader),
+				observedCoordinator(2, memgraph.RoleFollower),
+				observedCoordinator(3, memgraph.RoleFollower),
+				observedDataInstance(0, memgraph.RoleReplica),
+				observedDataInstance(1, memgraph.RoleReplica),
+			},
+			want: []planner.Command{
+				planner.SetInstanceToMain{Name: firstInstance},
+			},
+		},
+		// With every declared instance down there is no reachable target, so the
+		// first one is promoted anyway: the coordinators act on the intent once
+		// the instance comes back, which beats never promoting at all.
+		{
+			name: "the first instance is promoted when none is reachable",
+			observed: []memgraph.Instance{
+				observedCoordinator(1, memgraph.RoleLeader),
+				observedCoordinator(2, memgraph.RoleFollower),
+				observedCoordinator(3, memgraph.RoleFollower),
+				downDataInstance(0),
+				downDataInstance(1),
+			},
+			want: []planner.Command{
+				planner.SetInstanceToMain{Name: firstInstance},
+			},
+		},
+		// A grown topology declares members the cluster has never heard of: the
+		// diff that restores a lost registration is the same one that registers a
+		// new pod, so growth needs no separate plan.
+		{
+			name: "a grown topology registers only the added members",
+			observed: []memgraph.Instance{
+				observedCoordinator(1, memgraph.RoleLeader),
+				observedCoordinator(2, memgraph.RoleFollower),
+				observedCoordinator(3, memgraph.RoleFollower),
+				observedDataInstance(0, memgraph.RoleMain),
+				observedDataInstance(1, memgraph.RoleReplica),
+			},
+			declared: ptr.To(grownTopology()),
+			want: []planner.Command{
+				planner.AddCoordinator{Coordinator: coordinatorSpec(4)},
+				planner.AddCoordinator{Coordinator: coordinatorSpec(5)},
+				planner.RegisterInstance{Instance: dataInstanceSpec(2)},
+			},
+		},
 		{
 			name: "instances the topology does not declare are left untouched",
 			observed: []memgraph.Instance{
@@ -223,9 +306,118 @@ func TestPlan(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			declared := declaredTopology()
+			if tc.declared != nil {
+				declared = *tc.declared
+			}
+
 			got := planner.Plan(declared, tc.observed)
 			if diff := cmp.Diff(tc.want, got); diff != "" {
 				t.Errorf("Plan() mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestRegistered covers what the CR's status publishes: how many of each role's
+// declared members the cluster has registered. It shares Plan's definition of
+// registered, so the counts reach the declared ones exactly when Plan falls
+// silent.
+func TestRegistered(t *testing.T) {
+	selfReporting := observedCoordinator(2, memgraph.RoleLeader)
+	// The coordinator the client is connected to lists itself with an empty
+	// bolt_server until ADD COORDINATOR is issued for its ID.
+	selfReporting.BoltServer = ""
+
+	cases := []struct {
+		name              string
+		declared          planner.Topology
+		observed          []memgraph.Instance
+		wantCoordinators  int32
+		wantDataInstances int32
+	}{
+		{
+			name:     "a fresh cluster has nothing registered",
+			declared: declaredTopology(),
+		},
+		{
+			name:     "a converged cluster reports the declared counts",
+			declared: declaredTopology(),
+			observed: []memgraph.Instance{
+				observedCoordinator(1, memgraph.RoleLeader),
+				observedCoordinator(2, memgraph.RoleFollower),
+				observedCoordinator(3, memgraph.RoleFollower),
+				observedDataInstance(0, memgraph.RoleMain),
+				observedDataInstance(1, memgraph.RoleReplica),
+			},
+			wantCoordinators:  3,
+			wantDataInstances: 2,
+		},
+		{
+			name:     "a coordinator that is present but not added does not count",
+			declared: declaredTopology(),
+			observed: []memgraph.Instance{
+				observedCoordinator(1, memgraph.RoleFollower),
+				selfReporting,
+				observedDataInstance(0, memgraph.RoleMain),
+			},
+			wantCoordinators:  1,
+			wantDataInstances: 1,
+		},
+		{
+			name:     "a grown topology reports the members registered so far",
+			declared: grownTopology(),
+			observed: []memgraph.Instance{
+				observedCoordinator(1, memgraph.RoleLeader),
+				observedCoordinator(2, memgraph.RoleFollower),
+				observedCoordinator(3, memgraph.RoleFollower),
+				observedCoordinator(4, memgraph.RoleFollower),
+				observedDataInstance(0, memgraph.RoleMain),
+				observedDataInstance(1, memgraph.RoleReplica),
+			},
+			wantCoordinators:  4,
+			wantDataInstances: 2,
+		},
+		// Counting only declared members keeps the status a report on the topology
+		// the user asked for, not on whatever else the cluster happens to know.
+		{
+			name:     "members the topology does not declare are not counted",
+			declared: declaredTopology(),
+			observed: []memgraph.Instance{
+				observedCoordinator(1, memgraph.RoleLeader),
+				observedCoordinator(2, memgraph.RoleFollower),
+				observedCoordinator(3, memgraph.RoleFollower),
+				observedCoordinator(4, memgraph.RoleFollower),
+				observedDataInstance(0, memgraph.RoleMain),
+				observedDataInstance(1, memgraph.RoleReplica),
+				observedDataInstance(2, memgraph.RoleReplica),
+			},
+			wantCoordinators:  3,
+			wantDataInstances: 2,
+		},
+		// Health is not registration: an instance the leader cannot reach is still
+		// a member of the cluster.
+		{
+			name:     "a down instance still counts as registered",
+			declared: declaredTopology(),
+			observed: []memgraph.Instance{
+				observedCoordinator(1, memgraph.RoleLeader),
+				observedCoordinator(2, memgraph.RoleFollower),
+				observedCoordinator(3, memgraph.RoleFollower),
+				downDataInstance(0),
+				observedDataInstance(1, memgraph.RoleMain),
+			},
+			wantCoordinators:  3,
+			wantDataInstances: 2,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			coordinators, dataInstances := planner.Registered(tc.declared, tc.observed)
+			if coordinators != tc.wantCoordinators || dataInstances != tc.wantDataInstances {
+				t.Errorf("Registered() = (%d, %d), want (%d, %d)",
+					coordinators, dataInstances, tc.wantCoordinators, tc.wantDataInstances)
 			}
 		})
 	}

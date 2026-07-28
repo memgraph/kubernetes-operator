@@ -97,7 +97,7 @@ func TestDeclaredTopologyFollowsReplicaCounts(t *testing.T) {
 func TestDeclaredTopologyMatchesCoordinatorStartScript(t *testing.T) {
 	cluster := minimalCluster()
 	topology := resources.DeclaredTopology(cluster)
-	sts := resources.CoordinatorStatefulSet(cluster)
+	sts := coordinatorStatefulSet(cluster)
 	script := strings.Join(sts.Spec.Template.Spec.Containers[0].Command, "\n")
 
 	// The script derives '<pod-name>.<suffix>' from POD_NAME; every declared
@@ -175,7 +175,7 @@ func TestDeclaredTopologyPortsAndClusterDomain(t *testing.T) {
 func TestDeclaredTopologyMatchesTunedCoordinatorStartScript(t *testing.T) {
 	cluster := tunedCluster()
 	topology := resources.DeclaredTopology(cluster)
-	sts := resources.CoordinatorStatefulSet(cluster)
+	sts := coordinatorStatefulSet(cluster)
 	script := strings.Join(sts.Spec.Template.Spec.Containers[0].Command, "\n")
 
 	suffix := fmt.Sprintf("%s.%s.svc.k8s.example.com", coordinatorName, testNamespace)
