@@ -16,8 +16,9 @@ limitations under the License.
 
 // Package memgraph provides the narrow client surface the operator uses to
 // drive a Memgraph high-availability cluster over Bolt: show instances, add
-// coordinator, register instance, set main, and — for a data instance a lowered
-// replica count is retiring — demote and unregister. All higher layers depend on
+// coordinator, register instance, set main, and — for the members a lowered
+// replica count is retiring — demote and unregister a data instance, yield
+// coordinator leadership and remove a coordinator. All higher layers depend on
 // the Client and Connector interfaces, never on the Bolt driver — this package
 // is the mock seam for testing and the only place the driver is referenced.
 package memgraph
@@ -110,6 +111,22 @@ type Client interface {
 	// UnregisterInstance removes the named data instance from the cluster, so
 	// the coordinators stop expecting it before its pod goes away.
 	UnregisterInstance(ctx context.Context, name string) error
+
+	// RemoveCoordinator drops the coordinator with the given Raft ID from the
+	// Raft cluster, so its vote is gone before its pod is. Raft refuses to
+	// remove its own leader, so the caller must never aim this at the leader —
+	// YieldLeadership moves leadership away first.
+	//
+	// The removed coordinator keeps running and keeps its state: NuRaft only
+	// stops it from campaigning, which is what makes a later ADD COORDINATOR on
+	// the retained volume safe.
+	RemoveCoordinator(ctx context.Context, id int32) error
+
+	// YieldLeadership makes the coordinator this client is connected to give up
+	// Raft leadership. It has to be issued on the leader itself and cannot name
+	// a successor — NuRaft's election picks one — so its outcome is not
+	// predictable and the caller must re-observe the cluster afterwards.
+	YieldLeadership(ctx context.Context) error
 
 	Close(ctx context.Context) error
 }

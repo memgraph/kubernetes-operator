@@ -163,17 +163,19 @@ const (
 	// declared topology.
 	ReasonAllInstancesRegistered = "AllInstancesRegistered"
 
-	// ReasonScaleInProgress is set when registration has converged but a
-	// StatefulSet still runs a different number of replicas than the spec
-	// declares, so the declared topology is not fully realized yet.
-	ReasonScaleInProgress = "ScaleInProgress"
-
-	// ReasonRetirementInProgress is set while a lowered dataInstances count is
-	// being carried out: the instances beyond the declared count are still
-	// members of the cluster, or their pods are still being shed. The message
-	// names them, so a scale-down that stalls says which instance it is waiting
-	// on.
+	// ReasonRetirementInProgress is set while a lowered count of either role is
+	// being carried out: the members beyond the declared count are still part of
+	// the cluster, or their pods are still being shed. The message names them, so
+	// a scale-down that stalls says which member it is waiting on.
 	ReasonRetirementInProgress = "RetirementInProgress"
+
+	// ReasonLeadershipTransferInProgress is set while a lowered coordinators
+	// count is waiting on Raft leadership to move: Raft refuses to remove its own
+	// leader, so a retiring coordinator holding leadership is asked to yield it
+	// first. YIELD LEADERSHIP cannot name a successor, so the operator re-observes
+	// the cluster under whichever coordinator won the election and may have to ask
+	// again — which is exactly what this reason means when it persists.
+	ReasonLeadershipTransferInProgress = "LeadershipTransferInProgress"
 
 	// ReasonMainElected is set when a data instance is observed as MAIN.
 	ReasonMainElected = "MainElected"

@@ -59,6 +59,11 @@ const (
 	// roleMain is the MAIN data-instance role reported in the SHOW INSTANCES role
 	// column.
 	roleMain = "main"
+
+	// roleLeader is the Raft leader coordinator role reported in the same column.
+	// Which coordinator holds it decides whether a shrink can remove a member at
+	// all: Raft refuses to remove its own leader.
+	roleLeader = "leader"
 )
 
 // example is the parsed quickstart manifest and the source of truth for the
@@ -536,6 +541,90 @@ spec:
 		Expect(claims).To(ContainElement(fmt.Sprintf("lib-storage-%s-data-2", scalingClusterName)),
 			"whenScaled follows spec.storage.retentionPolicy, which defaults to Retain")
 	})
+
+	// The coordinator shrink, against the 5-coordinator cluster the specs above left
+	// behind (Ordered), with Raft leadership deliberately parked on a coordinator
+	// that has to go — the case the whole safety argument is about: Raft returns
+	// RAFT_CANNOT_REMOVE_LEADER for its own leader, and a StatefulSet sheds only its
+	// highest ordinals, so the operator has to move leadership out of the retiring
+	// range before it can remove anything there.
+	It("retires the coordinator holding Raft leadership and only then sheds its pod", func() {
+		// The topology the data shrink left running, and the one this spec drops to.
+		// Three is the floor, so a shrink from five retires an even number of members
+		// and the surviving Raft cluster keeps an odd membership throughout.
+		running := grown.withTopology(5, 2)
+		shrunk := grown.withTopology(3, 2)
+		retiring := []string{"coordinator_4", "coordinator_5"}
+
+		By("forcing Raft leadership onto a coordinator the shrink retires")
+		// Retried as a whole: YIELD LEADERSHIP names no successor, so each attempt
+		// hands leadership to whichever member NuRaft's election picks.
+		Eventually(func(g Gomega) {
+			g.Expect(running.makeLeader(retiring[0])).To(Succeed())
+			view, err := running.leaderView()
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(coordinatorLeaderOf(view)).To(Equal(retiring[0]))
+		}, 10*time.Minute, 10*time.Second).Should(Succeed())
+
+		By("lowering the coordinator count on the live cluster")
+		cmd := exec.Command("kubectl", "patch", "memgraphcluster", scalingClusterName,
+			"-n", scalingNamespace, "--type=merge", "-p",
+			fmt.Sprintf(`{"spec":{"coordinators":%d}}`, shrunk.coordinators))
+		_, err := utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred(), "the operator must accept a lowered coordinator count")
+
+		By("waiting for both retiring members to leave the Raft cluster while their pods are still there")
+		Eventually(func(g Gomega) {
+			// The replica count is read before the membership view for the reason the
+			// data shrink above spells out: a view read afterwards that still lists a
+			// retiring member proves it held a vote at a moment its pod had already
+			// been scaled away, which is the order the operator must never produce.
+			replicas, err := shrunk.replicas("coordinator")
+			g.Expect(err).NotTo(HaveOccurred())
+
+			// Read through the five-coordinator view: while leadership is still moving
+			// it may sit on a retiring ordinal, which the shrunk cluster does not scan.
+			view, err := running.leaderView()
+			g.Expect(err).NotTo(HaveOccurred())
+			names := instanceNames(view)
+
+			for _, name := range retiring {
+				if replicas != "5" && slices.Contains(names, name) {
+					// Not something to retry: the ordering this catches is broken for
+					// good by the time it is observable.
+					StopTrying(fmt.Sprintf(
+						"the coordinator StatefulSet was scaled to %s replicas while %s was still a Raft member",
+						replicas, name)).Now()
+				}
+				g.Expect(names).NotTo(ContainElement(name))
+			}
+		}, 10*time.Minute, 5*time.Second).Should(Succeed())
+
+		By("waiting for their pods to be shed")
+		Eventually(func(g Gomega) {
+			g.Expect(shrunk.replicas("coordinator")).To(Equal("3"))
+			g.Expect(shrunk.podExists("coordinator", 3)).To(BeFalse())
+			g.Expect(shrunk.podExists("coordinator", 4)).To(BeFalse())
+		}, 5*time.Minute, 5*time.Second).Should(Succeed())
+
+		By("confirming the shrunk cluster is registered, converged, and led by a survivor")
+		Eventually(shrunk.verifyRegistered, 10*time.Minute, 10*time.Second).Should(Succeed())
+		shrunk.awaitConverged(5 * time.Minute)
+		coordinators, _ := shrunk.registeredCounts()
+		Expect(coordinators).To(Equal("3"))
+		view, err := shrunk.leaderView()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(coordinatorLeaderOf(view)).To(BeElementOf("coordinator_1", "coordinator_2", "coordinator_3"))
+
+		By("confirming the retired coordinators' claims are kept by the default retention policy")
+		claims, err := listPVCs(scalingNamespace)
+		Expect(err).NotTo(HaveOccurred())
+		for _, ordinal := range []int{3, 4} {
+			Expect(claims).To(ContainElement(
+				fmt.Sprintf("lib-storage-%s-coordinator-%d", scalingClusterName, ordinal)),
+				"whenScaled follows spec.storage.retentionPolicy, which defaults to Retain")
+		}
+	})
 })
 
 // listAdoptedPVCs returns the names of the PersistentVolumeClaims a
@@ -912,6 +1001,40 @@ func (c clusterUnderTest) makeMain(name string) error {
 		return fmt.Errorf("moving MAIN from %s to %s on %s: %w", main, name, pod, err)
 	}
 	return nil
+}
+
+// makeLeader nudges Raft leadership toward the named coordinator by yielding it on
+// whichever coordinator currently holds it, which is how a spec parks leadership
+// where a scale-down cannot remove it.
+//
+// One call is an attempt, not a guarantee: YIELD LEADERSHIP takes no successor, so
+// NuRaft's election decides who takes over. Callers retry until the target wins. It
+// is a no-op when the target already holds leadership.
+func (c clusterUnderTest) makeLeader(name string) error {
+	pod, view, err := c.leaderPod()
+	if err != nil {
+		return err
+	}
+	if coordinatorLeaderOf(view) == name {
+		return nil
+	}
+	cmd := exec.Command("kubectl", "exec", pod, "-n", c.namespace, "-c", "memgraph", "--",
+		"bash", "-c", "echo 'YIELD LEADERSHIP;' | mgconsole")
+	if _, err := utils.Run(cmd); err != nil {
+		return fmt.Errorf("yielding leadership on %s: %w", pod, err)
+	}
+	return nil
+}
+
+// coordinatorLeaderOf returns the coordinator a view reports as Raft leader, or the
+// empty string when it reports none.
+func coordinatorLeaderOf(view []instanceRow) string {
+	for _, instance := range view {
+		if instance.role == roleLeader {
+			return instance.name
+		}
+	}
+	return ""
 }
 
 // mainOf returns the name of the data instance a view reports as MAIN, or the

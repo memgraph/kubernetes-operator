@@ -56,3 +56,12 @@ func demoteInstanceQuery(name string) string {
 func unregisterInstanceQuery(name string) string {
 	return fmt.Sprintf("UNREGISTER INSTANCE %s", name)
 }
+
+func removeCoordinatorQuery(id int32) string {
+	return fmt.Sprintf("REMOVE COORDINATOR %d", id)
+}
+
+// yieldLeadershipQuery takes no argument on purpose: Memgraph's grammar has no
+// successor to name, so the coordinator it runs on hands leadership to whichever
+// member NuRaft's election picks.
+const yieldLeadershipQuery = "YIELD LEADERSHIP"

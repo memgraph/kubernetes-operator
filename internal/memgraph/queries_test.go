@@ -78,6 +78,22 @@ func TestUnregisterInstanceQuery(t *testing.T) {
 	}
 }
 
+func TestRemoveCoordinatorQuery(t *testing.T) {
+	got := removeCoordinatorQuery(4)
+	if want := "REMOVE COORDINATOR 4"; got != want {
+		t.Errorf("removeCoordinatorQuery() = %q, want %q", got, want)
+	}
+}
+
+// YIELD LEADERSHIP names no successor: the coordinator it runs on is the subject,
+// and NuRaft picks who takes over. A query that grew an argument would mean the
+// planner could suddenly predict the outcome, so the shape is pinned.
+func TestYieldLeadershipQuery(t *testing.T) {
+	if want := "YIELD LEADERSHIP"; yieldLeadershipQuery != want {
+		t.Errorf("yieldLeadershipQuery = %q, want %q", yieldLeadershipQuery, want)
+	}
+}
+
 func TestInstanceFromRecord(t *testing.T) {
 	record := &db.Record{
 		Keys: []string{

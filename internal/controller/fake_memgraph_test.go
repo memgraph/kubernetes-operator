@@ -88,6 +88,23 @@ func (f *fakeMemgraph) setInstances(instances []memgraph.Instance) {
 	f.instances = slices.Clone(instances)
 }
 
+// setLeader moves Raft leadership onto the named coordinator, which is how a spec
+// parks it where a scale-down cannot remove it: on an ordinal the shrink retires.
+func (f *fakeMemgraph) setLeader(name string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i, instance := range f.instances {
+		if !strings.HasPrefix(instance.Name, "coordinator_") {
+			continue
+		}
+		role := memgraph.RoleFollower
+		if instance.Name == name {
+			role = memgraph.RoleLeader
+		}
+		f.instances[i].Role = role
+	}
+}
+
 // setStaleView makes the coordinator at the given Bolt address answer
 // SHOW INSTANCES with its own view instead of the cluster's.
 func (f *fakeMemgraph) setStaleView(address string, instances []memgraph.Instance) {
@@ -237,6 +254,57 @@ func (c *fakeClient) UnregisterInstance(_ context.Context, name string) error {
 			return nil
 		}
 		return fmt.Errorf("fake memgraph: instance %s is not registered", name)
+	})
+}
+
+// RemoveCoordinator drops the coordinator with the given Raft ID from the cluster
+// view and — as Raft does — refuses the current leader, so a plan that aims a
+// removal at the leader fails the suite loudly instead of quietly working.
+func (c *fakeClient) RemoveCoordinator(_ context.Context, id int32) error {
+	name := fmt.Sprintf("coordinator_%d", id)
+	return c.execute(fmt.Sprintf("REMOVE COORDINATOR %d", id), func() error {
+		for i, instance := range c.cluster.instances {
+			if instance.Name != name {
+				continue
+			}
+			if instance.IsLeader() {
+				return fmt.Errorf("fake memgraph: %s is the leader", name)
+			}
+			c.cluster.instances = slices.Delete(c.cluster.instances, i, i+1)
+			return nil
+		}
+		return fmt.Errorf("fake memgraph: coordinator %s is not a member", name)
+	})
+}
+
+// YieldLeadership moves leadership off the coordinator serving this connection to
+// the lowest-numbered remaining member, standing in for the election NuRaft runs.
+// A test cannot rely on which coordinator wins — that is the point of the command
+// — only on leadership having moved, which is what the operator has to converge
+// around.
+func (c *fakeClient) YieldLeadership(context.Context) error {
+	self, err := c.selfName()
+	if err != nil {
+		return err
+	}
+	return c.execute("YIELD LEADERSHIP", func() error {
+		successor := -1
+		for i, instance := range c.cluster.instances {
+			if strings.HasPrefix(instance.Name, "coordinator_") && instance.Name != self {
+				successor = i
+				break
+			}
+		}
+		if successor < 0 {
+			return fmt.Errorf("fake memgraph: %s is the only coordinator, so leadership cannot be yielded", self)
+		}
+		for i, instance := range c.cluster.instances {
+			if instance.Name == self {
+				c.cluster.instances[i].Role = memgraph.RoleFollower
+			}
+		}
+		c.cluster.instances[successor].Role = memgraph.RoleLeader
+		return nil
 	})
 }
 

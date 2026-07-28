@@ -39,6 +39,11 @@ const (
 	thirdInstance  = "instance_2"
 )
 
+// fourthCoordinator is the lowest-numbered coordinator a shrink from five to
+// three retires, and the one the cases below park Raft leadership on: a
+// StatefulSet sheds its highest ordinals, so the leader may well sit on one.
+const fourthCoordinator = "coordinator_4"
+
 // declaredTopology is the canonical 3-coordinator, 2-data-instance fixture
 // the cases below diff observed cluster states against.
 func declaredTopology() planner.Topology {
@@ -66,6 +71,26 @@ func shrunkTopology(declared, running int) planner.Topology {
 // coordinators grow from 3 to 5 while the data instances shrink from 3 to 2.
 func mixedTopology() planner.Topology {
 	topology := topologyOf(5, 2)
+	topology.RetiringDataInstances = append(topology.RetiringDataInstances, dataInstanceSpec(2))
+	return topology
+}
+
+// shrunkCoordinators is a cluster whose coordinators count was lowered from five
+// to three — the smallest coordinator shrink the schema floors allow, and an even
+// number of members either way — while its StatefulSet still runs all five pods:
+// coordinator_4 and coordinator_5 are Raft members on their way out.
+func shrunkCoordinators() planner.Topology {
+	topology := topologyOf(3, 2)
+	for id := int32(4); id <= 5; id++ {
+		topology.RetiringCoordinators = append(topology.RetiringCoordinators, coordinatorSpec(id))
+	}
+	return topology
+}
+
+// retiringBothRoles is one edit lowering both counts: the coordinators shrink from
+// 5 to 3 while the data instances shrink from 3 to 2.
+func retiringBothRoles() planner.Topology {
+	topology := shrunkCoordinators()
 	topology.RetiringDataInstances = append(topology.RetiringDataInstances, dataInstanceSpec(2))
 	return topology
 }
@@ -113,6 +138,22 @@ func observedCoordinator(id int32, role string) memgraph.Instance {
 		Health:            "up",
 		Role:              role,
 	}
+}
+
+// observedCoordinators is the Raft membership a leader reports: one row per given
+// coordinator ID, the one named by leaderID reporting itself leader. Which
+// coordinator holds leadership is what decides whether a shrink can remove
+// members at all, so every retirement case below states it outright.
+func observedCoordinators(leaderID int32, ids ...int32) []memgraph.Instance {
+	view := make([]memgraph.Instance, 0, len(ids))
+	for _, id := range ids {
+		role := memgraph.RoleFollower
+		if id == leaderID {
+			role = memgraph.RoleLeader
+		}
+		view = append(view, observedCoordinator(id, role))
+	}
+	return view
 }
 
 func observedDataInstance(i int, role string) memgraph.Instance {
@@ -438,6 +479,116 @@ func TestPlan(t *testing.T) {
 				planner.DemoteInstance{Name: thirdInstance},
 				planner.SetInstanceToMain{Name: firstInstance},
 				planner.UnregisterInstance{Name: thirdInstance},
+			},
+		},
+		// Coordinators the count drops are removed from Raft outright when the
+		// leader is a survivor: their votes are gone before their pods are, and
+		// removing a follower needs no leadership dance.
+		{
+			name: "retiring coordinators are removed from Raft under a surviving leader",
+			observed: append(observedCoordinators(1, 1, 2, 3, 4, 5),
+				observedDataInstance(0, memgraph.RoleMain),
+				observedDataInstance(1, memgraph.RoleReplica),
+			),
+			declared: ptr.To(shrunkCoordinators()),
+			want: []planner.Command{
+				planner.RemoveCoordinator{Coordinator: coordinatorSpec(4)},
+				planner.RemoveCoordinator{Coordinator: coordinatorSpec(5)},
+			},
+		},
+		// Raft refuses to remove its own leader, so a leader on a retiring ordinal
+		// is asked to yield — last in the plan, with nothing after it, because the
+		// election picks the successor and only a fresh observation can say who won.
+		// The other retiring member still goes in this same pass: removing a
+		// follower is safe and predictable.
+		{
+			name: "a retiring leader yields last, after every removal it can still order",
+			observed: append(observedCoordinators(4, 1, 2, 3, 4, 5),
+				observedDataInstance(0, memgraph.RoleMain),
+				observedDataInstance(1, memgraph.RoleReplica),
+			),
+			declared: ptr.To(shrunkCoordinators()),
+			want: []planner.Command{
+				planner.RemoveCoordinator{Coordinator: coordinatorSpec(5)},
+				planner.YieldLeadership{Leader: fourthCoordinator},
+			},
+		},
+		// Read-before-write: a coordinator already gone from the Raft membership gets
+		// no removal, so a pass that crashed between two removals re-plans to just
+		// the rest of the work.
+		{
+			name: "an already-removed retiring coordinator is not removed again",
+			observed: append(observedCoordinators(1, 1, 2, 3, 4),
+				observedDataInstance(0, memgraph.RoleMain),
+				observedDataInstance(1, memgraph.RoleReplica),
+			),
+			declared: ptr.To(shrunkCoordinators()),
+			want: []planner.Command{
+				planner.RemoveCoordinator{Coordinator: coordinatorSpec(4)},
+			},
+		},
+		// Nothing is left to order ahead of the yield: the plan is the yield alone,
+		// and the removal of the leader itself waits for the next pass.
+		{
+			name: "a retiring leader with nothing else to remove plans only the yield",
+			observed: append(observedCoordinators(4, 1, 2, 3, 4),
+				observedDataInstance(0, memgraph.RoleMain),
+				observedDataInstance(1, memgraph.RoleReplica),
+			),
+			declared: ptr.To(shrunkCoordinators()),
+			want: []planner.Command{
+				planner.YieldLeadership{Leader: fourthCoordinator},
+			},
+		},
+		// Leadership on a coordinator the topology neither declares nor retires — one
+		// a human added — is left where it is: it is not in the way of any removal.
+		{
+			name: "a leader outside the retiring set is not asked to yield",
+			observed: append(observedCoordinators(6, 1, 2, 3, 4, 5, 6),
+				observedDataInstance(0, memgraph.RoleMain),
+				observedDataInstance(1, memgraph.RoleReplica),
+			),
+			declared: ptr.To(shrunkCoordinators()),
+			want: []planner.Command{
+				planner.RemoveCoordinator{Coordinator: coordinatorSpec(4)},
+				planner.RemoveCoordinator{Coordinator: coordinatorSpec(5)},
+			},
+		},
+		// Both roles shrinking in one edit: the data instances are retired first
+		// (MAIN moved off the one going away), then the Raft members are removed.
+		{
+			name: "both roles retire in one pass under a surviving leader",
+			observed: append(observedCoordinators(1, 1, 2, 3, 4, 5),
+				observedDataInstance(0, memgraph.RoleReplica),
+				observedDataInstance(1, memgraph.RoleReplica),
+				observedDataInstance(2, memgraph.RoleMain),
+			),
+			declared: ptr.To(retiringBothRoles()),
+			want: []planner.Command{
+				planner.DemoteInstance{Name: thirdInstance},
+				planner.SetInstanceToMain{Name: firstInstance},
+				planner.UnregisterInstance{Name: thirdInstance},
+				planner.RemoveCoordinator{Coordinator: coordinatorSpec(4)},
+				planner.RemoveCoordinator{Coordinator: coordinatorSpec(5)},
+			},
+		},
+		// The same edit with leadership in the way: the data-instance retirement is
+		// fully ordered and issues in this pass regardless — only the removal of the
+		// leader itself has to wait behind the yield.
+		{
+			name: "a retiring leader does not hold up the data-instance retirement",
+			observed: append(observedCoordinators(4, 1, 2, 3, 4, 5),
+				observedDataInstance(0, memgraph.RoleReplica),
+				observedDataInstance(1, memgraph.RoleReplica),
+				observedDataInstance(2, memgraph.RoleMain),
+			),
+			declared: ptr.To(retiringBothRoles()),
+			want: []planner.Command{
+				planner.DemoteInstance{Name: thirdInstance},
+				planner.SetInstanceToMain{Name: firstInstance},
+				planner.UnregisterInstance{Name: thirdInstance},
+				planner.RemoveCoordinator{Coordinator: coordinatorSpec(5)},
+				planner.YieldLeadership{Leader: fourthCoordinator},
 			},
 		},
 		// The retiring range is bounded by the operator's own prior apply, which is
