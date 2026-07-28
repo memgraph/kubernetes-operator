@@ -179,11 +179,17 @@ func (r *MemgraphClusterReconciler) reconcileRegistration(
 	topology := resources.DeclaredTopology(cluster)
 	leader, observed, err := r.observeCluster(ctx, topology)
 	if err != nil {
-		log.Info("Deferred registration because no coordinator answered", "reason", err.Error())
-		msg := "No coordinator answered SHOW INSTANCES"
+		log.Info("Deferred registration because no coordinator leader was usable", "reason", err.Error())
+		reason, msg := memgraphcomv1alpha1.ReasonCoordinatorUnreachable, "No coordinator answered SHOW INSTANCES"
+		if errors.Is(err, errNoCoordinatorLeader) {
+			// The coordinators are up but have no leader between them, so their
+			// views are stale and no registration command would be accepted.
+			reason, msg = memgraphcomv1alpha1.ReasonNoCoordinatorLeader,
+				"No coordinator reported a leader, so the cluster has no Raft quorum"
+		}
 		if statusErr := r.writeStatus(ctx, cluster, cluster.Status.Main,
-			notReadyCondition(memgraphcomv1alpha1.ReasonCoordinatorUnreachable, msg),
-			notConvergedCondition(memgraphcomv1alpha1.ReasonCoordinatorUnreachable, msg),
+			notReadyCondition(reason, msg),
+			notConvergedCondition(reason, msg),
 		); statusErr != nil {
 			return ctrl.Result{}, statusErr
 		}
@@ -326,20 +332,34 @@ func (r *MemgraphClusterReconciler) workloadsReady(
 	return true, nil
 }
 
+// errNoCoordinatorLeader reports that coordinators answered SHOW INSTANCES but
+// none of them named a leader. It is distinguished from unreachable
+// coordinators because the two need different remedies, and it is reported as
+// such on the resource.
+var errNoCoordinatorLeader = errors.New("no coordinator reported a leader")
+
 // observeCluster connects to the coordinator leader and returns its client
 // together with the SHOW INSTANCES view the planner diffs against.
-// Coordinators are tried in ordinal order: one reporting itself leader is
-// used directly, a follower redirects to the leader it reports, and when no
-// leader exists yet (fresh cluster, Raft not formed) the first reachable
-// coordinator is used — adding coordinators to it makes it the leader,
-// mirroring the HA chart's bootstrap against its first coordinator.
+// Coordinators are tried in ordinal order: one reporting itself leader is used
+// directly, and one reporting another coordinator as leader redirects to it.
+//
+// A coordinator that names no leader is skipped, never used as planning input.
+// Its view is not the fresh-cluster case: a coordinator starts with itself as
+// the only member of its Raft configuration and as the leader of that
+// one-member cluster, so a fresh coordinator always names itself. An absent
+// leader means the coordinator lost track of one — quorum gone, or it stepped
+// down or was removed from the Raft cluster — and it then answers from its own
+// state machine, which can be arbitrarily stale. Every mutating query the
+// planner could issue needs a leader anyway, so such a view describes a cluster
+// state that is neither current nor writable.
 func (r *MemgraphClusterReconciler) observeCluster(
 	ctx context.Context,
 	topology planner.Topology,
 ) (memgraph.Client, []memgraph.Instance, error) {
 	var errs []error
+	leaderless := false
 	for _, coordinator := range topology.Coordinators {
-		leader, observed, err := r.showInstances(ctx, coordinator)
+		conn, observed, err := r.showInstances(ctx, coordinator.BoltServer)
 		if err != nil {
 			errs = append(errs, err)
 			continue
@@ -352,45 +372,64 @@ func (r *MemgraphClusterReconciler) observeCluster(
 				break
 			}
 		}
-		if leaderName == "" || leaderName == coordinator.Name() {
-			return leader, observed, nil
+		if leaderName == coordinator.Name() {
+			return conn, observed, nil
+		}
+		if err := conn.Close(ctx); err != nil {
+			errs = append(errs, err)
+		}
+		if leaderName == "" {
+			leaderless = true
+			errs = append(errs, fmt.Errorf("%s reported no leader", coordinator.Name()))
+			continue
 		}
 
 		// This coordinator is a follower; redirect to the leader it reports.
-		if err := leader.Close(ctx); err != nil {
-			errs = append(errs, err)
-		}
-		candidate, found := coordinatorByName(topology, leaderName)
+		address, found := leaderAddress(topology, observed, leaderName)
 		if !found {
-			errs = append(errs, fmt.Errorf("%s reported leader %s, which is not declared", coordinator.Name(), leaderName))
+			errs = append(errs, fmt.Errorf("%s reported leader %s without a Bolt address",
+				coordinator.Name(), leaderName))
 			continue
 		}
-		leader, observed, err = r.showInstances(ctx, candidate)
+		conn, observed, err = r.showInstances(ctx, address)
 		if err != nil {
 			errs = append(errs, err)
 			continue
 		}
-		return leader, observed, nil
+		return conn, observed, nil
 	}
-	return nil, nil, fmt.Errorf("no coordinator leader reachable: %w", errors.Join(errs...))
+	if leaderless {
+		return nil, nil, fmt.Errorf("%w: %w", errNoCoordinatorLeader, errors.Join(errs...))
+	}
+	return nil, nil, fmt.Errorf("no coordinator answered SHOW INSTANCES: %w", errors.Join(errs...))
 }
 
-func coordinatorByName(topology planner.Topology, name string) (memgraph.CoordinatorSpec, bool) {
+// leaderAddress resolves the Bolt address of the coordinator reported as
+// leader. The declared topology is preferred — it is the address the operator
+// itself registered — but the reported view is a valid fallback, because the
+// leader need not be one of the declared coordinators: a coordinator on its way
+// out of the cluster can hold leadership while it is still being removed.
+func leaderAddress(topology planner.Topology, observed []memgraph.Instance, name string) (string, bool) {
 	for _, coordinator := range topology.Coordinators {
 		if coordinator.Name() == name {
-			return coordinator, true
+			return coordinator.BoltServer, true
 		}
 	}
-	return memgraph.CoordinatorSpec{}, false
+	for _, instance := range observed {
+		if instance.Name == name && instance.BoltServer != "" {
+			return instance.BoltServer, true
+		}
+	}
+	return "", false
 }
 
-// showInstances connects to one coordinator and fetches its cluster view,
-// closing the connection again on query failure.
+// showInstances connects to one coordinator's Bolt address and fetches its
+// cluster view, closing the connection again on query failure.
 func (r *MemgraphClusterReconciler) showInstances(
 	ctx context.Context,
-	coordinator memgraph.CoordinatorSpec,
+	address string,
 ) (memgraph.Client, []memgraph.Instance, error) {
-	c, err := r.Memgraph.Connect(ctx, coordinator.BoltServer)
+	c, err := r.Memgraph.Connect(ctx, address)
 	if err != nil {
 		return nil, nil, err
 	}

@@ -474,6 +474,78 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			}))
 		})
 
+		// A coordinator that reports no leader answers from its own state
+		// machine: quorum is gone, or it stepped down or was removed from the
+		// Raft cluster. Its view can be arbitrarily stale and no management
+		// query it forwards would be accepted, so it is skipped rather than
+		// planned against.
+		It("should skip a coordinator reporting no leader and plan on the next one's view", func() {
+			fake.setInstances([]memgraph.Instance{
+				observedCoordinator(1, memgraph.RoleFollower),
+				observedCoordinator(2, memgraph.RoleLeader),
+				observedCoordinator(3, memgraph.RoleFollower),
+				observedDataInstance(0, memgraph.RoleMain),
+			})
+			// coordinator_1 lost the leader and still remembers a cluster that
+			// has both data instances registered.
+			fake.setStaleView(coordinatorAddress(0), []memgraph.Instance{
+				observedCoordinator(1, memgraph.RoleFollower),
+				observedCoordinator(2, memgraph.RoleFollower),
+				observedCoordinator(3, memgraph.RoleFollower),
+				observedDataInstance(0, memgraph.RoleMain),
+				observedDataInstance(1, memgraph.RoleReplica),
+			})
+
+			reconcileCluster(resourceName)
+			markWorkloadsReady(resourceName)
+			reconcileCluster(resourceName)
+
+			leader := coordinatorAddress(1)
+			Expect(fake.executedCommands()).To(Equal([]string{
+				leader + ": REGISTER INSTANCE instance_1",
+			}), "the leader's view is planned against, not the stale one that reports instance_1 registered")
+		})
+
+		It("should issue nothing while no coordinator reports a leader", func() {
+			// Quorum lost: every coordinator answers, none names a leader.
+			fake.setInstances([]memgraph.Instance{
+				observedCoordinator(1, memgraph.RoleFollower),
+				observedCoordinator(2, memgraph.RoleFollower),
+				observedCoordinator(3, memgraph.RoleFollower),
+			})
+
+			reconcileCluster(resourceName)
+			markWorkloadsReady(resourceName)
+			result := reconcileCluster(resourceName)
+
+			Expect(fake.executedCommands()).To(BeEmpty(),
+				"a cluster with no coordinator leader cannot be observed or written to")
+			Expect(fake.connects()).To(Equal(3), "every declared coordinator is tried before giving up")
+			Expect(result.RequeueAfter).To(BeNumerically(">", 0),
+				"a cluster that lost its quorum is retried, not abandoned")
+		})
+
+		// The leader is whoever the coordinators elected, which need not be a
+		// coordinator the CR declares — a coordinator on its way out of the
+		// cluster can still hold leadership.
+		It("should register on a leader outside the declared coordinator set", func() {
+			fake.setInstances([]memgraph.Instance{
+				observedCoordinator(1, memgraph.RoleFollower),
+				observedCoordinator(2, memgraph.RoleFollower),
+				observedCoordinator(3, memgraph.RoleFollower),
+				observedCoordinator(4, memgraph.RoleLeader),
+				observedDataInstance(0, memgraph.RoleMain),
+			})
+
+			reconcileCluster(resourceName)
+			markWorkloadsReady(resourceName)
+			reconcileCluster(resourceName)
+
+			Expect(fake.executedCommands()).To(Equal([]string{
+				coordinatorAddress(3) + ": REGISTER INSTANCE instance_1",
+			}), "the undeclared leader is redirected to, and left registered as it is")
+		})
+
 		// convergedCluster is the fully registered view of the default
 		// 3-coordinator, 2-data topology with instance_0 elected MAIN — the
 		// steady state drift is introduced against below.
@@ -629,6 +701,31 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			converged := condition(memgraphcomv1alpha1.ConditionConverged)
 			Expect(converged.Status).To(Equal(metav1.ConditionFalse))
 			Expect(converged.Reason).To(Equal(memgraphcomv1alpha1.ReasonCoordinatorUnreachable))
+		})
+
+		// Coordinators that answer but have no leader between them are a
+		// different problem from coordinators that do not answer at all — the
+		// pods are up and serving Bolt, what is missing is the Raft quorum — so
+		// they get their own reason.
+		It("should report a missing quorum apart from unreachable coordinators", func() {
+			fake.setInstances([]memgraph.Instance{
+				observedCoordinator(1, memgraph.RoleFollower),
+				observedCoordinator(2, memgraph.RoleFollower),
+				observedCoordinator(3, memgraph.RoleFollower),
+				observedDataInstance(0, memgraph.RoleMain),
+			})
+			reconcileCluster(resourceName)
+			markWorkloadsReady(resourceName)
+			reconcileCluster(resourceName)
+
+			for _, condType := range []string{
+				memgraphcomv1alpha1.ConditionReady,
+				memgraphcomv1alpha1.ConditionConverged,
+			} {
+				cond := condition(condType)
+				Expect(cond.Status).To(Equal(metav1.ConditionFalse), "condition %s", condType)
+				Expect(cond.Reason).To(Equal(memgraphcomv1alpha1.ReasonNoCoordinatorLeader), "condition %s", condType)
+			}
 		})
 
 		// A rejected apply is retried behind the scenes forever, so the resource
