@@ -756,7 +756,7 @@ type ExtraArgsSpec struct {
 	// +kubebuilder:validation:MaxItems=64
 	// +kubebuilder:validation:items:MinLength=1
 	// +kubebuilder:validation:items:MaxLength=4096
-	// +kubebuilder:validation:XValidation:rule="self.all(a, !['--bolt-port', '--management-port', '--coordinator-id', '--coordinator-hostname', '--coordinator-port'].exists(f, a.startsWith(f)))",message="extraArgs must not set a port or the coordinator identity the operator derives (--bolt-port, --management-port, --coordinator-id, --coordinator-hostname, --coordinator-port); configure ports through spec.ports"
+	// +kubebuilder:validation:XValidation:rule="self.all(a, !a.replace('-', '_').matches('^_{1,2}(bolt_port|management_port|coordinator_id|coordinator_hostname|coordinator_port)($|[= ])'))",message="extraArgs must not set a port or the coordinator identity the operator derives (bolt-port, management-port, coordinator-id, coordinator-hostname, coordinator-port), in any spelling gflags accepts; configure ports through spec.ports"
 	// +optional
 	Coordinators []string `json:"coordinators,omitempty"`
 
@@ -764,7 +764,7 @@ type ExtraArgsSpec struct {
 	// +kubebuilder:validation:MaxItems=64
 	// +kubebuilder:validation:items:MinLength=1
 	// +kubebuilder:validation:items:MaxLength=4096
-	// +kubebuilder:validation:XValidation:rule="self.all(a, !['--bolt-port', '--management-port', '--coordinator-id', '--coordinator-hostname', '--coordinator-port'].exists(f, a.startsWith(f)))",message="extraArgs must not set a port or the coordinator identity the operator derives (--bolt-port, --management-port, --coordinator-id, --coordinator-hostname, --coordinator-port); configure ports through spec.ports"
+	// +kubebuilder:validation:XValidation:rule="self.all(a, !a.replace('-', '_').matches('^_{1,2}(bolt_port|management_port|coordinator_id|coordinator_hostname|coordinator_port)($|[= ])'))",message="extraArgs must not set a port or the coordinator identity the operator derives (bolt-port, management-port, coordinator-id, coordinator-hostname, coordinator-port), in any spelling gflags accepts; configure ports through spec.ports"
 	// +optional
 	Data []string `json:"data,omitempty"`
 }

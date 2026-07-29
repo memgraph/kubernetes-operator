@@ -24,6 +24,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -340,10 +341,17 @@ spec:
 		// attaches a sync *after* it creates the claim, and a claim whose set
 		// is deleted before it is adopted is stranded for good, not merely
 		// collected late.
+		//
+		// The claims are named rather than counted. A count is satisfied by any
+		// eight adopted claims, so it cannot distinguish the state this guard
+		// exists to wait for from any other view that happens to be eight rows
+		// long — and a guard that passes before adoption completes hands the rest
+		// of the spec the exact race it was put here to exclude.
+		wantClaims := expectedClaims(retentionCluster, map[string]int{"coordinator": 3, "data": 1})
 		Eventually(func(g Gomega) {
 			claims, err := listAdoptedPVCs(retentionNamespace)
 			g.Expect(err).NotTo(HaveOccurred())
-			g.Expect(claims).To(HaveLen(8))
+			g.Expect(claims).To(ConsistOf(wantClaims))
 		}, 5*time.Minute, 5*time.Second).Should(Succeed())
 
 		By("deleting the MemgraphCluster")
@@ -352,11 +360,30 @@ spec:
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred(), "Failed to delete the MemgraphCluster")
 
+		// Claim deletion is garbage collection following the owner reference, so
+		// the sets have to be gone before their absence can take the claims with
+		// them. Waiting on that first is also what separates the two ways this can
+		// fail: sets that linger name the workloads, claims that linger after the
+		// sets are gone name the collection.
+		By("waiting for garbage collection to remove the workloads")
+		Eventually(func(g Gomega) {
+			cmd := exec.Command("kubectl", "get", "statefulsets", "-n", retentionNamespace,
+				"-o", "jsonpath={.items[*].metadata.name}")
+			output, err := utils.Run(cmd)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(strings.TrimSpace(output)).To(BeEmpty())
+		}, 5*time.Minute, 5*time.Second).Should(Succeed())
+
 		By("waiting for the StatefulSet machinery to take the claims down with it")
 		Eventually(func(g Gomega) {
 			claims, err := listPVCs(retentionNamespace)
 			g.Expect(err).NotTo(HaveOccurred())
-			g.Expect(claims).To(BeEmpty())
+			// A claim that outlives its owner says nothing on its own about why, so
+			// the owner references it still carries go into the failure: whether it
+			// was never adopted, or adopted by a set that is somehow still around,
+			// is the whole diagnosis and it is not recoverable after the fact.
+			g.Expect(claims).To(BeEmpty(), "claims left behind, with their owners:\n%s",
+				describeClaimOwners(retentionNamespace))
 		}, 5*time.Minute, 5*time.Second).Should(Succeed())
 	})
 })
@@ -637,6 +664,41 @@ spec:
 // asserting the Delete retention policy must wait for before it deletes
 // anything. It gates a spec rather than asserting one — the retention
 // assertion itself stays on the claims a user would see.
+// expectedClaims is every claim name the given cluster's StatefulSets provision:
+// the two volume claim templates, for each pod of each role. Claim names are
+// "<template>-<statefulset>-<ordinal>", which is the StatefulSet controller's
+// own naming and therefore stable enough to assert on.
+func expectedClaims(cluster string, replicasByRole map[string]int) []string {
+	var claims []string
+	for _, role := range slices.Sorted(maps.Keys(replicasByRole)) {
+		for ordinal := range replicasByRole[role] {
+			for _, template := range []string{"lib-storage", "log-storage"} {
+				claims = append(claims, fmt.Sprintf("%s-%s-%s-%d", template, cluster, role, ordinal))
+			}
+		}
+	}
+	return claims
+}
+
+// describeClaimOwners renders each claim in the namespace with the owner
+// references it carries, for a failure message that has to explain why a claim
+// outlived the set that owned it. It reports the error inline rather than
+// returning it: it runs only on a failing path, where losing the diagnosis to a
+// second error would defeat the point.
+func describeClaimOwners(namespace string) string {
+	cmd := exec.Command("kubectl", "get", "pvc", "-n", namespace, "-o",
+		`jsonpath={range .items[*]}{.metadata.name}{"\towners="}`+
+			`{range .metadata.ownerReferences[*]}{.kind}{"/"}{.name}{"("}{.uid}{") "}{end}{"\n"}{end}`)
+	output, err := utils.Run(cmd)
+	if err != nil {
+		return fmt.Sprintf("(could not read claim owners: %v)", err)
+	}
+	if strings.TrimSpace(output) == "" {
+		return "(no claims)"
+	}
+	return output
+}
+
 func listAdoptedPVCs(namespace string) ([]string, error) {
 	cmd := exec.Command("kubectl", "get", "pvc", "-n", namespace, "-o",
 		`jsonpath={range .items[*]}{.metadata.name}{"\t"}{.metadata.ownerReferences[*].kind}{"\n"}{end}`)

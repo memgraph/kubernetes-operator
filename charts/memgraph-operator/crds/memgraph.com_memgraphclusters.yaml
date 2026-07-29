@@ -359,12 +359,11 @@ spec:
                     type: array
                     x-kubernetes-validations:
                     - message: extraArgs must not set a port or the coordinator identity
-                        the operator derives (--bolt-port, --management-port, --coordinator-id,
-                        --coordinator-hostname, --coordinator-port); configure ports
-                        through spec.ports
-                      rule: self.all(a, !['--bolt-port', '--management-port', '--coordinator-id',
-                        '--coordinator-hostname', '--coordinator-port'].exists(f,
-                        a.startsWith(f)))
+                        the operator derives (bolt-port, management-port, coordinator-id,
+                        coordinator-hostname, coordinator-port), in any spelling gflags
+                        accepts; configure ports through spec.ports
+                      rule: self.all(a, !a.replace('-', '_').matches('^_{1,2}(bolt_port|management_port|coordinator_id|coordinator_hostname|coordinator_port)($|[=
+                        ])'))
                   data:
                     description: data are appended to every data instance pod's Memgraph
                       flags.
@@ -376,12 +375,11 @@ spec:
                     type: array
                     x-kubernetes-validations:
                     - message: extraArgs must not set a port or the coordinator identity
-                        the operator derives (--bolt-port, --management-port, --coordinator-id,
-                        --coordinator-hostname, --coordinator-port); configure ports
-                        through spec.ports
-                      rule: self.all(a, !['--bolt-port', '--management-port', '--coordinator-id',
-                        '--coordinator-hostname', '--coordinator-port'].exists(f,
-                        a.startsWith(f)))
+                        the operator derives (bolt-port, management-port, coordinator-id,
+                        coordinator-hostname, coordinator-port), in any spelling gflags
+                        accepts; configure ports through spec.ports
+                      rule: self.all(a, !a.replace('-', '_').matches('^_{1,2}(bolt_port|management_port|coordinator_id|coordinator_hostname|coordinator_port)($|[=
+                        ])'))
                 type: object
               extraEnv:
                 description: |-

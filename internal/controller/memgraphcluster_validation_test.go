@@ -253,7 +253,10 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 					Data: []memgraphcomv1alpha1.EnvVar{{Name: "DATA_LABEL_ONE", Value: "one"}},
 				},
 				ExtraArgs: memgraphcomv1alpha1.ExtraArgsSpec{
-					Data: []string{"--storage-snapshot-on-exit=true"},
+					// The second one shares a prefix with the reserved --bolt-port
+					// without being it: the guard matches whole flag names, so a
+					// legitimate neighbour is not caught by it.
+					Data: []string{"--storage-snapshot-on-exit=true", "--bolt-num-workers=8"},
 				},
 			})
 
@@ -263,7 +266,8 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 			Expect(stored.Spec.Probes.Data.ReadinessProbe).To(Equal(memgraphcomv1alpha1.ProbeSpec{}),
 				"an unset probe stays unset; its defaults are resolved by the builders, not the schema")
 			Expect(stored.Spec.ExtraEnv.Data).To(HaveLen(1))
-			Expect(stored.Spec.ExtraArgs.Data).To(ConsistOf("--storage-snapshot-on-exit=true"))
+			Expect(stored.Spec.ExtraArgs.Data).To(ConsistOf(
+				"--storage-snapshot-on-exit=true", "--bolt-num-workers=8"))
 		})
 
 		It("should default the ports a partially specified block leaves out", func() {
@@ -526,6 +530,33 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 					ExtraArgs: memgraphcomv1alpha1.ExtraArgsSpec{Coordinators: []string{"--coordinator-id=9"}},
 				},
 				"the coordinator identity the operator derives"),
+			// Memgraph's flags are gflags, which treats one dash as two and a hyphen as
+			// an underscore — the flags are declared bolt_port, coordinator_id and so
+			// on, and the operator's own --bolt-port only works because of that. Every
+			// spelling reaches the same flag, so the guard has to reject all of them or
+			// it rejects none.
+			Entry("a reserved flag spelled with one dash", "invalid-args-single-dash",
+				memgraphcomv1alpha1.MemgraphClusterSpec{
+					ExtraArgs: memgraphcomv1alpha1.ExtraArgsSpec{Data: []string{"-bolt-port=7777"}},
+				},
+				"configure ports through spec.ports"),
+			Entry("a reserved flag spelled with underscores", "invalid-args-underscores",
+				memgraphcomv1alpha1.MemgraphClusterSpec{
+					ExtraArgs: memgraphcomv1alpha1.ExtraArgsSpec{Data: []string{"--bolt_port=7777"}},
+				},
+				"configure ports through spec.ports"),
+			Entry("a reserved flag spelled with one dash and underscores", "invalid-args-single-underscore",
+				memgraphcomv1alpha1.MemgraphClusterSpec{
+					ExtraArgs: memgraphcomv1alpha1.ExtraArgsSpec{Coordinators: []string{"-coordinator_id=9"}},
+				},
+				"the coordinator identity the operator derives"),
+			// gflags takes a non-boolean flag's value as the next argument too, so the
+			// flag can arrive as an element of its own.
+			Entry("a reserved flag with its value in the next element", "invalid-args-separate-value",
+				memgraphcomv1alpha1.MemgraphClusterSpec{
+					ExtraArgs: memgraphcomv1alpha1.ExtraArgsSpec{Data: []string{"--bolt-port", "7777"}},
+				},
+				"configure ports through spec.ports"),
 			Entry("a probe timing below one", "invalid-probe-period",
 				memgraphcomv1alpha1.MemgraphClusterSpec{
 					Probes: memgraphcomv1alpha1.ProbesSpec{
