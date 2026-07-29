@@ -17,8 +17,10 @@ limitations under the License.
 package resources_test
 
 import (
+	"fmt"
 	"maps"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -58,6 +60,8 @@ const (
 	defaultImageRef = "docker.io/memgraph/memgraph:3.12.0-relwithdebinfo"
 	coreDumpsVolume = "core-dumps"
 	coreDumpsPath   = "/var/core/memgraph"
+	dataPath        = "/var/lib/memgraph/mg_data"
+	logFilePath     = "/var/log/memgraph/memgraph.log"
 
 	// The operator's identity labels, which custom labels may never override.
 	nameLabel      = "app.kubernetes.io/name"
@@ -271,6 +275,29 @@ func expectedCommand(script string) []string {
 	return []string{shell, "-ec", script}
 }
 
+// expectedArgs are the flags a role is started with: the shared ones in the
+// order the builder emits them, then the fixture's extra args. The ports vary
+// per fixture and a role that opted out of log storage gets an empty
+// --log-file, so both are parameters.
+func expectedArgs(boltPort, managementPort int32, logDestination string, extra ...string) []string {
+	return append([]string{
+		fmt.Sprintf("--bolt-port=%d", boltPort),
+		fmt.Sprintf("--management-port=%d", managementPort),
+		"--data-directory=" + dataPath,
+		"--log-level=TRACE",
+		"--also-log-to-stderr",
+		"--log-file=" + logDestination,
+		"--log-retention-days=35",
+	}, extra...)
+}
+
+// expectedCoordinatorArgs are the same flags as arguments to the coordinator's
+// shell wrapper, which forwards them with "$@" — so they are never parsed by
+// the shell. The leading element is the wrapper's $0, not a flag.
+func expectedCoordinatorArgs(boltPort, managementPort int32, logDestination string, extra ...string) []string {
+	return append([]string{memgraphName}, expectedArgs(boltPort, managementPort, logDestination, extra...)...)
+}
+
 // expectedVolumes covers only the ephemeral scratch volume: lib and log
 // storage are provisioned through volumeClaimTemplates.
 func expectedVolumes() []corev1.Volume {
@@ -345,13 +372,7 @@ exec /usr/lib/memgraph/memgraph \
   --coordinator-id="$((ordinal + 1))" \
   --coordinator-hostname="${POD_NAME}.example-coordinator.memgraph-test.svc.cluster.local" \
   --coordinator-port=12000 \
-  --bolt-port=7687 \
-  --management-port=10000 \
-  --data-directory=/var/lib/memgraph/mg_data \
-  --log-level=TRACE \
-  --also-log-to-stderr \
-  --log-file=/var/log/memgraph/memgraph.log \
-  --log-retention-days=35`
+  "$@"`
 
 func TestCoordinatorStatefulSetDefaults(t *testing.T) {
 	want := &appsv1.StatefulSet{
@@ -377,6 +398,7 @@ func TestCoordinatorStatefulSetDefaults(t *testing.T) {
 						Image:           defaultImageRef,
 						ImagePullPolicy: corev1.PullIfNotPresent,
 						Command:         expectedCommand(expectedCoordinatorScript),
+						Args:            expectedCoordinatorArgs(7687, 10000, logFilePath),
 						Env: append([]corev1.EnvVar{{
 							Name: "POD_NAME",
 							ValueFrom: &corev1.EnvVarSource{
@@ -430,16 +452,8 @@ func TestDataStatefulSetDefaults(t *testing.T) {
 						Name:            memgraphName,
 						Image:           defaultImageRef,
 						ImagePullPolicy: corev1.PullIfNotPresent,
-						Args: []string{
-							"--bolt-port=7687",
-							"--management-port=10000",
-							"--data-directory=/var/lib/memgraph/mg_data",
-							"--log-level=TRACE",
-							"--also-log-to-stderr",
-							"--log-file=/var/log/memgraph/memgraph.log",
-							"--log-retention-days=35",
-						},
-						Env: licenseEnv("memgraph-secrets", "MEMGRAPH_ENTERPRISE_LICENSE", "MEMGRAPH_ORGANIZATION_NAME"),
+						Args:            expectedArgs(7687, 10000, logFilePath),
+						Env:             licenseEnv("memgraph-secrets", "MEMGRAPH_ENTERPRISE_LICENSE", "MEMGRAPH_ORGANIZATION_NAME"),
 						Ports: []corev1.ContainerPort{
 							{Name: boltPortName, ContainerPort: 7687},
 							{Name: managementPortName, ContainerPort: 10000},
@@ -629,21 +643,13 @@ func TestStatefulSetWithoutLogStorageClaim(t *testing.T) {
 		if diff := cmp.Diff(expectedVolumeMountsWithoutLog(), container.VolumeMounts); diff != "" {
 			t.Errorf("volume mounts mismatch (-want +got):\n%s", diff)
 		}
-		wantScript := `ordinal="${POD_NAME##*-}"
-exec /usr/lib/memgraph/memgraph \
-  --coordinator-id="$((ordinal + 1))" \
-  --coordinator-hostname="${POD_NAME}.example-coordinator.memgraph-test.svc.cluster.local" \
-  --coordinator-port=12000 \
-  --bolt-port=7687 \
-  --management-port=10000 \
-  --data-directory=/var/lib/memgraph/mg_data \
-  --log-level=TRACE \
-  --also-log-to-stderr \
-  --log-file= \
-  --log-retention-days=35`
-		wantCommand := expectedCommand(wantScript)
+		wantCommand := expectedCommand(expectedCoordinatorScript)
 		if diff := cmp.Diff(wantCommand, container.Command); diff != "" {
 			t.Errorf("start script mismatch (-want +got):\n%s", diff)
+		}
+		wantArgs := expectedCoordinatorArgs(7687, 10000, "")
+		if diff := cmp.Diff(wantArgs, container.Args); diff != "" {
+			t.Errorf("args mismatch (-want +got):\n%s", diff)
 		}
 	})
 
@@ -970,14 +976,15 @@ exec /usr/lib/memgraph/memgraph \
   --coordinator-id="$((ordinal + 1))" \
   --coordinator-hostname="${POD_NAME}.example-coordinator.memgraph-test.svc.k8s.example.com" \
   --coordinator-port=12001 \
-  --bolt-port=7777 \
-  --management-port=10001 \
-  --data-directory=/var/lib/memgraph/mg_data \
-  --log-level=TRACE \
-  --also-log-to-stderr \
-  --log-file=/var/log/memgraph/memgraph.log \
-  --log-retention-days=35 \
-  --log-level=WARNING`
+  "$@"`
+
+// The remaining flags — the configured ports among them — reach the wrapper as
+// container arguments, which is what keeps a value with whitespace or shell
+// metacharacters from being re-parsed by the shell. spec.extraArgs.coordinators
+// comes last so it wins.
+func expectedTunedCoordinatorArgs() []string {
+	return expectedCoordinatorArgs(customBoltPort, customManagementPort, logFilePath, "--log-level=WARNING")
+}
 
 // TestStatefulSetPortsAndClusterDomain pins every place a configured port or
 // cluster domain has to surface: the container ports, the flags Memgraph is
@@ -1000,6 +1007,9 @@ func TestStatefulSetPortsAndClusterDomain(t *testing.T) {
 		wantCommand := expectedCommand(expectedTunedCoordinatorScript)
 		if diff := cmp.Diff(wantCommand, container.Command); diff != "" {
 			t.Errorf("start script mismatch (-want +got):\n%s", diff)
+		}
+		if diff := cmp.Diff(expectedTunedCoordinatorArgs(), container.Args); diff != "" {
+			t.Errorf("args mismatch (-want +got):\n%s", diff)
 		}
 		for name, probe := range map[string]*corev1.Probe{
 			"startup":   container.StartupProbe,
@@ -1024,17 +1034,8 @@ func TestStatefulSetPortsAndClusterDomain(t *testing.T) {
 		if diff := cmp.Diff(wantPorts, container.Ports); diff != "" {
 			t.Errorf("container ports mismatch (-want +got):\n%s", diff)
 		}
-		wantArgs := []string{
-			"--bolt-port=7777",
-			"--management-port=10001",
-			"--data-directory=/var/lib/memgraph/mg_data",
-			"--log-level=TRACE",
-			"--also-log-to-stderr",
-			"--log-file=/var/log/memgraph/memgraph.log",
-			"--log-retention-days=35",
-			"--storage-snapshot-on-exit=true",
-			"--memory-limit=2048",
-		}
+		wantArgs := expectedArgs(customBoltPort, customManagementPort, logFilePath,
+			"--storage-snapshot-on-exit=true", "--memory-limit=2048")
 		if diff := cmp.Diff(wantArgs, container.Args); diff != "" {
 			t.Errorf("args mismatch (-want +got):\n%s", diff)
 		}
@@ -1048,6 +1049,42 @@ func TestStatefulSetPortsAndClusterDomain(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestStatefulSetExtraArgsAreNotShellParsed asserts an extra argument survives
+// verbatim on both roles, whitespace and shell metacharacters included. The
+// coordinators are the interesting half: they start through a /bin/sh wrapper,
+// so an argument interpolated into that script would be word-split by the shell
+// (or worse, run as a command) instead of reaching Memgraph as one flag.
+func TestStatefulSetExtraArgsAreNotShellParsed(t *testing.T) {
+	hostile := []string{
+		"--query-modules-directory=/var/lib/memgraph/my modules",
+		"--log-level=$(id)`id`;id",
+		"--experimental-enabled=text-search,'vector-search'",
+	}
+	cluster := minimalCluster()
+	cluster.Spec.ExtraArgs = memgraphcomv1alpha1.ExtraArgsSpec{Coordinators: hostile, Data: hostile}
+
+	for _, tc := range []struct {
+		name string
+		sts  *appsv1.StatefulSet
+	}{
+		{coordinatorComponent, coordinatorStatefulSet(cluster)},
+		{dataComponent, dataStatefulSet(cluster)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			container := tc.sts.Spec.Template.Spec.Containers[0]
+			if got := container.Args[len(container.Args)-len(hostile):]; !slices.Equal(got, hostile) {
+				t.Errorf("trailing args = %q, want the extra args unmodified %q", got, hostile)
+			}
+			for _, arg := range hostile {
+				if strings.Contains(strings.Join(container.Command, "\x00"), arg) {
+					t.Errorf("command %q embeds the extra arg %q, which the shell would then parse",
+						container.Command, arg)
+				}
+			}
+		})
+	}
 }
 
 // TestStatefulSetProbeOverrides asserts probe timings are per role and per

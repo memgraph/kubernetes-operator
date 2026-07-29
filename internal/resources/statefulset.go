@@ -18,7 +18,6 @@ package resources
 
 import (
 	"fmt"
-	"strings"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -50,6 +49,10 @@ const (
 	coreDumpsVolumeName = "core-dumps"
 	tmpVolumeName       = "tmp"
 
+	// containerName is the Memgraph container's name, and doubles as the $0 the
+	// coordinator's shell wrapper is given.
+	containerName = "memgraph"
+
 	// Container names of the two optional containers core dumps bring along.
 	corePatternContainerName = "init-core-pattern"
 	uploaderContainerName    = "core-dumps-uploader"
@@ -77,7 +80,13 @@ func CoordinatorStatefulSet(
 	// The coordinator ID and advertised FQDN depend on the pod ordinal, which
 	// only the pod itself knows; a shell wrapper derives them from the pod
 	// name so all replicas share one template.
-	container.Command = []string{"/bin/sh", "-ec", coordinatorStartScript(cluster, spec, role)}
+	container.Command = []string{"/bin/sh", "-ec", coordinatorStartScript(cluster, spec)}
+	// The flags are handed to the wrapper as arguments rather than interpolated
+	// into the script, so `exec ... "$@"` passes each one to Memgraph verbatim —
+	// a value carrying whitespace or shell metacharacters is never re-parsed by
+	// the shell. `sh -c` assigns the first operand to $0, so it is a placeholder
+	// name and not a flag.
+	container.Args = append([]string{containerName}, append(commonArgs(spec, role), role.extraArgs...)...)
 	container.Env = append([]corev1.EnvVar{{
 		Name: memgraphcomv1alpha1.EnvPodName,
 		ValueFrom: &corev1.EnvVarSource{
@@ -123,20 +132,19 @@ func DataStatefulSet(cluster *memgraphcomv1alpha1.MemgraphCluster, replicas int3
 // ordinal (the numeric suffix of the pod name): ordinal N becomes coordinator
 // ID N+1 (Memgraph treats coordinator ID 0 as unset and refuses to start, so
 // IDs stay 1-based) advertised at the pod's stable DNS name within the
-// headless Service.
+// headless Service. Every other flag arrives as a container argument and is
+// forwarded by "$@" — only the derived ones are written into the script.
 func coordinatorStartScript(
 	cluster *memgraphcomv1alpha1.MemgraphCluster,
 	spec normalizedSpec,
-	role normalizedRole,
 ) string {
 	fqdnSuffix := podFQDNSuffix(cluster, CoordinatorName(cluster), spec)
-	args := append(commonArgs(spec, role), role.extraArgs...)
 	return fmt.Sprintf(`ordinal="${POD_NAME##*-}"
 exec %s \
   --coordinator-id="$((ordinal + 1))" \
   --coordinator-hostname="${POD_NAME}.%s" \
   --coordinator-port=%d \
-  %s`, memgraphBinary, fqdnSuffix, spec.ports.coordinator, shellJoin(args))
+  "$@"`, memgraphBinary, fqdnSuffix, spec.ports.coordinator)
 }
 
 // commonArgs are the Memgraph flags shared by both roles, mirroring the HA
@@ -167,16 +175,12 @@ func commonArgs(spec normalizedSpec, role normalizedRole) []string {
 	}
 }
 
-func shellJoin(args []string) string {
-	return strings.Join(args, " \\\n  ")
-}
-
 // memgraphContainer builds the parts of the Memgraph container shared by both
 // roles: image, license env wiring, the role's extra environment and resources,
 // storage mounts, and the restricted security context.
 func memgraphContainer(spec normalizedSpec, role normalizedRole) corev1.Container {
 	return corev1.Container{
-		Name:            "memgraph",
+		Name:            containerName,
 		Image:           spec.image,
 		ImagePullPolicy: spec.pullPolicy,
 		Resources:       role.resources,
