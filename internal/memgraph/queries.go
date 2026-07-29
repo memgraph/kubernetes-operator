@@ -25,6 +25,11 @@ import "fmt"
 
 const showInstancesQuery = "SHOW INSTANCES"
 
+// showReplicationLagQuery is answered only by a coordinator, which relays the
+// counts from the MAIN. Like YIELD LEADERSHIP it takes no argument: the answer
+// covers every instance the cluster knows at once.
+const showReplicationLagQuery = "SHOW REPLICATION LAG"
+
 func addCoordinatorQuery(coordinator CoordinatorSpec) string {
 	return fmt.Sprintf(
 		`ADD COORDINATOR %d WITH CONFIG {"bolt_server": %q, "coordinator_server": %q, "management_server": %q}`,

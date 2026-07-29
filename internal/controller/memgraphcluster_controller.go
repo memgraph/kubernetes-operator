@@ -373,13 +373,36 @@ func (r *MemgraphClusterReconciler) reconcileRegistration(
 		}
 	}()
 
+	// How far behind the MAIN each data instance is, which is what decides whether
+	// a retiring MAIN can hand over. The read is not allowed to fail the pass: it
+	// is consulted for that one decision, every other one has to keep working
+	// without it, and an empty view already means "no survivor is known to be
+	// caught up" — the same conclusion, reached by the planner.
+	lag, err := leader.ShowReplicationLag(ctx)
+	if err != nil {
+		log.Info("Could not read replication lag, so no MAIN handover will be planned", "reason", err.Error())
+		lag = nil
+	}
+
 	latest := observe(topology, observed)
-	commands := planner.Plan(topology, observed)
+	commands := planner.Plan(topology, observed, lag)
 	if len(commands) == 0 {
-		// No retiring member belongs to the cluster any more — the plan would
-		// carry an UNREGISTER INSTANCE or a REMOVE COORDINATOR otherwise — so
-		// their pods can go.
 		if retiring != "" {
+			// An empty plan is not on its own proof that the retirement finished: a
+			// handover waiting for a caught-up survivor plans nothing either, because
+			// no command would make a lagging replica ready. Shedding pods on that
+			// would delete a registered MAIN, so the membership is what gates it.
+			if !planner.Retired(topology, observed) {
+				log.Info("Deferred retirement because no surviving data instance is caught up with MAIN")
+				msg := "Waiting for a surviving data instance that is reachable and caught up with MAIN " +
+					"before moving MAIN off the instance being retired"
+				if statusErr := r.writeStatus(ctx, cluster, latest, readyOrNot(latest.main),
+					notConvergedCondition(memgraphcomv1alpha1.ReasonNoCaughtUpSurvivor, msg),
+				); statusErr != nil {
+					return ctrl.Result{}, statusErr
+				}
+				return ctrl.Result{RequeueAfter: requeueWhilePending}, nil
+			}
 			if err := r.shedRetiredPods(ctx, cluster, topology, replicas); err != nil {
 				return ctrl.Result{}, err
 			}

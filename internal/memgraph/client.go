@@ -15,12 +15,13 @@ limitations under the License.
 */
 
 // Package memgraph provides the narrow client surface the operator uses to
-// drive a Memgraph high-availability cluster over Bolt: show instances, add
-// coordinator, register instance, set main, and — for the members a lowered
-// replica count is retiring — demote and unregister a data instance, yield
-// coordinator leadership and remove a coordinator. All higher layers depend on
-// the Client and Connector interfaces, never on the Bolt driver — this package
-// is the mock seam for testing and the only place the driver is referenced.
+// drive a Memgraph high-availability cluster over Bolt: show instances, show
+// replication lag, add coordinator, register instance, set main, and — for the
+// members a lowered replica count is retiring — demote and unregister a data
+// instance, yield coordinator leadership and remove a coordinator. All higher
+// layers depend on the Client and Connector interfaces, never on the Bolt driver
+// — this package is the mock seam for testing and the only place the driver is
+// referenced.
 package memgraph
 
 import (
@@ -93,10 +94,60 @@ type DataInstanceSpec struct {
 	ReplicationServer string
 }
 
+// DatabaseLag is one database's replication progress on one data instance: how
+// many transactions it has committed, and how many that leaves it behind the
+// MAIN. The count behind can be negative for a moment after a failover — a SYNC
+// replica can hold transactions the new MAIN never saw — so "not behind" is the
+// condition worth testing, never "exactly equal".
+type DatabaseLag struct {
+	Database       string
+	CommittedTxns  int64
+	TxnsBehindMain int64
+}
+
+// ReplicationLag is one row of SHOW REPLICATION LAG: one data instance's
+// replication progress across every database it holds. The MAIN reports itself
+// too, at zero behind, because the lag of every other instance is measured
+// against it.
+type ReplicationLag struct {
+	Instance  string
+	Databases []DatabaseLag
+}
+
+// IsCaughtUp reports whether the instance holds every transaction the MAIN has
+// committed, in every one of its databases — which is what makes it promotable
+// without losing writes.
+//
+// An instance with no databases reported is not caught up. That is the answer
+// for anything the view does not cover: an instance the MAIN does not list, or a
+// whole view that came back empty because there is no MAIN to measure against.
+// Unknown has to read as "not safe to promote", because the alternative is
+// promoting on an assumption and discarding whatever the survivor never received.
+func (l ReplicationLag) IsCaughtUp() bool {
+	if len(l.Databases) == 0 {
+		return false
+	}
+	for _, database := range l.Databases {
+		if database.TxnsBehindMain > 0 {
+			return false
+		}
+	}
+	return true
+}
+
 // Client is the narrow surface of a single coordinator's Bolt endpoint. Every
 // method issues exactly one HA management query.
 type Client interface {
 	ShowInstances(ctx context.Context) ([]Instance, error)
+
+	// ShowReplicationLag reports how far behind the MAIN every data instance the
+	// cluster knows is, counted in committed transactions. Only a coordinator
+	// answers it, and the answer is relayed from the MAIN itself — so a cluster
+	// with no MAIN, or one whose MAIN the coordinator leader cannot reach, reports
+	// no rows rather than failing. An empty view therefore means "cannot tell",
+	// which is why nothing is promoted on the strength of it.
+	ShowReplicationLag(ctx context.Context) ([]ReplicationLag, error)
+
 	AddCoordinator(ctx context.Context, coordinator CoordinatorSpec) error
 	RegisterInstance(ctx context.Context, instance DataInstanceSpec) error
 	SetInstanceToMain(ctx context.Context, name string) error

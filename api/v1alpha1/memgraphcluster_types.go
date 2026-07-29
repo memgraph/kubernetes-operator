@@ -177,6 +177,15 @@ const (
 	// again — which is exactly what this reason means when it persists.
 	ReasonLeadershipTransferInProgress = "LeadershipTransferInProgress"
 
+	// ReasonNoCaughtUpSurvivor is set while a lowered dataInstances count is
+	// waiting to move MAIN off the instance it retires: no surviving instance is
+	// both reachable and holding every transaction the MAIN has committed, so
+	// demoting it now would drop those writes. The retiring MAIN keeps serving
+	// until one catches up, which is a scale-down that pauses rather than one that
+	// loses data. It persisting means replication is not progressing — the
+	// survivors are down, or too far behind to catch up.
+	ReasonNoCaughtUpSurvivor = "NoCaughtUpSurvivor"
+
 	// ReasonMainElected is set when a data instance is observed as MAIN.
 	ReasonMainElected = "MainElected"
 

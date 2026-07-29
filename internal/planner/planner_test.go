@@ -175,6 +175,47 @@ func downDataInstance(i int) memgraph.Instance {
 	return instance
 }
 
+// caughtUp is the SHOW REPLICATION LAG view of the given data instances with every
+// one of them holding all of the MAIN's transactions: the state that lets a
+// retiring MAIN hand over. The MAIN reports itself in the view too, at zero
+// behind, which is what every other row is measured against.
+func caughtUp(indices ...int) []memgraph.ReplicationLag {
+	return behindBy(0, indices...)
+}
+
+// behindBy is the same view with every named instance trailing the MAIN by the
+// given number of transactions. A negative count is a replica briefly ahead of a
+// new MAIN, which SYNC replication can produce and which is not "behind".
+func behindBy(txns int64, indices ...int) []memgraph.ReplicationLag {
+	lag := make([]memgraph.ReplicationLag, 0, len(indices))
+	for _, i := range indices {
+		lag = append(lag, memgraph.ReplicationLag{
+			Instance: dataInstanceSpec(i).Name,
+			Databases: []memgraph.DatabaseLag{{
+				Database:       "memgraph",
+				CommittedTxns:  100 - txns,
+				TxnsBehindMain: txns,
+			}},
+		})
+	}
+	return lag
+}
+
+// multiDatabaseLag is one instance's view across two databases, which is how an
+// enterprise cluster reports: an instance is only promotable when it is caught up
+// in every one of them.
+func multiDatabaseLag(i int, behind ...int64) []memgraph.ReplicationLag {
+	lag := memgraph.ReplicationLag{Instance: dataInstanceSpec(i).Name}
+	for db, txns := range behind {
+		lag.Databases = append(lag.Databases, memgraph.DatabaseLag{
+			Database:       fmt.Sprintf("db_%d", db),
+			CommittedTxns:  100 - txns,
+			TxnsBehindMain: txns,
+		})
+	}
+	return []memgraph.ReplicationLag{lag}
+}
+
 func TestPlan(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -182,7 +223,12 @@ func TestPlan(t *testing.T) {
 		// declared overrides the canonical fixture for the cases about a
 		// topology whose counts changed.
 		declared *planner.Topology
-		want     []planner.Command
+		// lag is the SHOW REPLICATION LAG view. It is nil for every case with no
+		// retiring MAIN to move, because that is what the real query answers with
+		// when there is no MAIN to measure against — and the only decision that
+		// consults it is the handover off a retiring MAIN.
+		lag  []memgraph.ReplicationLag
+		want []planner.Command
 	}{
 		{
 			name:     "fresh cluster bootstraps everything and promotes one MAIN",
@@ -398,14 +444,16 @@ func TestPlan(t *testing.T) {
 				observedDataInstance(2, memgraph.RoleMain),
 			},
 			declared: ptr.To(shrunkTopology(2, 3)),
+			lag:      caughtUp(0, 1, 2),
 			want: []planner.Command{
 				planner.DemoteInstance{Name: thirdInstance},
 				planner.SetInstanceToMain{Name: firstInstance},
 				planner.UnregisterInstance{Name: thirdInstance},
 			},
 		},
-		// The promotion follows the same rule as at bootstrap, so a survivor the
-		// leader cannot reach is not the one that gets MAIN.
+		// A survivor the leader cannot reach does not get MAIN even when the lag view
+		// still reports it caught up: that view is the MAIN's cached record of how far
+		// each replica got, so it outlives the replica's reachability.
 		{
 			name: "a retiring MAIN hands MAIN to the lowest reachable survivor",
 			observed: []memgraph.Instance{
@@ -417,6 +465,142 @@ func TestPlan(t *testing.T) {
 				observedDataInstance(2, memgraph.RoleMain),
 			},
 			declared: ptr.To(shrunkTopology(2, 3)),
+			lag:      caughtUp(0, 1, 2),
+			want: []planner.Command{
+				planner.DemoteInstance{Name: thirdInstance},
+				planner.SetInstanceToMain{Name: secondInstance},
+				planner.UnregisterInstance{Name: thirdInstance},
+			},
+		},
+		// The handover skips a survivor that is behind, exactly as it skips one that
+		// is down: promoting it would drop the transactions it never received.
+		{
+			name: "a retiring MAIN hands MAIN to the lowest caught-up survivor",
+			observed: []memgraph.Instance{
+				observedCoordinator(1, memgraph.RoleLeader),
+				observedCoordinator(2, memgraph.RoleFollower),
+				observedCoordinator(3, memgraph.RoleFollower),
+				observedDataInstance(0, memgraph.RoleReplica),
+				observedDataInstance(1, memgraph.RoleReplica),
+				observedDataInstance(2, memgraph.RoleMain),
+			},
+			declared: ptr.To(shrunkTopology(2, 3)),
+			lag:      append(behindBy(7, 0), caughtUp(1, 2)...),
+			want: []planner.Command{
+				planner.DemoteInstance{Name: thirdInstance},
+				planner.SetInstanceToMain{Name: secondInstance},
+				planner.UnregisterInstance{Name: thirdInstance},
+			},
+		},
+		// The whole retirement waits: no demotion, no promotion, and no
+		// unregistration of the MAIN that cannot be demoted. The cluster keeps
+		// serving from the instance on its way out until a survivor catches up,
+		// which is a scale-down that pauses rather than one that loses writes.
+		{
+			name: "a retiring MAIN is left alone while every survivor is behind",
+			observed: []memgraph.Instance{
+				observedCoordinator(1, memgraph.RoleLeader),
+				observedCoordinator(2, memgraph.RoleFollower),
+				observedCoordinator(3, memgraph.RoleFollower),
+				observedDataInstance(0, memgraph.RoleReplica),
+				observedDataInstance(1, memgraph.RoleReplica),
+				observedDataInstance(2, memgraph.RoleMain),
+			},
+			declared: ptr.To(shrunkTopology(2, 3)),
+			lag:      append(behindBy(7, 0, 1), caughtUp(2)...),
+			want:     nil,
+		},
+		// Down and behind are separate reasons to refuse, and either one alone is
+		// enough: here the one caught-up survivor is unreachable and the one
+		// reachable survivor is behind.
+		{
+			name: "a retiring MAIN is left alone when no survivor is both up and caught up",
+			observed: []memgraph.Instance{
+				observedCoordinator(1, memgraph.RoleLeader),
+				observedCoordinator(2, memgraph.RoleFollower),
+				observedCoordinator(3, memgraph.RoleFollower),
+				downDataInstance(0),
+				observedDataInstance(1, memgraph.RoleReplica),
+				observedDataInstance(2, memgraph.RoleMain),
+			},
+			declared: ptr.To(shrunkTopology(2, 3)),
+			lag:      append(caughtUp(0, 2), behindBy(3, 1)...),
+			want:     nil,
+		},
+		// No lag view at all — the MAIN unreachable from the coordinator leader, or
+		// the read having failed — is not evidence that anything is caught up, so the
+		// handover waits on it exactly as it waits on a lagging survivor.
+		{
+			name: "a retiring MAIN is left alone when the lag view is empty",
+			observed: []memgraph.Instance{
+				observedCoordinator(1, memgraph.RoleLeader),
+				observedCoordinator(2, memgraph.RoleFollower),
+				observedCoordinator(3, memgraph.RoleFollower),
+				observedDataInstance(0, memgraph.RoleReplica),
+				observedDataInstance(1, memgraph.RoleReplica),
+				observedDataInstance(2, memgraph.RoleMain),
+			},
+			declared: ptr.To(shrunkTopology(2, 3)),
+			lag:      nil,
+			want:     nil,
+		},
+		// A survivor the lag view does not mention is not caught up either: an
+		// instance the MAIN does not list is one it is not replicating to.
+		{
+			name: "a survivor missing from the lag view does not get MAIN",
+			observed: []memgraph.Instance{
+				observedCoordinator(1, memgraph.RoleLeader),
+				observedCoordinator(2, memgraph.RoleFollower),
+				observedCoordinator(3, memgraph.RoleFollower),
+				observedDataInstance(0, memgraph.RoleReplica),
+				observedDataInstance(1, memgraph.RoleReplica),
+				observedDataInstance(2, memgraph.RoleMain),
+			},
+			declared: ptr.To(shrunkTopology(2, 3)),
+			lag:      append(caughtUp(1), caughtUp(2)...),
+			want: []planner.Command{
+				planner.DemoteInstance{Name: thirdInstance},
+				planner.SetInstanceToMain{Name: secondInstance},
+				planner.UnregisterInstance{Name: thirdInstance},
+			},
+		},
+		// A replica ahead of the MAIN is not behind it. SYNC replication can leave one
+		// holding transactions a newly promoted MAIN never saw, which is a negative
+		// count and no reason to refuse the handover.
+		{
+			name: "a survivor ahead of the MAIN is still promotable",
+			observed: []memgraph.Instance{
+				observedCoordinator(1, memgraph.RoleLeader),
+				observedCoordinator(2, memgraph.RoleFollower),
+				observedCoordinator(3, memgraph.RoleFollower),
+				observedDataInstance(0, memgraph.RoleReplica),
+				observedDataInstance(1, memgraph.RoleReplica),
+				observedDataInstance(2, memgraph.RoleMain),
+			},
+			declared: ptr.To(shrunkTopology(2, 3)),
+			lag:      append(behindBy(-2, 0), caughtUp(1, 2)...),
+			want: []planner.Command{
+				planner.DemoteInstance{Name: thirdInstance},
+				planner.SetInstanceToMain{Name: firstInstance},
+				planner.UnregisterInstance{Name: thirdInstance},
+			},
+		},
+		// Every database has to be caught up, not just one: a survivor holding all of
+		// one database's writes and none of another's would lose the second on
+		// promotion.
+		{
+			name: "a survivor behind in one of several databases does not get MAIN",
+			observed: []memgraph.Instance{
+				observedCoordinator(1, memgraph.RoleLeader),
+				observedCoordinator(2, memgraph.RoleFollower),
+				observedCoordinator(3, memgraph.RoleFollower),
+				observedDataInstance(0, memgraph.RoleReplica),
+				observedDataInstance(1, memgraph.RoleReplica),
+				observedDataInstance(2, memgraph.RoleMain),
+			},
+			declared: ptr.To(shrunkTopology(2, 3)),
+			lag: append(multiDatabaseLag(0, 0, 4),
+				append(multiDatabaseLag(1, 0, 0), multiDatabaseLag(2, 0, 0)...)...),
 			want: []planner.Command{
 				planner.DemoteInstance{Name: thirdInstance},
 				planner.SetInstanceToMain{Name: secondInstance},
@@ -434,10 +618,54 @@ func TestPlan(t *testing.T) {
 				observedDataInstance(2, memgraph.RoleReplica),
 			},
 			declared: ptr.To(shrunkTopology(1, 3)),
+			lag:      caughtUp(0, 1, 2),
 			want: []planner.Command{
 				planner.DemoteInstance{Name: secondInstance},
 				planner.SetInstanceToMain{Name: firstInstance},
 				planner.UnregisterInstance{Name: secondInstance},
+				planner.UnregisterInstance{Name: thirdInstance},
+			},
+		},
+		// A blocked handover holds up only the MAIN's own retirement. The other
+		// retiring instance is not MAIN, so unregistering it needs nothing from the
+		// survivors and goes out in this pass.
+		{
+			name: "a blocked handover still unregisters the retiring instances that are not MAIN",
+			observed: []memgraph.Instance{
+				observedCoordinator(1, memgraph.RoleLeader),
+				observedCoordinator(2, memgraph.RoleFollower),
+				observedCoordinator(3, memgraph.RoleFollower),
+				observedDataInstance(0, memgraph.RoleReplica),
+				observedDataInstance(1, memgraph.RoleMain),
+				observedDataInstance(2, memgraph.RoleReplica),
+			},
+			declared: ptr.To(shrunkTopology(1, 3)),
+			lag:      append(behindBy(9, 0), caughtUp(1, 2)...),
+			want: []planner.Command{
+				planner.UnregisterInstance{Name: thirdInstance},
+			},
+		},
+		// A pass that died between the demotion and the promotion meant to follow it
+		// leaves the cluster with no MAIN at all, which is the one state the caught-up
+		// rule cannot be applied in: lag is measured against a MAIN, and there is
+		// none. The plan falls back to the MAIN-less rule and promotes by
+		// reachability, because a cluster serving nothing is worse off than one whose
+		// promotion has to be retried — and gating the handover ahead of the demotion
+		// is what keeps this window as narrow as a single pair of queries.
+		{
+			name: "an already-demoted retiring MAIN leaves a promotion by reachability",
+			observed: []memgraph.Instance{
+				observedCoordinator(1, memgraph.RoleLeader),
+				observedCoordinator(2, memgraph.RoleFollower),
+				observedCoordinator(3, memgraph.RoleFollower),
+				observedDataInstance(0, memgraph.RoleReplica),
+				observedDataInstance(1, memgraph.RoleReplica),
+				observedDataInstance(2, memgraph.RoleReplica),
+			},
+			declared: ptr.To(shrunkTopology(2, 3)),
+			lag:      nil,
+			want: []planner.Command{
+				planner.SetInstanceToMain{Name: firstInstance},
 				planner.UnregisterInstance{Name: thirdInstance},
 			},
 		},
@@ -473,6 +701,7 @@ func TestPlan(t *testing.T) {
 				observedDataInstance(2, memgraph.RoleMain),
 			},
 			declared: ptr.To(mixedTopology()),
+			lag:      caughtUp(0, 1, 2),
 			want: []planner.Command{
 				planner.AddCoordinator{Coordinator: coordinatorSpec(4)},
 				planner.AddCoordinator{Coordinator: coordinatorSpec(5)},
@@ -564,10 +793,27 @@ func TestPlan(t *testing.T) {
 				observedDataInstance(2, memgraph.RoleMain),
 			),
 			declared: ptr.To(retiringBothRoles()),
+			lag:      caughtUp(0, 1, 2),
 			want: []planner.Command{
 				planner.DemoteInstance{Name: thirdInstance},
 				planner.SetInstanceToMain{Name: firstInstance},
 				planner.UnregisterInstance{Name: thirdInstance},
+				planner.RemoveCoordinator{Coordinator: coordinatorSpec(4)},
+				planner.RemoveCoordinator{Coordinator: coordinatorSpec(5)},
+			},
+		},
+		// The coordinator side of the same edit is independent of where MAIN sits, so
+		// a handover the survivors cannot take does not hold up the Raft removals.
+		{
+			name: "a blocked handover does not hold up the coordinator removals",
+			observed: append(observedCoordinators(1, 1, 2, 3, 4, 5),
+				observedDataInstance(0, memgraph.RoleReplica),
+				observedDataInstance(1, memgraph.RoleReplica),
+				observedDataInstance(2, memgraph.RoleMain),
+			),
+			declared: ptr.To(retiringBothRoles()),
+			lag:      append(behindBy(5, 0, 1), caughtUp(2)...),
+			want: []planner.Command{
 				planner.RemoveCoordinator{Coordinator: coordinatorSpec(4)},
 				planner.RemoveCoordinator{Coordinator: coordinatorSpec(5)},
 			},
@@ -583,6 +829,7 @@ func TestPlan(t *testing.T) {
 				observedDataInstance(2, memgraph.RoleMain),
 			),
 			declared: ptr.To(retiringBothRoles()),
+			lag:      caughtUp(0, 1, 2),
 			want: []planner.Command{
 				planner.DemoteInstance{Name: thirdInstance},
 				planner.SetInstanceToMain{Name: firstInstance},
@@ -619,9 +866,92 @@ func TestPlan(t *testing.T) {
 				declared = *tc.declared
 			}
 
-			got := planner.Plan(declared, tc.observed)
+			got := planner.Plan(declared, tc.observed, tc.lag)
 			if diff := cmp.Diff(tc.want, got); diff != "" {
 				t.Errorf("Plan() mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestRetired covers the question the controller has to ask before it sheds a
+// retiring member's pod. Plan falling silent is not the same question — a
+// handover waiting for a caught-up survivor is also silent — so the two disagree
+// on purpose in the blocked case below.
+func TestRetired(t *testing.T) {
+	cases := []struct {
+		name     string
+		declared planner.Topology
+		observed []memgraph.Instance
+		want     bool
+	}{
+		{
+			name:     "nothing retiring is retired",
+			declared: declaredTopology(),
+			observed: []memgraph.Instance{
+				observedCoordinator(1, memgraph.RoleLeader),
+				observedDataInstance(0, memgraph.RoleMain),
+			},
+			want: true,
+		},
+		{
+			name:     "a retiring instance the cluster has forgotten is retired",
+			declared: shrunkTopology(2, 3),
+			observed: []memgraph.Instance{
+				observedCoordinator(1, memgraph.RoleLeader),
+				observedDataInstance(0, memgraph.RoleMain),
+				observedDataInstance(1, memgraph.RoleReplica),
+			},
+			want: true,
+		},
+		{
+			name:     "a retiring instance still registered is not retired",
+			declared: shrunkTopology(2, 3),
+			observed: []memgraph.Instance{
+				observedCoordinator(1, memgraph.RoleLeader),
+				observedDataInstance(0, memgraph.RoleMain),
+				observedDataInstance(1, memgraph.RoleReplica),
+				observedDataInstance(2, memgraph.RoleReplica),
+			},
+			want: false,
+		},
+		// The state a blocked handover leaves behind: Plan has nothing to issue, and
+		// the pod still belongs to a registered MAIN.
+		{
+			name:     "a retiring MAIN whose handover is blocked is not retired",
+			declared: shrunkTopology(2, 3),
+			observed: []memgraph.Instance{
+				observedCoordinator(1, memgraph.RoleLeader),
+				observedDataInstance(0, memgraph.RoleReplica),
+				observedDataInstance(1, memgraph.RoleReplica),
+				observedDataInstance(2, memgraph.RoleMain),
+			},
+			want: false,
+		},
+		{
+			name:     "a retiring coordinator still in Raft is not retired",
+			declared: shrunkCoordinators(),
+			observed: append(observedCoordinators(1, 1, 2, 3, 4),
+				observedDataInstance(0, memgraph.RoleMain),
+				observedDataInstance(1, memgraph.RoleReplica),
+			),
+			want: false,
+		},
+		{
+			name:     "retiring coordinators all out of Raft are retired",
+			declared: shrunkCoordinators(),
+			observed: append(observedCoordinators(1, 1, 2, 3),
+				observedDataInstance(0, memgraph.RoleMain),
+				observedDataInstance(1, memgraph.RoleReplica),
+			),
+			want: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := planner.Retired(tc.declared, tc.observed); got != tc.want {
+				t.Errorf("Retired() = %t, want %t", got, tc.want)
 			}
 		})
 	}
@@ -769,7 +1099,7 @@ func TestPlanUsesConfiguredPortsAndClusterDomain(t *testing.T) {
 		planner.SetInstanceToMain{Name: firstInstance},
 	}
 
-	got := planner.Plan(resources.DeclaredTopology(cluster), nil)
+	got := planner.Plan(resources.DeclaredTopology(cluster), nil, nil)
 	if diff := cmp.Diff(want, got); diff != "" {
 		t.Errorf("Plan() mismatch (-want +got):\n%s", diff)
 	}
@@ -810,7 +1140,7 @@ func TestPlanConvergedOnConfiguredPorts(t *testing.T) {
 		},
 	}
 
-	if got := planner.Plan(declared, observed); got != nil {
+	if got := planner.Plan(declared, observed, nil); got != nil {
 		t.Errorf("Plan() = %v, want no commands", got)
 	}
 }

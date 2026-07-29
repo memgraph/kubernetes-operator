@@ -41,7 +41,12 @@ type fakeMemgraph struct {
 	// a coordinator that lost the leader answers from its own state machine, so
 	// what it reports need not match the cluster at all. Commands still land on
 	// the shared view — a stale coordinator is never written to.
-	staleViews      map[string][]memgraph.Instance
+	staleViews map[string][]memgraph.Instance
+	// behind is how many transactions a data instance trails the MAIN by, for the
+	// instances a test puts behind. A registered instance absent from the map is
+	// caught up, which is what a healthy cluster looks like — falling behind is the
+	// exceptional state a test opts into.
+	behind          map[string]int64
 	connectAttempts int
 	// connectErr, when set, makes every Connect fail — the operator's view of a
 	// cluster whose coordinators do not yet answer Bolt.
@@ -105,6 +110,17 @@ func (f *fakeMemgraph) setLeader(name string) {
 	}
 }
 
+// setBehind puts the named data instance the given number of transactions behind
+// the MAIN, which is how a spec keeps it from being promoted.
+func (f *fakeMemgraph) setBehind(name string, txns int64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.behind == nil {
+		f.behind = map[string]int64{}
+	}
+	f.behind[name] = txns
+}
+
 // setStaleView makes the coordinator at the given Bolt address answer
 // SHOW INSTANCES with its own view instead of the cluster's.
 func (f *fakeMemgraph) setStaleView(address string, instances []memgraph.Instance) {
@@ -147,6 +163,44 @@ func (c *fakeClient) ShowInstances(context.Context) ([]memgraph.Instance, error)
 		view = append(view, memgraph.Instance{Name: self, Health: "up", Role: memgraph.RoleLeader})
 	}
 	return view, nil
+}
+
+// ShowReplicationLag answers as the real query does: the counts come from the
+// MAIN, so a cluster with no MAIN reports nothing at all rather than failing, and
+// the MAIN reports itself at zero behind. Every other registered data instance is
+// caught up unless a test put it behind.
+func (c *fakeClient) ShowReplicationLag(context.Context) ([]memgraph.ReplicationLag, error) {
+	c.cluster.mu.Lock()
+	defer c.cluster.mu.Unlock()
+	if c.closed {
+		return nil, fmt.Errorf("fake memgraph: connection to %s already closed", c.address)
+	}
+	if !slices.ContainsFunc(c.cluster.instances, func(instance memgraph.Instance) bool { return instance.IsMain() }) {
+		return nil, nil
+	}
+
+	var lag []memgraph.ReplicationLag
+	for _, instance := range c.cluster.instances {
+		if strings.HasPrefix(instance.Name, "coordinator_") {
+			continue
+		}
+		// Lag is measured against the MAIN, so the MAIN is zero behind itself
+		// whatever a test set for it — what it set describes the instance as a
+		// replica, which is what it becomes once demoted.
+		behind := c.cluster.behind[instance.Name]
+		if instance.IsMain() {
+			behind = 0
+		}
+		lag = append(lag, memgraph.ReplicationLag{
+			Instance: instance.Name,
+			Databases: []memgraph.DatabaseLag{{
+				Database:       "memgraph",
+				CommittedTxns:  100 - behind,
+				TxnsBehindMain: behind,
+			}},
+		})
+	}
+	return lag, nil
 }
 
 func (c *fakeClient) AddCoordinator(_ context.Context, coordinator memgraph.CoordinatorSpec) error {

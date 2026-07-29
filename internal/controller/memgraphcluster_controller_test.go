@@ -982,6 +982,61 @@ var _ = Describe("MemgraphCluster Controller", func() {
 				memgraphcomv1alpha1.ConditionConverged)).To(BeTrue())
 		})
 
+		// Moving MAIN is the one step of a retirement that can lose data, so it waits
+		// for a survivor that actually holds the writes. Everything else about the
+		// scale-down waits with it: the demotion would leave the cluster serving from
+		// an instance missing transactions, and the unregistration cannot precede the
+		// demotion at all.
+		It("should not move MAIN off a retiring instance while every survivor is behind", func() {
+			fake.setInstances(convergedWithMainOn(1))
+			fake.setBehind("instance_0", 12)
+			baseline := bootstrapped()
+			Expect(status().Main).To(Equal("instance_1"))
+
+			setCounts(3, 1)
+			reconcileCluster(resourceName)
+
+			Expect(sinceBootstrap(baseline)).To(BeEmpty(),
+				"no demotion, no promotion, and no unregistration of a MAIN that cannot be demoted")
+			Expect(replicas(dataSuffix)).To(Equal(int32(2)),
+				"the retiring pod must outlive its registration, so the count is held")
+			converged := convergedCondition()
+			Expect(converged.Status).To(Equal(metav1.ConditionFalse))
+			Expect(converged.Reason).To(Equal(memgraphcomv1alpha1.ReasonNoCaughtUpSurvivor))
+			// The retiring MAIN is still MAIN, and still serving: a paused scale-down
+			// costs availability nothing, which is what makes waiting the better trade.
+			Expect(apimeta.IsStatusConditionTrue(status().Conditions,
+				memgraphcomv1alpha1.ConditionReady)).To(BeTrue())
+			Expect(status().Main).To(Equal("instance_1"))
+
+			By("holding there for as long as the survivor stays behind")
+			reconcileCluster(resourceName)
+			Expect(sinceBootstrap(baseline)).To(BeEmpty())
+			Expect(replicas(dataSuffix)).To(Equal(int32(2)))
+			Expect(convergedCondition().Reason).To(Equal(memgraphcomv1alpha1.ReasonNoCaughtUpSurvivor))
+
+			By("handing MAIN over once the survivor has caught up")
+			fake.setBehind("instance_0", 0)
+			reconcileCluster(resourceName)
+
+			leader := coordinatorAddress(0)
+			Expect(sinceBootstrap(baseline)).To(Equal([]string{
+				leader + ": DEMOTE INSTANCE instance_1",
+				leader + ": SET INSTANCE instance_0 TO MAIN",
+				leader + ": UNREGISTER INSTANCE instance_1",
+			}), "the retirement resumes from where it stalled, in one pass")
+
+			reconcileCluster(resourceName)
+			Expect(replicas(dataSuffix)).To(Equal(int32(1)))
+			reconcileCluster(resourceName)
+
+			s := status()
+			Expect(s.Main).To(Equal("instance_0"))
+			Expect(s.DataInstances).To(Equal(int32(1)))
+			Expect(apimeta.IsStatusConditionTrue(s.Conditions,
+				memgraphcomv1alpha1.ConditionConverged)).To(BeTrue())
+		})
+
 		// The readiness gate covers the pods on their way out too: they belong to
 		// the StatefulSet the operator is still holding at its current size. A
 		// retiring pod that cannot become ready therefore blocks its own removal,

@@ -28,6 +28,13 @@ limitations under the License.
 // UNREGISTER INSTANCE, and a retiring coordinator is only ever removed from Raft
 // while it is not the leader.
 //
+// Moving MAIN off a retiring instance is the one thing here that can lose data,
+// so it has a precondition the rest do not: a survivor that is both reachable and
+// fully caught up with the MAIN, per SHOW REPLICATION LAG. Without one the
+// retirement is planned as nothing at all and the retiring MAIN keeps serving —
+// waiting is always better than promoting onto an instance that never received
+// the writes.
+//
 // One command breaks the pure-diff mould: YIELD LEADERSHIP, which moves
 // coordinator leadership off a retiring coordinator so it can be removed at all.
 // It cannot name a successor, so its outcome is the one thing the planner cannot
@@ -195,6 +202,15 @@ func (c YieldLeadership) String() string {
 // MAIN, and so the cluster is MAIN-less only for the few milliseconds between two
 // queries of the same pass.
 //
+// The handover off a retiring MAIN is conditional on a survivor being able to
+// take it: reachable, and holding every transaction the MAIN has committed. When
+// none is, the demotion, the promotion and that instance's unregistration are all
+// left out of the plan — the retiring MAIN stays MAIN and stays registered, and a
+// later pass tries again once a survivor has caught up. The rest of the
+// retirement still goes out: retiring instances that are not MAIN are
+// unregistered, and retiring coordinators are removed, because neither depends on
+// where MAIN sits.
+//
 // A retiring coordinator that holds Raft leadership cannot be removed at all, so
 // the plan ends with YIELD LEADERSHIP instead and stops there — the retiring
 // coordinators that are not the leader still go out ahead of it in that same
@@ -205,16 +221,31 @@ func (c YieldLeadership) String() string {
 // Instances the cluster knows but the topology neither declares nor retires are
 // left untouched: the retiring set is bounded by the operator's own prior apply,
 // so an instance a human registered is never removed.
-func Plan(declared Topology, observed []memgraph.Instance) []Command {
+func Plan(declared Topology, observed []memgraph.Instance, lag []memgraph.ReplicationLag) []Command {
 	registered := index(observed)
 	retiring := retiringNames(declared)
 
-	// A MAIN on its way out does not count as one: it is demoted below, and the
-	// cluster needs a survivor promoted in its place.
-	hasMain := false
+	// Which instance holds MAIN, and whether it is one on its way out. A retiring
+	// MAIN is the cluster's MAIN for as long as it stays: it stops counting as one
+	// only once this pass commits to demoting it, which is what the handover below
+	// decides.
+	retiringMain, hasMain := "", false
 	for _, instance := range observed {
-		hasMain = hasMain || (instance.IsMain() && !retiring[instance.Name])
+		switch {
+		case !instance.IsMain():
+		case retiring[instance.Name]:
+			retiringMain = instance.Name
+		default:
+			hasMain = true
+		}
 	}
+	// The survivor a retiring MAIN can hand over to, and the empty string when
+	// none qualifies — which is what defers the whole retirement to a later pass.
+	successor := ""
+	if retiringMain != "" {
+		successor = handoverTarget(declared, registered, indexLag(lag))
+	}
+	handover := retiringMain != "" && successor != ""
 
 	var commands []Command
 	for _, coordinator := range declared.Coordinators {
@@ -227,18 +258,33 @@ func Plan(declared Topology, observed []memgraph.Instance) []Command {
 			commands = append(commands, RegisterInstance{Instance: instance})
 		}
 	}
-	for _, instance := range declared.RetiringDataInstances {
-		if observed, ok := registered[instance.Name]; ok && observed.IsMain() {
-			commands = append(commands, DemoteInstance{Name: instance.Name})
-		}
+	if handover {
+		commands = append(commands, DemoteInstance{Name: retiringMain})
 	}
-	if !hasMain && len(declared.DataInstances) > 0 {
+	switch {
+	case handover && !hasMain:
+		// The demotion above left the cluster MAIN-less on purpose; the survivor
+		// picked for the handover takes over in the next command.
+		commands = append(commands, SetInstanceToMain{Name: successor})
+	case retiringMain == "" && !hasMain && len(declared.DataInstances) > 0:
+		// No MAIN and none retiring: a fresh bootstrap, a MAIN whose promotion never
+		// landed, or a pass that died between a retiring MAIN's demotion and the
+		// promotion meant to follow it. Lag is measured against a MAIN, so with none
+		// there is nothing to measure and this promotion goes by reachability alone.
+		// That is also why the handover is gated before the demotion rather than
+		// after: it is the last moment at which the choice is still free.
 		commands = append(commands, SetInstanceToMain{Name: promotionTarget(declared, registered)})
 	}
 	for _, instance := range declared.RetiringDataInstances {
-		if _, ok := registered[instance.Name]; ok {
-			commands = append(commands, UnregisterInstance{Name: instance.Name})
+		if _, ok := registered[instance.Name]; !ok {
+			continue
 		}
+		if instance.Name == retiringMain && !handover {
+			// Memgraph refuses to unregister the MAIN, and the demotion that would
+			// make this one unregisterable is waiting for a survivor to take over.
+			continue
+		}
+		commands = append(commands, UnregisterInstance{Name: instance.Name})
 	}
 
 	leader := leaderName(observed)
@@ -269,6 +315,31 @@ func leaderName(observed []memgraph.Instance) string {
 		}
 	}
 	return ""
+}
+
+// Retired reports whether every member a lowered replica count is shedding has
+// left the cluster: no retiring data instance is still registered, and no
+// retiring coordinator is still a Raft member. It is the precondition for
+// shedding their pods.
+//
+// Plan coming back empty does not establish that on its own. A retirement whose
+// handover is waiting for a caught-up survivor also plans nothing — there is no
+// command that would make a lagging replica ready — so a caller that read
+// emptiness as "done" would delete the pod of a registered MAIN. This is the
+// question it has to ask instead.
+func Retired(declared Topology, observed []memgraph.Instance) bool {
+	registered := index(observed)
+	for _, instance := range declared.RetiringDataInstances {
+		if _, ok := registered[instance.Name]; ok {
+			return false
+		}
+	}
+	for _, coordinator := range declared.RetiringCoordinators {
+		if coordinatorRegistered(registered, coordinator) {
+			return false
+		}
+	}
+	return true
 }
 
 // Registered reports how many of the declared coordinators and data instances
@@ -310,6 +381,17 @@ func index(observed []memgraph.Instance) map[string]memgraph.Instance {
 	return registered
 }
 
+// indexLag keys the observed replication lag by instance name. A name the view
+// does not cover reads back as the zero ReplicationLag, which reports itself as
+// not caught up — the safe answer for an instance nothing is known about.
+func indexLag(lag []memgraph.ReplicationLag) map[string]memgraph.ReplicationLag {
+	byInstance := make(map[string]memgraph.ReplicationLag, len(lag))
+	for _, instance := range lag {
+		byInstance[instance.Instance] = instance
+	}
+	return byInstance
+}
+
 // coordinatorRegistered reports whether the declared coordinator is a member of
 // the Raft cluster. A coordinator reports itself in SHOW INSTANCES with an
 // empty bolt_server until ADD COORDINATOR is issued for its ID, so presence
@@ -317,6 +399,40 @@ func index(observed []memgraph.Instance) map[string]memgraph.Instance {
 func coordinatorRegistered(registered map[string]memgraph.Instance, coordinator memgraph.CoordinatorSpec) bool {
 	observed, ok := registered[coordinator.Name()]
 	return ok && observed.BoltServer != ""
+}
+
+// handoverTarget picks the survivor a retiring MAIN hands MAIN over to: the
+// lowest-ordinal declared instance the coordinator leader observes as up and that
+// SHOW REPLICATION LAG reports as holding every transaction the MAIN has
+// committed, in every database. It returns the empty string when no survivor
+// qualifies.
+//
+// Both conditions are needed and neither implies the other. Health says the
+// leader can reach the instance, which a caught-up replica can still fail —
+// registration outlives reachability, and the lag view is relayed from the MAIN's
+// own cached progress for each replica, so an instance that went down a moment
+// ago still appears there at the offset it last reached. Lag says the instance
+// holds the writes, which a reachable one need not.
+//
+// There is deliberately no fallback, which is what separates this from
+// promotionTarget. A cluster with no MAIN is worse off than one whose promotion
+// has to be retried, so that one guesses rather than stall. A retiring MAIN is
+// still serving: waiting costs nothing but the scale-down's completion, while
+// promoting a lagging survivor discards every transaction it never received.
+func handoverTarget(
+	declared Topology,
+	registered map[string]memgraph.Instance,
+	lag map[string]memgraph.ReplicationLag,
+) string {
+	for _, instance := range declared.DataInstances {
+		if observed, ok := registered[instance.Name]; !ok || !observed.IsUp() {
+			continue
+		}
+		if lag[instance.Name].IsCaughtUp() {
+			return instance.Name
+		}
+	}
+	return ""
 }
 
 // promotionTarget picks the data instance to promote when the cluster has no

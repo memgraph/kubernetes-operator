@@ -19,6 +19,8 @@ package memgraph
 import (
 	"context"
 	"fmt"
+	"maps"
+	"slices"
 
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j/db"
@@ -58,6 +60,22 @@ func (c *boltClient) ShowInstances(ctx context.Context) ([]Instance, error) {
 		instances = append(instances, instanceFromRecord(record))
 	}
 	return instances, nil
+}
+
+func (c *boltClient) ShowReplicationLag(ctx context.Context) ([]ReplicationLag, error) {
+	records, err := c.run(ctx, showReplicationLagQuery)
+	if err != nil {
+		return nil, err
+	}
+	lag := make([]ReplicationLag, 0, len(records))
+	for _, record := range records {
+		instance, err := replicationLagFromRecord(record)
+		if err != nil {
+			return nil, err
+		}
+		lag = append(lag, instance)
+	}
+	return lag, nil
 }
 
 func (c *boltClient) AddCoordinator(ctx context.Context, coordinator CoordinatorSpec) error {
@@ -130,6 +148,53 @@ func instanceFromRecord(record *db.Record) Instance {
 	}
 }
 
+// replicationLagFromRecord maps one SHOW REPLICATION LAG row to a
+// ReplicationLag: an instance_name and a data_info map keyed by database name,
+// each entry carrying that database's counters.
+//
+// Unlike instanceFromRecord this refuses a row it cannot read rather than
+// filling in zero values. The leniency there is safe because a missing column
+// leaves an empty string, which reads as neither up nor MAIN; here a missing
+// counter would read as zero transactions behind, which is precisely the answer
+// that makes an instance promotable. This view must never invent that.
+func replicationLagFromRecord(record *db.Record) (ReplicationLag, error) {
+	name := stringColumn(record, "instance_name")
+	if name == "" {
+		return ReplicationLag{}, fmt.Errorf("%s row carries no instance_name", showReplicationLagQuery)
+	}
+	databases, ok := mapColumn(record, "data_info")
+	if !ok {
+		return ReplicationLag{}, fmt.Errorf("%s row for %s carries no data_info map", showReplicationLagQuery, name)
+	}
+
+	lag := ReplicationLag{Instance: name}
+	// Databases come out ordered by name so the view a caller compares is stable
+	// across reconciles; the driver hands back an unordered map.
+	for _, database := range slices.Sorted(maps.Keys(databases)) {
+		counters, ok := asMap(databases[database])
+		if !ok {
+			return ReplicationLag{}, fmt.Errorf("%s row for %s carries no counters for database %s",
+				showReplicationLagQuery, name, database)
+		}
+		committed, ok := intEntry(counters, "num_committed_txns")
+		if !ok {
+			return ReplicationLag{}, fmt.Errorf("%s row for %s is missing num_committed_txns for database %s",
+				showReplicationLagQuery, name, database)
+		}
+		behind, ok := intEntry(counters, "num_txns_behind_main")
+		if !ok {
+			return ReplicationLag{}, fmt.Errorf("%s row for %s is missing num_txns_behind_main for database %s",
+				showReplicationLagQuery, name, database)
+		}
+		lag.Databases = append(lag.Databases, DatabaseLag{
+			Database:       database,
+			CommittedTxns:  committed,
+			TxnsBehindMain: behind,
+		})
+	}
+	return lag, nil
+}
+
 func stringColumn(record *db.Record, key string) string {
 	value, ok := record.Get(key)
 	if !ok {
@@ -140,4 +205,26 @@ func stringColumn(record *db.Record, key string) string {
 		return ""
 	}
 	return s
+}
+
+func mapColumn(record *db.Record, key string) (map[string]any, bool) {
+	value, ok := record.Get(key)
+	if !ok {
+		return nil, false
+	}
+	return asMap(value)
+}
+
+func asMap(value any) (map[string]any, bool) {
+	m, ok := value.(map[string]any)
+	return m, ok
+}
+
+func intEntry(m map[string]any, key string) (int64, bool) {
+	value, ok := m[key]
+	if !ok {
+		return 0, false
+	}
+	i, ok := value.(int64)
+	return i, ok
 }
