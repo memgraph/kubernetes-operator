@@ -96,18 +96,22 @@ const (
 	EnvCoreDumpsDir = "CORE_DUMPS_DIR"
 )
 
-// StorageRetentionPolicy decides what happens to the cluster's
-// PersistentVolumeClaims when the MemgraphCluster is deleted.
+// StorageRetentionPolicy decides what happens to a PersistentVolumeClaim of
+// this cluster once nothing runs on it any more: either because the
+// MemgraphCluster was deleted, or because a lowered replica count retired the
+// pod that used it.
 // +kubebuilder:validation:Enum=Retain;Delete
 type StorageRetentionPolicy string
 
 const (
-	// RetentionPolicyRetain leaves the PVCs behind when the MemgraphCluster is
-	// deleted, so the data survives an accidental deletion.
+	// RetentionPolicyRetain leaves the PVCs behind, so the data survives both an
+	// accidental deletion of the MemgraphCluster and an accidental scale-down —
+	// raising the count again reattaches the retained volume.
 	RetentionPolicyRetain StorageRetentionPolicy = "Retain"
 
 	// RetentionPolicyDelete lets the StatefulSet controller garbage-collect the
-	// PVCs together with the MemgraphCluster.
+	// PVCs: all of them when the MemgraphCluster is deleted, and a retiring
+	// pod's when a replica count is lowered. The data is not recoverable.
 	RetentionPolicyDelete StorageRetentionPolicy = "Delete"
 )
 
@@ -331,16 +335,22 @@ type RoleStorageSpec struct {
 	LogStorageClassName *string `json:"logStorageClassName,omitempty"`
 }
 
-// StorageSpec configures persistence for both roles plus what happens to the
-// claims when the MemgraphCluster goes away.
+// StorageSpec configures persistence for both roles plus what happens to a
+// claim once nothing runs on it any more.
 type StorageSpec struct {
-	// retentionPolicy decides whether the cluster's PersistentVolumeClaims
-	// survive deletion of the MemgraphCluster. It maps directly onto the
-	// StatefulSets' persistentVolumeClaimRetentionPolicy.whenDeleted, so the
-	// StatefulSet controller is the only thing that ever deletes storage — the
-	// operator owns no finalizer and runs no cleanup of its own. The default
-	// keeps production data safe from an accidental delete; dev clusters can
-	// opt into self-cleanup.
+	// retentionPolicy decides whether a PersistentVolumeClaim of this cluster
+	// survives being orphaned, which happens two ways: the MemgraphCluster is
+	// deleted, or a lowered replica count retires the pod that used it. Both are
+	// the same question — keep this cluster's data, or do not — so the policy
+	// maps onto both halves of the StatefulSets'
+	// persistentVolumeClaimRetentionPolicy, whenDeleted and whenScaled. That
+	// makes the StatefulSet controller the only thing that ever deletes storage;
+	// the operator owns no finalizer and runs no cleanup of its own. The default
+	// keeps production data safe from an accidental delete or shrink; dev
+	// clusters can opt into self-cleanup.
+	//
+	// Delete therefore makes lowering spec.coordinators or spec.dataInstances
+	// destructive: the retiring pods' claims go with them.
 	// +kubebuilder:default=Retain
 	// +optional
 	RetentionPolicy StorageRetentionPolicy `json:"retentionPolicy,omitempty"`

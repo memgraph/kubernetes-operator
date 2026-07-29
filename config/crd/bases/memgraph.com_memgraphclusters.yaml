@@ -1265,13 +1265,19 @@ spec:
                   retentionPolicy:
                     default: Retain
                     description: |-
-                      retentionPolicy decides whether the cluster's PersistentVolumeClaims
-                      survive deletion of the MemgraphCluster. It maps directly onto the
-                      StatefulSets' persistentVolumeClaimRetentionPolicy.whenDeleted, so the
-                      StatefulSet controller is the only thing that ever deletes storage — the
-                      operator owns no finalizer and runs no cleanup of its own. The default
-                      keeps production data safe from an accidental delete; dev clusters can
-                      opt into self-cleanup.
+                      retentionPolicy decides whether a PersistentVolumeClaim of this cluster
+                      survives being orphaned, which happens two ways: the MemgraphCluster is
+                      deleted, or a lowered replica count retires the pod that used it. Both are
+                      the same question — keep this cluster's data, or do not — so the policy
+                      maps onto both halves of the StatefulSets'
+                      persistentVolumeClaimRetentionPolicy, whenDeleted and whenScaled. That
+                      makes the StatefulSet controller the only thing that ever deletes storage;
+                      the operator owns no finalizer and runs no cleanup of its own. The default
+                      keeps production data safe from an accidental delete or shrink; dev
+                      clusters can opt into self-cleanup.
+
+                      Delete therefore makes lowering spec.coordinators or spec.dataInstances
+                      destructive: the retiring pods' claims go with them.
                     enum:
                     - Retain
                     - Delete

@@ -71,7 +71,7 @@ This MVP is deliberately "provision, bootstrap, observe": both replica counts ar
 - Spec knobs in v1: image (repository, tag, pull policy), cluster domain, internal ports, lib/log PVC configuration per role, storage retention policy, probe timings per role, resources per role, labels per role, and a freeform non-secret env/args passthrough per role. Knob vocabulary mirrors the HA chart where the concept carries over.
 - License and organization are consumed via a **secret reference block identical in shape to the chart's** (`secrets.name`, `secrets.licenseKey`, `secrets.organizationKey`). A Bolt-auth secret reference joins this block in a later version.
 - **No Memgraph version enforcement**: the image tag is plain user input; the operator assumes the HA query surface (`SHOW INSTANCES`, `REGISTER INSTANCE`, `ADD COORDINATOR`, `SET INSTANCE TO MAIN`) is stable across versions.
-- Storage: `storage.retentionPolicy` (`Retain` | `Delete`, default `Retain`) maps directly onto the StatefulSet PVC retention policy (`whenDeleted`). The operator carries **no finalizer-based storage cleanup** — no destructive code paths in v1.
+- Storage: `storage.retentionPolicy` (`Retain` | `Delete`, default `Retain`) maps directly onto both halves of the StatefulSet PVC retention policy (`whenDeleted` and `whenScaled`), so one knob covers a claim orphaned by deleting the cluster and one orphaned by a lowered replica count. The operator carries **no finalizer-based storage cleanup** — no destructive code paths in v1.
 
 ### Workload architecture
 
