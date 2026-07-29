@@ -108,10 +108,11 @@ type MemgraphClusterReconciler struct {
 // mid-bootstrap is harmless. Registration reconciliation is continuous, not
 // one-shot: a converged cluster is re-observed on a periodic resync, so a
 // registration a pod loses (rescheduled, wiped storage) is re-issued without
-// human action. An apply the API server rejects — an edit to a field
-// Kubernetes treats as immutable, a quota denial — is reported on the resource
-// as ApplyFailed rather than only in the log, because no amount of retrying
-// will clear it. Deletion needs no handling here — every object
+// human action. A rejection is reported on the resource rather than only in the
+// log, because no amount of retrying will clear it: an apply the API server
+// refuses — an edit to a field Kubernetes treats as immutable, a quota denial —
+// as ApplyFailed, and a registration command the coordinator leader refuses as
+// RegistrationFailed. Deletion needs no handling here — every object
 // carries a controller owner reference, so garbage collection removes the
 // workloads with the CR.
 func (r *MemgraphClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -452,9 +453,22 @@ func (r *MemgraphClusterReconciler) reconcileRegistration(
 		return ctrl.Result{}, statusErr
 	}
 
+	// A command the leader rejects is reported on the resource before the error is
+	// returned, for the reason a rejected apply is: the command is retried forever,
+	// so without it the conditions keep saying registration is in progress while
+	// the rejection only ever reaches the operator's log. Ready is left describing
+	// what the cluster was last observed doing — a MAIN that is serving keeps
+	// serving through a registration the coordinator refuses.
 	for _, command := range commands {
 		if err := command.Run(ctx, leader); err != nil {
-			return ctrl.Result{}, fmt.Errorf("executing registration command %q: %w", command, err)
+			commandErr := fmt.Errorf("executing registration command %q: %w", command, err)
+			msg := truncateMessage(commandErr.Error())
+			if statusErr := r.writeStatus(ctx, cluster, latest, readyOrNot(latest.main),
+				notConvergedCondition(memgraphcomv1alpha1.ReasonRegistrationFailed, msg),
+			); statusErr != nil {
+				return ctrl.Result{}, errors.Join(commandErr, statusErr)
+			}
+			return ctrl.Result{}, commandErr
 		}
 		log.Info("Executed registration command", "command", command.String())
 	}

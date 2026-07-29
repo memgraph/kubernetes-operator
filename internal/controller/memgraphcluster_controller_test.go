@@ -1266,6 +1266,47 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			}
 		})
 
+		// The same argument as the rejected apply, one layer down: a registration
+		// command the leader refuses is reissued on every pass forever, so a
+		// resource that only ever says "registration in progress" hides a cluster
+		// that will never converge. The MAIN keeps serving throughout, so Ready is
+		// the one condition that stays True.
+		It("should report a registration command the coordinator leader rejected", func() {
+			fake.setInstances(convergedCluster())
+			reconcileCluster(resourceName)
+			markWorkloadsReady(resourceName)
+			reconcileCluster(resourceName)
+			Expect(condition(memgraphcomv1alpha1.ConditionConverged).Status).To(Equal(metav1.ConditionTrue))
+
+			// A replica loses its registration and the leader refuses to take it
+			// back, which is the shape of a plan no retry can converge.
+			fake.setInstances([]memgraph.Instance{
+				observedCoordinator(1, memgraph.RoleLeader),
+				observedCoordinator(2, memgraph.RoleFollower),
+				observedCoordinator(3, memgraph.RoleFollower),
+				observedDataInstance(0, memgraph.RoleMain),
+			})
+			fake.rejectCommand("REGISTER INSTANCE instance_1", errors.New("replication port already in use"))
+
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: resourceName, Namespace: resourceNamespace},
+			})
+			Expect(err).To(HaveOccurred(), "a rejected command fails the pass so it is retried with backoff")
+
+			s := status()
+			Expect(s.Main).To(Equal("instance_0"), "the last observed MAIN survives a rejected command")
+			ready := condition(memgraphcomv1alpha1.ConditionReady)
+			Expect(ready.Status).To(Equal(metav1.ConditionTrue),
+				"a cluster with a MAIN keeps serving while a registration is refused")
+			converged := condition(memgraphcomv1alpha1.ConditionConverged)
+			Expect(converged.Status).To(Equal(metav1.ConditionFalse))
+			Expect(converged.Reason).To(Equal(memgraphcomv1alpha1.ReasonRegistrationFailed))
+			Expect(converged.Message).To(ContainSubstring("instance_1"),
+				"the condition must name the command that was refused")
+			Expect(converged.Message).To(ContainSubstring("replication port already in use"),
+				"the condition must carry the coordinator's own words")
+		})
+
 		It("should report ready and converged once the cluster is bootstrapped", func() {
 			reconcileCluster(resourceName)
 			markWorkloadsReady(resourceName)

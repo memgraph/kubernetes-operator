@@ -163,6 +163,14 @@ const (
 	// issued to converge the cluster toward the declared topology.
 	ReasonRegistrationInProgress = "RegistrationInProgress"
 
+	// ReasonRegistrationFailed is set when the coordinator leader rejected a
+	// registration command, so the cluster does not have the declared topology.
+	// The condition message carries the command and the rejection verbatim, for
+	// the reason ApplyFailed does: the command is retried forever, and nothing the
+	// operator can do will clear a rejection it does not understand, so the
+	// resource has to name it rather than leaving it in the operator's log.
+	ReasonRegistrationFailed = "RegistrationFailed"
+
 	// ReasonAllInstancesRegistered is set when the observed cluster matches the
 	// declared topology.
 	ReasonAllInstancesRegistered = "AllInstancesRegistered"

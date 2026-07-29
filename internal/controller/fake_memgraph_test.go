@@ -51,6 +51,12 @@ type fakeMemgraph struct {
 	// connectErr, when set, makes every Connect fail — the operator's view of a
 	// cluster whose coordinators do not yet answer Bolt.
 	connectErr error
+	// rejected are commands the cluster refuses whatever its state, keyed by
+	// command prefix. It stands in for the rejections the operator cannot reason
+	// about — a coordinator refusing a registration a healthy one would accept —
+	// which is the only way a permanently failing plan can be provoked here: every
+	// other rejection this fake models is one the planner is careful never to plan.
+	rejected map[string]error
 	// executed records every mutating command as "<bolt address>: <command>".
 	executed []string
 }
@@ -73,6 +79,17 @@ func (f *fakeMemgraph) setConnectErr(err error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.connectErr = err
+}
+
+// rejectCommand makes every command starting with the given prefix fail with the
+// given error, leaving the cluster view untouched.
+func (f *fakeMemgraph) rejectCommand(prefix string, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.rejected == nil {
+		f.rejected = map[string]error{}
+	}
+	f.rejected[prefix] = err
 }
 
 func (f *fakeMemgraph) connects() int {
@@ -375,6 +392,11 @@ func (c *fakeClient) execute(command string, apply func() error) error {
 	defer c.cluster.mu.Unlock()
 	if c.closed {
 		return fmt.Errorf("fake memgraph: connection to %s already closed", c.address)
+	}
+	for prefix, err := range c.cluster.rejected {
+		if strings.HasPrefix(command, prefix) {
+			return err
+		}
 	}
 	if err := apply(); err != nil {
 		return err
