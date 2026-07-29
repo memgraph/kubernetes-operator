@@ -14,8 +14,9 @@ spec:
   # Raise either count later to grow the cluster: the operator provisions the
   # new pods and registers them, no manual registration involved. The
   # coordinator count must be odd so the Raft quorum cannot split, and at least
-  # three. Lowering dataInstances retires the instances above the new count —
-  # unregistered before their pods go; lowering coordinators is not supported yet.
+  # three. Lower either count and the members above it are retired first — a data
+  # instance unregistered, a coordinator removed from the Raft cluster — before
+  # their pods go.
   coordinators: 3
   dataInstances: 2
   image:

@@ -11,14 +11,15 @@ spec:
   # odd so the Raft quorum cannot split, and at least three — a quorum of one
   # cannot survive losing itself.
   #
-  # Lowering dataInstances shrinks the cluster: the instances above the new count
-  # are retired (MAIN moved off them, then UNREGISTER INSTANCE) before their pods
-  # are shed, reported as Converged=False with reason RetirementInProgress. Note
-  # that the operator only touches the cluster while every pod is ready, so a
-  # retiring pod that cannot become ready blocks its own removal. Lowering
-  # coordinators is not supported yet: it is accepted at admission but the
-  # operator holds the StatefulSet at its current size and reports
-  # Converged=False with reason ScaleInProgress.
+  # Lowering either count shrinks the cluster: the members above the new count are
+  # retired before their pods are shed — a data instance has MAIN moved off it and
+  # is then UNREGISTER INSTANCEd, a coordinator is REMOVE COORDINATORed out of the
+  # Raft cluster — reported as Converged=False with reason RetirementInProgress.
+  # Two notes. The operator only touches the cluster while every pod is ready, so
+  # a retiring pod that cannot become ready blocks its own removal. And Raft
+  # refuses to remove its own leader, so a leader in the retiring range is asked
+  # to YIELD LEADERSHIP first, reported as LeadershipTransferInProgress while that
+  # is pending.
   coordinators: 3
   dataInstances: 2
   # repository carries the registry host and image path only — the version

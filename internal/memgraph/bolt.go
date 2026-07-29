@@ -85,6 +85,16 @@ func (c *boltClient) UnregisterInstance(ctx context.Context, name string) error 
 	return err
 }
 
+func (c *boltClient) RemoveCoordinator(ctx context.Context, id int32) error {
+	_, err := c.run(ctx, removeCoordinatorQuery(id))
+	return err
+}
+
+func (c *boltClient) YieldLeadership(ctx context.Context) error {
+	_, err := c.run(ctx, yieldLeadershipQuery)
+	return err
+}
+
 func (c *boltClient) Close(ctx context.Context) error {
 	return c.driver.Close(ctx)
 }

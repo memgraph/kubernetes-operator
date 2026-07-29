@@ -764,14 +764,13 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			Expect(converged.Reason).To(Equal(memgraphcomv1alpha1.ReasonAllInstancesRegistered))
 		})
 
-		// Lowering the coordinator count is the scale the operator still cannot
-		// realize: removing a Raft member is not implemented, so the StatefulSet is
-		// held at its current size and the resource says so rather than the
-		// operator acting on half of a scale-down it cannot finish.
-		It("should report Converged False while a lowered coordinator count is held back", func() {
+		// grownToFive drives the cluster to a converged five-coordinator topology,
+		// which is the only shape a coordinator shrink can start from: the count must
+		// stay odd and at or above three, so five is the smallest cluster with members
+		// to drop. It returns the command count the shrink assertions start from.
+		grownToFive := func() int {
+			GinkgoHelper()
 			bootstrapped()
-
-			By("growing the coordinators so there is a member to drop")
 			setCounts(5, 2)
 			reconcileCluster(resourceName)
 			markWorkloadsReady(resourceName)
@@ -779,26 +778,138 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			reconcileCluster(resourceName)
 			Expect(apimeta.IsStatusConditionTrue(status().Conditions,
 				memgraphcomv1alpha1.ConditionConverged)).To(BeTrue())
-			grown := len(fake.executedCommands())
+			return len(fake.executedCommands())
+		}
+
+		// Raft membership is given up before the pods are, so no removed member's pod
+		// outlives its vote. With the leader on a survivor that is the whole shrink:
+		// removing a follower needs no leadership dance.
+		It("should remove retiring coordinators from Raft and only then shed their pods", func() {
+			baseline := grownToFive()
 
 			setCounts(3, 2)
 			reconcileCluster(resourceName)
 
+			leader := coordinatorAddress(0)
+			Expect(sinceBootstrap(baseline)).To(Equal([]string{
+				leader + ": REMOVE COORDINATOR 4",
+				leader + ": REMOVE COORDINATOR 5",
+			}), "both retiring members leave the Raft cluster in one pass under a surviving leader")
 			Expect(replicas(coordinatorSuffix)).To(Equal(int32(5)),
-				"a lower declared count must never shrink the applied StatefulSet")
+				"a pass with pending commands must never lower the replica count")
 			converged := convergedCondition()
 			Expect(converged.Status).To(Equal(metav1.ConditionFalse))
-			Expect(converged.Reason).To(Equal(memgraphcomv1alpha1.ReasonScaleInProgress))
-			Expect(converged.Message).To(ContainSubstring(resourceName + coordinatorSuffix))
-			Expect(sinceBootstrap(grown)).To(BeEmpty(),
-				"the coordinators the lowered count drops stay registered: removal is not implemented")
+			Expect(converged.Reason).To(Equal(memgraphcomv1alpha1.ReasonRetirementInProgress))
+			Expect(converged.Message).To(ContainSubstring("coordinator_4"),
+				"the condition must name the coordinators being retired")
 
-			// Raising the count back matches what is running, which converges
-			// again without touching the cluster.
+			By("shedding the pods once the members have left the Raft cluster")
+			reconcileCluster(resourceName)
+			Expect(replicas(coordinatorSuffix)).To(Equal(int32(3)))
+			Expect(sinceBootstrap(baseline)).To(HaveLen(2), "the removals are not re-issued")
+			Expect(convergedCondition().Reason).To(Equal(memgraphcomv1alpha1.ReasonRetirementInProgress))
+
+			By("reporting the shrink as finished once the StatefulSet runs the declared count")
+			reconcileCluster(resourceName)
+			s := status()
+			Expect(s.Coordinators).To(Equal(int32(3)))
+			Expect(s.Main).To(Equal("instance_0"), "shrinking the coordinators does not move MAIN")
+			Expect(apimeta.IsStatusConditionTrue(s.Conditions,
+				memgraphcomv1alpha1.ConditionConverged)).To(BeTrue())
+		})
+
+		// A StatefulSet sheds its highest ordinals, so the Raft leader may well sit on
+		// one of them — and Raft refuses to remove its own leader. The plan then ends
+		// with YIELD LEADERSHIP and nothing after it, because the election picks the
+		// successor: the pass stops there and the next one removes under whoever won.
+		// The fake refuses a removal aimed at its leader, so a plan that skipped the
+		// yield would fail this spec rather than quietly working.
+		It("should yield leadership off a retiring coordinator before removing it", func() {
+			baseline := grownToFive()
+
+			By("parking Raft leadership on the coordinator the shrink retires")
+			fake.setLeader("coordinator_4")
+
+			setCounts(3, 2)
+			reconcileCluster(resourceName)
+
+			retiringLeader := coordinatorAddress(3)
+			Expect(sinceBootstrap(baseline)).To(Equal([]string{
+				retiringLeader + ": REMOVE COORDINATOR 5",
+				retiringLeader + ": YIELD LEADERSHIP",
+			}), "the yield comes last, after the removal the planner could still order safely")
+			converged := convergedCondition()
+			Expect(converged.Status).To(Equal(metav1.ConditionFalse))
+			Expect(converged.Reason).To(Equal(memgraphcomv1alpha1.ReasonLeadershipTransferInProgress))
+			Expect(converged.Message).To(ContainSubstring("coordinator_4"),
+				"the condition must name the coordinator being moved off leadership")
+			Expect(replicas(coordinatorSuffix)).To(Equal(int32(5)),
+				"a pass with a pending yield must never lower the replica count")
+
+			By("removing the former leader on the next pass, under whichever coordinator won")
+			reconcileCluster(resourceName)
+			Expect(sinceBootstrap(baseline)).To(Equal([]string{
+				retiringLeader + ": REMOVE COORDINATOR 5",
+				retiringLeader + ": YIELD LEADERSHIP",
+				coordinatorAddress(0) + ": REMOVE COORDINATOR 4",
+			}))
+			Expect(convergedCondition().Reason).To(Equal(memgraphcomv1alpha1.ReasonRetirementInProgress))
+
+			By("shedding the pods and converging once the Raft cluster is down to three")
+			reconcileCluster(resourceName)
+			Expect(replicas(coordinatorSuffix)).To(Equal(int32(3)))
+			reconcileCluster(resourceName)
+			s := status()
+			Expect(s.Coordinators).To(Equal(int32(3)))
+			Expect(apimeta.IsStatusConditionTrue(s.Conditions,
+				memgraphcomv1alpha1.ConditionConverged)).To(BeTrue())
+		})
+
+		// Raising the count back to what is already running is a no-op scale: the
+		// members are still registered, so nothing is planned and nothing is applied.
+		It("should converge again when a lowered coordinator count is raised back", func() {
+			baseline := grownToFive()
+
+			setCounts(3, 2)
 			setCounts(5, 2)
 			reconcileCluster(resourceName)
 
+			Expect(sinceBootstrap(baseline)).To(BeEmpty(),
+				"a shrink that was undone before it was acted on touches the cluster not at all")
+			Expect(replicas(coordinatorSuffix)).To(Equal(int32(5)))
 			Expect(apimeta.IsStatusConditionTrue(status().Conditions,
+				memgraphcomv1alpha1.ConditionConverged)).To(BeTrue())
+		})
+
+		// Both counts lowered in one edit: each role's retirement is planned
+		// independently, and both StatefulSets shrink once the plan is empty.
+		It("should retire members of both roles in one edit", func() {
+			baseline := grownToFive()
+
+			setCounts(3, 1)
+			reconcileCluster(resourceName)
+
+			leader := coordinatorAddress(0)
+			Expect(sinceBootstrap(baseline)).To(Equal([]string{
+				leader + ": UNREGISTER INSTANCE instance_1",
+				leader + ": REMOVE COORDINATOR 4",
+				leader + ": REMOVE COORDINATOR 5",
+			}), "the surviving MAIN is left alone, and each role's removals are planned on their own")
+			Expect(replicas(coordinatorSuffix)).To(Equal(int32(5)))
+			Expect(replicas(dataSuffix)).To(Equal(int32(2)))
+			Expect(convergedCondition().Message).To(SatisfyAll(
+				ContainSubstring("coordinator_4"), ContainSubstring("instance_1")),
+				"the condition must name the retiring members of both roles")
+
+			reconcileCluster(resourceName)
+			Expect(replicas(coordinatorSuffix)).To(Equal(int32(3)))
+			Expect(replicas(dataSuffix)).To(Equal(int32(1)))
+
+			reconcileCluster(resourceName)
+			s := status()
+			Expect(s.Coordinators).To(Equal(int32(3)))
+			Expect(s.DataInstances).To(Equal(int32(1)))
+			Expect(apimeta.IsStatusConditionTrue(s.Conditions,
 				memgraphcomv1alpha1.ConditionConverged)).To(BeTrue())
 		})
 

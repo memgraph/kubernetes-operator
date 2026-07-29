@@ -23,10 +23,17 @@ limitations under the License.
 // the Raft coordinators; the planner never overrides a MAIN that is staying.
 //
 // Members a lowered replica count is retiring are the one thing the planner
-// removes, and it can order the whole removal in a single pass because it
-// predicts every intermediate state: a retiring MAIN is demoted, a survivor is
-// promoted in its place, and the retiring members are then unregistered — so no
-// UNREGISTER INSTANCE is ever aimed at a MAIN, which Memgraph would refuse.
+// removes, and it orders each removal so that Memgraph never has to refuse it: a
+// retiring MAIN is demoted and a survivor promoted in its place before any
+// UNREGISTER INSTANCE, and a retiring coordinator is only ever removed from Raft
+// while it is not the leader.
+//
+// One command breaks the pure-diff mould: YIELD LEADERSHIP, which moves
+// coordinator leadership off a retiring coordinator so it can be removed at all.
+// It cannot name a successor, so its outcome is the one thing the planner cannot
+// predict — which is why it is always the last command of a plan. Everything the
+// planner can still order safely goes out ahead of it in the same pass, and the
+// caller re-observes the cluster under whichever coordinator won the election.
 package planner
 
 import (
@@ -48,9 +55,10 @@ type Topology struct {
 	// longer declared. They are empty while a cluster grows or holds its size.
 	//
 	// A retiring data instance is demoted if it holds MAIN and then
-	// unregistered, so the cluster stops expecting it before its pod goes.
-	// RetiringCoordinators is still always empty: removing a Raft member is not
-	// implemented yet, so a plan issues no command for one.
+	// unregistered, so the cluster stops expecting it before its pod goes. A
+	// retiring coordinator is removed from the Raft cluster, which Raft only
+	// allows for a member that is not the leader — so leadership is yielded away
+	// from a retiring leader first.
 	RetiringCoordinators  []memgraph.CoordinatorSpec
 	RetiringDataInstances []memgraph.DataInstanceSpec
 }
@@ -136,14 +144,63 @@ func (c UnregisterInstance) String() string {
 	return "UNREGISTER INSTANCE " + c.Name
 }
 
+// RemoveCoordinator drops a retiring coordinator from the Raft cluster, so its
+// vote is gone before its pod is. It is never aimed at the observed leader: Raft
+// refuses to remove its own leader, which is what YieldLeadership is for.
+//
+// The removed coordinator keeps running and keeps its state — NuRaft only stops
+// it campaigning — so nothing here has to be undone before a raised count adds
+// it back on its retained volume.
+type RemoveCoordinator struct {
+	Coordinator memgraph.CoordinatorSpec
+}
+
+// Run implements Command.
+func (c RemoveCoordinator) Run(ctx context.Context, client memgraph.Client) error {
+	return client.RemoveCoordinator(ctx, c.Coordinator.ID)
+}
+
+func (c RemoveCoordinator) String() string {
+	return fmt.Sprintf("REMOVE COORDINATOR %d", c.Coordinator.ID)
+}
+
+// YieldLeadership hands Raft leadership away from the retiring coordinator that
+// currently holds it, which is the only way it can then be removed. It runs on
+// the leader — the connection the caller already holds — and cannot name a
+// successor, so the plan it ends says nothing about who takes over: the caller
+// re-observes the cluster and plans again under the new leader.
+type YieldLeadership struct {
+	// Leader is the retiring coordinator giving leadership up. It is carried for
+	// the sake of whoever is watching the scale-down; the query itself has no
+	// argument, and no successor can be named.
+	Leader string
+}
+
+// Run implements Command.
+func (c YieldLeadership) Run(ctx context.Context, client memgraph.Client) error {
+	return client.YieldLeadership(ctx)
+}
+
+func (c YieldLeadership) String() string {
+	return "YIELD LEADERSHIP"
+}
+
 // Plan diffs the declared topology against the observed instances and returns
 // the commands still needed, in execution order: coordinators before data
 // instances (registration requires a formed Raft cluster), then the retirement
 // of the members a lowered count sheds — demote a retiring MAIN, promote a
-// survivor in its place, unregister every retiring member. The promotion sits
-// between the two so that no UNREGISTER INSTANCE is ever aimed at an observed
-// MAIN, and so the cluster is MAIN-less only for the few milliseconds between
-// two queries of the same pass.
+// survivor in its place, unregister every retiring data instance, remove every
+// retiring coordinator from Raft. The promotion sits between the demotion and the
+// unregistrations so that no UNREGISTER INSTANCE is ever aimed at an observed
+// MAIN, and so the cluster is MAIN-less only for the few milliseconds between two
+// queries of the same pass.
+//
+// A retiring coordinator that holds Raft leadership cannot be removed at all, so
+// the plan ends with YIELD LEADERSHIP instead and stops there — the retiring
+// coordinators that are not the leader still go out ahead of it in that same
+// pass. Nothing follows a yield, because nothing after it could be planned: the
+// election picks the next leader, and the caller has to observe the cluster again
+// to learn who won.
 //
 // Instances the cluster knows but the topology neither declares nor retires are
 // left untouched: the retiring set is bounded by the operator's own prior apply,
@@ -183,7 +240,35 @@ func Plan(declared Topology, observed []memgraph.Instance) []Command {
 			commands = append(commands, UnregisterInstance{Name: instance.Name})
 		}
 	}
+
+	leader := leaderName(observed)
+	yieldFrom := ""
+	for _, coordinator := range declared.RetiringCoordinators {
+		if coordinator.Name() == leader {
+			// Raft refuses to remove its own leader, so this one waits for the
+			// yield below to move leadership to another member.
+			yieldFrom = leader
+			continue
+		}
+		if coordinatorRegistered(registered, coordinator) {
+			commands = append(commands, RemoveCoordinator{Coordinator: coordinator})
+		}
+	}
+	if yieldFrom != "" {
+		commands = append(commands, YieldLeadership{Leader: yieldFrom})
+	}
 	return commands
+}
+
+// leaderName is the coordinator the observed view reports as Raft leader, or the
+// empty string when it reports none.
+func leaderName(observed []memgraph.Instance) string {
+	for _, instance := range observed {
+		if instance.IsLeader() {
+			return instance.Name
+		}
+	}
+	return ""
 }
 
 // Registered reports how many of the declared coordinators and data instances

@@ -191,50 +191,68 @@ type replicaCounts struct {
 	data         roleReplicas
 }
 
-// scaleMessage describes the roles whose StatefulSet does not run the declared
-// number of replicas, and is empty once both do — which is what widens
-// Converged from "registration matches the declared topology" to "the declared
-// topology is actually running".
-func (c replicaCounts) scaleMessage() string {
-	var pending []string
-	for _, role := range []roleReplicas{c.coordinators, c.data} {
-		if role.applied != role.declared {
-			pending = append(pending, fmt.Sprintf("StatefulSet %s runs %d replica(s) while %d are declared",
-				role.name, role.applied, role.declared))
-		}
-	}
-	return strings.Join(pending, "; ")
-}
-
-// retirementMessage names the data instances a lowered count is shedding, and is
-// empty when none are. It is non-empty for exactly as long as the retirement is
-// unfinished: the retiring set is derived from the replica count the operator's
-// own StatefulSet still runs, so it empties only once the shrink that removes
-// those pods has been applied.
+// retirementMessage names the members a lowered count is shedding, and is empty
+// when none are. It is non-empty for exactly as long as the retirement is
+// unfinished: the retiring sets are derived from the replica counts the
+// operator's own StatefulSets still run, so they empty only once the shrink that
+// removes those pods has been applied.
 func retirementMessage(topology planner.Topology) string {
-	if len(topology.RetiringDataInstances) == 0 {
+	var retiring []string
+	if names := coordinatorNames(topology.RetiringCoordinators); len(names) > 0 {
+		retiring = append(retiring, "coordinator(s) "+strings.Join(names, ", "))
+	}
+	if names := instanceNames(topology.RetiringDataInstances); len(names) > 0 {
+		retiring = append(retiring, "data instance(s) "+strings.Join(names, ", "))
+	}
+	if len(retiring) == 0 {
 		return ""
 	}
-	names := make([]string, 0, len(topology.RetiringDataInstances))
-	for _, instance := range topology.RetiringDataInstances {
+	return "Retiring " + strings.Join(retiring, " and ") + " before their pods are shed"
+}
+
+func coordinatorNames(coordinators []memgraph.CoordinatorSpec) []string {
+	names := make([]string, 0, len(coordinators))
+	for _, coordinator := range coordinators {
+		names = append(names, coordinator.Name())
+	}
+	return names
+}
+
+func instanceNames(instances []memgraph.DataInstanceSpec) []string {
+	names := make([]string, 0, len(instances))
+	for _, instance := range instances {
 		names = append(names, instance.Name)
 	}
-	return "Retiring data instance(s) " + strings.Join(names, ", ") +
-		" before their pods are shed"
+	return names
+}
+
+// yieldedLeader is the retiring coordinator a plan ends by moving Raft leadership
+// off, or the empty string when the plan does not do that. A yield is always the
+// plan's last command, because nothing after it could be planned: the election
+// picks the successor, so the pass stops there and the next one observes the
+// cluster under whoever won.
+func yieldedLeader(commands []planner.Command) string {
+	if len(commands) == 0 {
+		return ""
+	}
+	yield, ok := commands[len(commands)-1].(planner.YieldLeadership)
+	if !ok {
+		return ""
+	}
+	return yield.Leader
 }
 
 // replicaCounts resolves the replica count to apply per role: the declared count
 // while the cluster grows or holds its size, and deliberately the current count
 // while a lowered count would shrink it. Shedding pods means removing members
 // from the Memgraph cluster first — the coordinators otherwise keep expecting
-// instances whose pods are gone — so this rule never shrinks anything, which
-// keeps it free of any knowledge about the cluster's state.
+// instances whose pods are gone, and a removed coordinator's vote must be given
+// up before its pod is — so this rule never shrinks anything, which keeps it free
+// of any knowledge about the cluster's state.
 //
-// Lowering the data-instance count is carried out at the end of the registration
+// A lowered count of either role is carried out at the end of the registration
 // phase instead, once the retiring members have actually left the cluster (see
-// reconcileRegistration). Lowering the coordinator count is not carried out at
-// all yet: the size is held and the mismatch reported, rather than acting on half
-// of a scale-down the operator cannot finish.
+// reconcileRegistration).
 func (r *MemgraphClusterReconciler) replicaCounts(
 	ctx context.Context,
 	cluster *memgraphcomv1alpha1.MemgraphCluster,
@@ -292,11 +310,12 @@ func (r *MemgraphClusterReconciler) currentReplicas(
 // removal, and the resource reports WorkloadsNotReady rather than the operator
 // acting on a half-known cluster.
 //
-// This is also where a data-instance scale-down finishes. Once the plan comes
-// back empty — meaning the retiring instances have left the cluster — the data
-// StatefulSet is applied at the declared count, shedding their pods. That is the
-// one place the operator ever lowers a replica count, so the coordinators never
-// see a registered instance's pod disappear.
+// This is also where a scale-down finishes. Once the plan comes back empty —
+// meaning the retiring instances have been unregistered and the retiring
+// coordinators have left the Raft cluster — the shrinking role's StatefulSet is
+// applied at the declared count, shedding their pods. That is the one place the
+// operator ever lowers a replica count, so the coordinators never see a registered
+// instance's pod disappear, and no removed member's pod outlives its vote.
 func (r *MemgraphClusterReconciler) reconcileRegistration(
 	ctx context.Context,
 	cluster *memgraphcomv1alpha1.MemgraphCluster,
@@ -324,6 +343,7 @@ func (r *MemgraphClusterReconciler) reconcileRegistration(
 	// The members a lowered count is shedding are the ordinals the operator's own
 	// previous apply still runs beyond the declared count, so the range is bounded
 	// by what the operator itself created.
+	topology.RetiringCoordinators = resources.RetiringCoordinators(cluster, replicas.coordinators.applied)
 	topology.RetiringDataInstances = resources.RetiringDataInstances(cluster, replicas.data.applied)
 	// Whether a retirement is in flight is decided once per pass, from the
 	// topology alone: it is what both the condition and the shrink below key off.
@@ -356,15 +376,13 @@ func (r *MemgraphClusterReconciler) reconcileRegistration(
 	latest := observe(topology, observed)
 	commands := planner.Plan(topology, observed)
 	if len(commands) == 0 {
-		// No retiring instance is a member of the cluster any more — the plan
-		// would carry an UNREGISTER INSTANCE otherwise — so their pods can go.
+		// No retiring member belongs to the cluster any more — the plan would
+		// carry an UNREGISTER INSTANCE or a REMOVE COORDINATOR otherwise — so
+		// their pods can go.
 		if retiring != "" {
-			if err := r.applyDesired(ctx, cluster,
-				resources.DataStatefulSet(cluster, replicas.data.declared)); err != nil {
+			if err := r.shedRetiredPods(ctx, cluster, topology, replicas); err != nil {
 				return ctrl.Result{}, err
 			}
-			log.Info("Shrank the data StatefulSet to the declared replica count",
-				"statefulset", replicas.data.name, "replicas", replicas.data.declared)
 			if statusErr := r.writeStatus(ctx, cluster, latest, readyOrNot(latest.main),
 				notConvergedCondition(memgraphcomv1alpha1.ReasonRetirementInProgress, retiring),
 			); statusErr != nil {
@@ -373,20 +391,6 @@ func (r *MemgraphClusterReconciler) reconcileRegistration(
 			// The shrink was applied, not yet observed back: the next pass sees the
 			// lowered count, finds nothing retiring, and reports convergence.
 			return ctrl.Result{RequeueAfter: requeueAfterRegistration}, nil
-		}
-
-		// Registration matches the declared topology. It is only converged once
-		// the StatefulSets run the declared replica counts too, so a scale the
-		// operator is holding back keeps the condition False and says which
-		// role and by how much.
-		if pending := replicas.scaleMessage(); pending != "" {
-			log.Info("Held a StatefulSet short of the declared replica count", "reason", pending)
-			if statusErr := r.writeStatus(ctx, cluster, latest, readyOrNot(latest.main),
-				notConvergedCondition(memgraphcomv1alpha1.ReasonScaleInProgress, pending),
-			); statusErr != nil {
-				return ctrl.Result{}, statusErr
-			}
-			return ctrl.Result{RequeueAfter: resyncInterval}, nil
 		}
 
 		// Converged, but keep re-observing: a registration a pod loses later
@@ -405,11 +409,20 @@ func (r *MemgraphClusterReconciler) reconcileRegistration(
 	// serving stays Ready while a lost registration is restored; a fresh
 	// bootstrap has no MAIN yet, so Ready is False until one is elected. A
 	// retirement in flight is named as such — it is the more specific operation,
-	// and the one whose pending members a user wants to see.
+	// and the one whose pending members a user wants to see. A pending leadership
+	// yield is more specific still: it is the one step whose outcome nobody can
+	// predict, so a scale-down circling it says so rather than looking stuck on
+	// the removal it cannot reach yet.
 	reason := memgraphcomv1alpha1.ReasonRegistrationInProgress
 	message := fmt.Sprintf("Issuing %d registration command(s) to converge the cluster", len(commands))
 	if retiring != "" {
 		reason, message = memgraphcomv1alpha1.ReasonRetirementInProgress, retiring
+	}
+	if yielded := yieldedLeader(commands); yielded != "" {
+		reason = memgraphcomv1alpha1.ReasonLeadershipTransferInProgress
+		message = fmt.Sprintf(
+			"Retiring coordinator %s holds Raft leadership, which cannot be removed: yielding it to another member",
+			yielded)
 	}
 	inProgress := notConvergedCondition(reason, message)
 	if statusErr := r.writeStatus(ctx, cluster, latest, readyOrNot(latest.main), inProgress); statusErr != nil {
@@ -426,6 +439,38 @@ func (r *MemgraphClusterReconciler) reconcileRegistration(
 	// Registration was issued, not yet observed back; verify convergence on a
 	// follow-up reconcile instead of assuming success.
 	return ctrl.Result{RequeueAfter: requeueAfterRegistration}, nil
+}
+
+// shedRetiredPods applies the shrinking roles' StatefulSets at their declared
+// replica counts — the one place the operator ever lowers a replica count. It is
+// reached only after the plan came back empty, so every pod it sheds belongs to a
+// member that has already left the Memgraph cluster: an unregistered data
+// instance, or a coordinator whose Raft vote is gone.
+func (r *MemgraphClusterReconciler) shedRetiredPods(
+	ctx context.Context,
+	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	topology planner.Topology,
+	replicas replicaCounts,
+) error {
+	log := logf.FromContext(ctx)
+	for _, role := range []struct {
+		retiring int
+		replicas roleReplicas
+		build    func(*memgraphcomv1alpha1.MemgraphCluster, int32) *appsv1.StatefulSet
+	}{
+		{len(topology.RetiringCoordinators), replicas.coordinators, resources.CoordinatorStatefulSet},
+		{len(topology.RetiringDataInstances), replicas.data, resources.DataStatefulSet},
+	} {
+		if role.retiring == 0 {
+			continue
+		}
+		if err := r.applyDesired(ctx, cluster, role.build(cluster, role.replicas.declared)); err != nil {
+			return err
+		}
+		log.Info("Shrank a StatefulSet to the declared replica count",
+			"statefulset", role.replicas.name, "replicas", role.replicas.declared)
+	}
+	return nil
 }
 
 // observation is everything a reconcile pass observed about the cluster that

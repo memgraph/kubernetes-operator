@@ -51,18 +51,35 @@ func DeclaredTopology(cluster *memgraphcomv1alpha1.MemgraphCluster) planner.Topo
 		DataInstances: make([]memgraph.DataInstanceSpec, 0, spec.dataInstances),
 	}
 	for ordinal := range spec.coordinators {
-		fqdn := podFQDN(cluster, CoordinatorName(cluster), spec, ordinal)
-		topology.Coordinators = append(topology.Coordinators, memgraph.CoordinatorSpec{
-			ID:                ordinal + 1,
-			BoltServer:        hostPort(fqdn, spec.ports.bolt),
-			CoordinatorServer: hostPort(fqdn, spec.ports.coordinator),
-			ManagementServer:  hostPort(fqdn, spec.ports.management),
-		})
+		topology.Coordinators = append(topology.Coordinators, coordinator(cluster, spec, ordinal))
 	}
 	for ordinal := range spec.dataInstances {
 		topology.DataInstances = append(topology.DataInstances, dataInstance(cluster, spec, ordinal))
 	}
 	return topology
+}
+
+// RetiringCoordinators is the coordinators a lowered coordinators count is
+// shedding: pod ordinals [declared, applied), where applied is the replica count
+// the operator's own previous apply left on the coordinator StatefulSet. It is
+// empty while a cluster grows or holds its size.
+//
+// Because the count must stay odd, a shrink always retires an even number of
+// coordinators, so the surviving Raft cluster keeps an odd membership throughout.
+func RetiringCoordinators(
+	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	applied int32,
+) []memgraph.CoordinatorSpec {
+	spec := normalize(cluster.Spec)
+	if applied <= spec.coordinators {
+		return nil
+	}
+
+	retiring := make([]memgraph.CoordinatorSpec, 0, applied-spec.coordinators)
+	for ordinal := spec.coordinators; ordinal < applied; ordinal++ {
+		retiring = append(retiring, coordinator(cluster, spec, ordinal))
+	}
+	return retiring
 }
 
 // RetiringDataInstances is the data instances a lowered dataInstances count is
@@ -87,6 +104,24 @@ func RetiringDataInstances(
 		retiring = append(retiring, dataInstance(cluster, spec, ordinal))
 	}
 	return retiring
+}
+
+// coordinator describes the coordinator running on the given pod ordinal, as the
+// pod itself advertises it. Retiring coordinators are described the same way as
+// declared ones: they are members of the Raft cluster under the ID and addresses
+// the operator added them with, whether or not the spec still declares them.
+func coordinator(
+	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	spec normalizedSpec,
+	ordinal int32,
+) memgraph.CoordinatorSpec {
+	fqdn := podFQDN(cluster, CoordinatorName(cluster), spec, ordinal)
+	return memgraph.CoordinatorSpec{
+		ID:                ordinal + 1,
+		BoltServer:        hostPort(fqdn, spec.ports.bolt),
+		CoordinatorServer: hostPort(fqdn, spec.ports.coordinator),
+		ManagementServer:  hostPort(fqdn, spec.ports.management),
+	}
 }
 
 // dataInstance describes the data instance running on the given pod ordinal, as

@@ -146,6 +146,85 @@ func TestRetiringDataInstances(t *testing.T) {
 	}
 }
 
+// TestRetiringCoordinators covers the range a lowered coordinators count sheds.
+// The bounds matter more here than for data instances: every member in the range
+// loses a Raft vote, so a range that reached past what the operator applied would
+// try to remove a coordinator a human added.
+func TestRetiringCoordinators(t *testing.T) {
+	cases := []struct {
+		name    string
+		cluster *memgraphcomv1alpha1.MemgraphCluster
+		applied int32
+		want    []string
+	}{
+		{
+			name:    "a cluster holding its size retires nothing",
+			cluster: minimalCluster(),
+			applied: 3,
+		},
+		{
+			name:    "a growing cluster retires nothing",
+			cluster: coordinatorsCluster(5),
+			applied: 3,
+		},
+		// The count must stay odd, so a shrink always retires an even number of
+		// coordinators and the surviving Raft membership stays odd throughout.
+		{
+			name:    "both ordinals above the declared count retire at once",
+			cluster: coordinatorsCluster(3),
+			applied: 5,
+			want:    []string{"coordinator_4", "coordinator_5"},
+		},
+		{
+			name:    "a larger shrink retires every ordinal above the declared count",
+			cluster: coordinatorsCluster(3),
+			applied: 7,
+			want:    []string{"coordinator_4", "coordinator_5", "coordinator_6", "coordinator_7"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var names []string
+			for _, coordinator := range resources.RetiringCoordinators(tc.cluster, tc.applied) {
+				names = append(names, coordinator.Name())
+			}
+			if diff := cmp.Diff(tc.want, names); diff != "" {
+				t.Errorf("RetiringCoordinators() mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// A retiring coordinator is a Raft member under the ID and addresses the operator
+// added it with, so it must be described exactly as the declared coordinator on
+// the same ordinal was — otherwise the plan would aim REMOVE COORDINATOR at the
+// wrong ID.
+func TestRetiringCoordinatorMatchesItsDeclaredForm(t *testing.T) {
+	// The tuned cluster (non-default ports and cluster domain) declares three
+	// coordinators. Lowering the count is not possible below three, so the declared
+	// form is taken from a five-coordinator variant of the same spec.
+	grown := tunedCluster()
+	grown.Spec.Coordinators = ptr.To(int32(5))
+	declared := resources.DeclaredTopology(grown).Coordinators
+
+	shrunk := tunedCluster()
+	shrunk.Spec.Coordinators = ptr.To(int32(3))
+	got := resources.RetiringCoordinators(shrunk, int32(len(declared)))
+
+	if diff := cmp.Diff(declared[3:], got); diff != "" {
+		t.Errorf("RetiringCoordinators() mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// coordinatorsCluster is the minimal cluster with a different coordinators count,
+// the spec side of a coordinator scale.
+func coordinatorsCluster(coordinators int32) *memgraphcomv1alpha1.MemgraphCluster {
+	cluster := minimalCluster()
+	cluster.Spec.Coordinators = ptr.To(coordinators)
+	return cluster
+}
+
 // dataInstancesCluster is the minimal cluster with a lowered dataInstances count,
 // the spec side of a scale-down.
 func dataInstancesCluster(dataInstances int32) *memgraphcomv1alpha1.MemgraphCluster {
