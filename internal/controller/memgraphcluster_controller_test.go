@@ -1062,6 +1062,40 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			Expect(converged.Reason).To(Equal(memgraphcomv1alpha1.ReasonWorkloadsNotReady))
 		})
 
+		// The gate has to key off the count the pass applied, not the spec.replicas it
+		// can read back. Production reads through the informer cache, so a few lines
+		// after a scale-up that field is still the pre-apply value — and it agrees
+		// with a status.readyReplicas from the same old snapshot, because the cluster
+		// really was converged at the old size. Two stale numbers that agree report a
+		// grown topology as ready, and registration then names a pod Kubernetes has
+		// not been asked to create.
+		//
+		// The gate is called directly here: the envtest client is uncached, so the
+		// staleness itself cannot be reproduced, only the comparison it would defeat.
+		// A StatefulSet left at 2 ready out of 2 is exactly what that stale read looks
+		// like, and the pass that intends 3 must not accept it.
+		It("should gate readiness on the applied count, not the StatefulSet's own spec", func() {
+			bootstrapped()
+			cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+			get(resourceName, cluster)
+			Expect(replicas(dataSuffix)).To(Equal(int32(2)))
+
+			held := replicaCounts{
+				coordinators: roleReplicas{name: resourceName + coordinatorSuffix, declared: 3, applied: 3},
+				data:         roleReplicas{name: resourceName + dataSuffix, declared: 2, applied: 2},
+			}
+			ready, err := reconciler.workloadsReady(ctx, cluster, held)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(ready).To(BeTrue(), "the cluster is ready at the size this pass applies")
+
+			grown := held
+			grown.data.declared, grown.data.applied = 3, 3
+			ready, err = reconciler.workloadsReady(ctx, cluster, grown)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(ready).To(BeFalse(),
+				"a pass applying 3 must not read 2-ready-of-2 as ready, whatever spec.replicas still says")
+		})
+
 		It("should report the registered counts as observed, not as declared", func() {
 			bootstrapped()
 			Expect(status().DataInstances).To(Equal(int32(2)))

@@ -323,7 +323,7 @@ func (r *MemgraphClusterReconciler) reconcileRegistration(
 ) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
-	ready, err := r.workloadsReady(ctx, cluster)
+	ready, err := r.workloadsReady(ctx, cluster, replicas)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -610,22 +610,34 @@ func (r *MemgraphClusterReconciler) writeStatus(
 // Raft cluster and data instances cannot be registered until every advertised
 // address resolves to a running pod.
 //
-// A StatefulSet the apply just created is not ready, not an error: the read goes
-// through the informer cache, which lags the apply, so an absent StatefulSet is
-// the same waiting state as one whose pods have not come up yet.
+// The count each role must reach is the one this pass applied, never the
+// spec.replicas read back off the StatefulSet. Reads go through the informer
+// cache, which lags the apply, so the object read back a few lines after a
+// scale-up is still the pre-apply snapshot — and in that snapshot the old
+// spec.replicas and the old status.readyReplicas agree, because the cluster
+// genuinely was converged at the old size. Comparing those two stale numbers
+// against each other reports a grown topology as ready and lets registration run
+// against a pod Kubernetes has not been asked to create yet. Comparing a stale
+// readyReplicas against the count this pass intends cannot fail that way: a lagging
+// status only ever reads as not-yet-ready.
+//
+// A StatefulSet the apply just created is not ready, not an error: the same lag
+// makes an absent StatefulSet the same waiting state as one whose pods have not
+// come up yet.
 func (r *MemgraphClusterReconciler) workloadsReady(
 	ctx context.Context,
 	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	replicas replicaCounts,
 ) (bool, error) {
-	for _, name := range []string{resources.CoordinatorName(cluster), resources.DataName(cluster)} {
+	for _, role := range []roleReplicas{replicas.coordinators, replicas.data} {
 		var sts appsv1.StatefulSet
-		if err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: cluster.Namespace}, &sts); err != nil {
+		if err := r.Get(ctx, types.NamespacedName{Name: role.name, Namespace: cluster.Namespace}, &sts); err != nil {
 			if apierrors.IsNotFound(err) {
 				return false, nil
 			}
-			return false, fmt.Errorf("getting StatefulSet %s: %w", name, err)
+			return false, fmt.Errorf("getting StatefulSet %s: %w", role.name, err)
 		}
-		if sts.Spec.Replicas == nil || sts.Status.ReadyReplicas < *sts.Spec.Replicas {
+		if sts.Status.ReadyReplicas < role.applied {
 			return false, nil
 		}
 	}
