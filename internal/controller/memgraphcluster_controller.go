@@ -586,6 +586,10 @@ func (r *MemgraphClusterReconciler) writeStatus(
 // ready. Registration waits for the full topology: coordinators cannot form a
 // Raft cluster and data instances cannot be registered until every advertised
 // address resolves to a running pod.
+//
+// A StatefulSet the apply just created is not ready, not an error: the read goes
+// through the informer cache, which lags the apply, so an absent StatefulSet is
+// the same waiting state as one whose pods have not come up yet.
 func (r *MemgraphClusterReconciler) workloadsReady(
 	ctx context.Context,
 	cluster *memgraphcomv1alpha1.MemgraphCluster,
@@ -593,6 +597,9 @@ func (r *MemgraphClusterReconciler) workloadsReady(
 	for _, name := range []string{resources.CoordinatorName(cluster), resources.DataName(cluster)} {
 		var sts appsv1.StatefulSet
 		if err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: cluster.Namespace}, &sts); err != nil {
+			if apierrors.IsNotFound(err) {
+				return false, nil
+			}
 			return false, fmt.Errorf("getting StatefulSet %s: %w", name, err)
 		}
 		if sts.Spec.Replicas == nil || sts.Status.ReadyReplicas < *sts.Spec.Replicas {
@@ -611,7 +618,11 @@ var errNoCoordinatorLeader = errors.New("no coordinator reported a leader")
 // observeCluster connects to the coordinator leader and returns its client
 // together with the SHOW INSTANCES view the planner diffs against.
 // Coordinators are tried in ordinal order: one reporting itself leader is used
-// directly, and one reporting another coordinator as leader redirects to it.
+// directly, and one reporting another coordinator as leader hands over the
+// address to connect to. The view is read once either way — a follower forwards
+// SHOW INSTANCES to the leader, so what it answers with is already the leader's
+// view, and only the planner's mutating commands need the leader connection
+// itself.
 //
 // A coordinator that names no leader is skipped, never used as planning input.
 // Its view is not the fresh-cluster case: a coordinator starts with itself as
@@ -654,19 +665,21 @@ func (r *MemgraphClusterReconciler) observeCluster(
 			continue
 		}
 
-		// This coordinator is a follower; redirect to the leader it reports.
+		// This coordinator is a follower, so it answered with the leader's
+		// forwarded view: keep that view and open the connection the mutating
+		// commands need on the leader itself.
 		address, found := leaderAddress(topology, observed, leaderName)
 		if !found {
 			errs = append(errs, fmt.Errorf("%s reported leader %s without a Bolt address",
 				coordinator.Name(), leaderName))
 			continue
 		}
-		conn, observed, err = r.showInstances(ctx, address)
+		leader, err := r.Memgraph.Connect(ctx, address)
 		if err != nil {
 			errs = append(errs, err)
 			continue
 		}
-		return conn, observed, nil
+		return leader, observed, nil
 	}
 	if leaderless {
 		return nil, nil, fmt.Errorf("%w: %w", errNoCoordinatorLeader, errors.Join(errs...))
