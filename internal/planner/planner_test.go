@@ -216,6 +216,19 @@ func multiDatabaseLag(i int, behind ...int64) []memgraph.ReplicationLag {
 	return []memgraph.ReplicationLag{lag}
 }
 
+// promote is the promotion a cluster with no MAIN and nothing retiring plans:
+// candidates in order, and no demoted instance to fall back to.
+func promote(candidates ...string) planner.SetInstanceToMain {
+	return planner.SetInstanceToMain{Candidates: candidates}
+}
+
+// handover is the promotion a retirement plans: every survivor proven caught up,
+// in ordinal order, with the MAIN the same plan demoted behind them as the last
+// resort.
+func handover(demoted string, candidates ...string) planner.SetInstanceToMain {
+	return planner.SetInstanceToMain{Candidates: candidates, Restore: demoted}
+}
+
 func TestPlan(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -239,7 +252,7 @@ func TestPlan(t *testing.T) {
 				planner.AddCoordinator{Coordinator: coordinatorSpec(3)},
 				planner.RegisterInstance{Instance: dataInstanceSpec(0)},
 				planner.RegisterInstance{Instance: dataInstanceSpec(1)},
-				planner.SetInstanceToMain{Name: firstInstance},
+				promote(firstInstance),
 			},
 		},
 		{
@@ -306,7 +319,7 @@ func TestPlan(t *testing.T) {
 				observedDataInstance(1, memgraph.RoleReplica),
 			},
 			want: []planner.Command{
-				planner.SetInstanceToMain{Name: firstInstance},
+				promote(firstInstance),
 			},
 		},
 		{
@@ -349,7 +362,7 @@ func TestPlan(t *testing.T) {
 				observedDataInstance(1, memgraph.RoleReplica),
 			},
 			want: []planner.Command{
-				planner.SetInstanceToMain{Name: secondInstance},
+				promote(secondInstance),
 			},
 		},
 		{
@@ -362,7 +375,7 @@ func TestPlan(t *testing.T) {
 				observedDataInstance(1, memgraph.RoleReplica),
 			},
 			want: []planner.Command{
-				planner.SetInstanceToMain{Name: firstInstance},
+				promote(firstInstance),
 			},
 		},
 		// With every declared instance down there is no reachable target, so the
@@ -378,7 +391,7 @@ func TestPlan(t *testing.T) {
 				downDataInstance(1),
 			},
 			want: []planner.Command{
-				planner.SetInstanceToMain{Name: firstInstance},
+				promote(firstInstance),
 			},
 		},
 		// A grown topology declares members the cluster has never heard of: the
@@ -447,7 +460,7 @@ func TestPlan(t *testing.T) {
 			lag:      caughtUp(0, 1, 2),
 			want: []planner.Command{
 				planner.DemoteInstance{Name: thirdInstance},
-				planner.SetInstanceToMain{Name: firstInstance},
+				handover(thirdInstance, firstInstance, secondInstance),
 				planner.UnregisterInstance{Name: thirdInstance},
 			},
 		},
@@ -468,7 +481,7 @@ func TestPlan(t *testing.T) {
 			lag:      caughtUp(0, 1, 2),
 			want: []planner.Command{
 				planner.DemoteInstance{Name: thirdInstance},
-				planner.SetInstanceToMain{Name: secondInstance},
+				handover(thirdInstance, secondInstance),
 				planner.UnregisterInstance{Name: thirdInstance},
 			},
 		},
@@ -488,7 +501,7 @@ func TestPlan(t *testing.T) {
 			lag:      append(behindBy(7, 0), caughtUp(1, 2)...),
 			want: []planner.Command{
 				planner.DemoteInstance{Name: thirdInstance},
-				planner.SetInstanceToMain{Name: secondInstance},
+				handover(thirdInstance, secondInstance),
 				planner.UnregisterInstance{Name: thirdInstance},
 			},
 		},
@@ -560,7 +573,7 @@ func TestPlan(t *testing.T) {
 			lag:      append(caughtUp(1), caughtUp(2)...),
 			want: []planner.Command{
 				planner.DemoteInstance{Name: thirdInstance},
-				planner.SetInstanceToMain{Name: secondInstance},
+				handover(thirdInstance, secondInstance),
 				planner.UnregisterInstance{Name: thirdInstance},
 			},
 		},
@@ -581,7 +594,7 @@ func TestPlan(t *testing.T) {
 			lag:      append(behindBy(-2, 0), caughtUp(1, 2)...),
 			want: []planner.Command{
 				planner.DemoteInstance{Name: thirdInstance},
-				planner.SetInstanceToMain{Name: firstInstance},
+				handover(thirdInstance, firstInstance, secondInstance),
 				planner.UnregisterInstance{Name: thirdInstance},
 			},
 		},
@@ -603,7 +616,7 @@ func TestPlan(t *testing.T) {
 				append(multiDatabaseLag(1, 0, 0), multiDatabaseLag(2, 0, 0)...)...),
 			want: []planner.Command{
 				planner.DemoteInstance{Name: thirdInstance},
-				planner.SetInstanceToMain{Name: secondInstance},
+				handover(thirdInstance, secondInstance),
 				planner.UnregisterInstance{Name: thirdInstance},
 			},
 		},
@@ -621,7 +634,7 @@ func TestPlan(t *testing.T) {
 			lag:      caughtUp(0, 1, 2),
 			want: []planner.Command{
 				planner.DemoteInstance{Name: secondInstance},
-				planner.SetInstanceToMain{Name: firstInstance},
+				handover(secondInstance, firstInstance),
 				planner.UnregisterInstance{Name: secondInstance},
 				planner.UnregisterInstance{Name: thirdInstance},
 			},
@@ -665,7 +678,7 @@ func TestPlan(t *testing.T) {
 			declared: ptr.To(shrunkTopology(2, 3)),
 			lag:      nil,
 			want: []planner.Command{
-				planner.SetInstanceToMain{Name: firstInstance},
+				promote(firstInstance),
 				planner.UnregisterInstance{Name: thirdInstance},
 			},
 		},
@@ -706,7 +719,7 @@ func TestPlan(t *testing.T) {
 				planner.AddCoordinator{Coordinator: coordinatorSpec(4)},
 				planner.AddCoordinator{Coordinator: coordinatorSpec(5)},
 				planner.DemoteInstance{Name: thirdInstance},
-				planner.SetInstanceToMain{Name: firstInstance},
+				handover(thirdInstance, firstInstance, secondInstance),
 				planner.UnregisterInstance{Name: thirdInstance},
 			},
 		},
@@ -796,7 +809,7 @@ func TestPlan(t *testing.T) {
 			lag:      caughtUp(0, 1, 2),
 			want: []planner.Command{
 				planner.DemoteInstance{Name: thirdInstance},
-				planner.SetInstanceToMain{Name: firstInstance},
+				handover(thirdInstance, firstInstance, secondInstance),
 				planner.UnregisterInstance{Name: thirdInstance},
 				planner.RemoveCoordinator{Coordinator: coordinatorSpec(4)},
 				planner.RemoveCoordinator{Coordinator: coordinatorSpec(5)},
@@ -832,7 +845,7 @@ func TestPlan(t *testing.T) {
 			lag:      caughtUp(0, 1, 2),
 			want: []planner.Command{
 				planner.DemoteInstance{Name: thirdInstance},
-				planner.SetInstanceToMain{Name: firstInstance},
+				handover(thirdInstance, firstInstance, secondInstance),
 				planner.UnregisterInstance{Name: thirdInstance},
 				planner.RemoveCoordinator{Coordinator: coordinatorSpec(5)},
 				planner.YieldLeadership{Leader: fourthCoordinator},
@@ -1096,7 +1109,7 @@ func TestPlanUsesConfiguredPortsAndClusterDomain(t *testing.T) {
 			ManagementServer:  dataHost + ":10001",
 			ReplicationServer: dataHost + ":20001",
 		}},
-		planner.SetInstanceToMain{Name: firstInstance},
+		promote(firstInstance),
 	}
 
 	got := planner.Plan(resources.DeclaredTopology(cluster), nil, nil)

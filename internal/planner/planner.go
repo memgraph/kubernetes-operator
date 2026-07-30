@@ -35,6 +35,12 @@ limitations under the License.
 // waiting is always better than promoting onto an instance that never received
 // the writes.
 //
+// Every survivor that qualifies is carried into the promotion, and the demoted
+// MAIN behind them, because the demotion lands before the promotion runs and a
+// later pass cannot repeat the reasoning: lag is served by the MAIN, so a
+// MAIN-less cluster has nothing left to measure. The alternatives are what keep a
+// refused promotion from stranding the cluster without a MAIN.
+//
 // One command breaks the pure-diff mould: YIELD LEADERSHIP, which moves
 // coordinator leadership off a retiring coordinator so it can be removed at all.
 // It cannot name a successor, so its outcome is the one thing the planner cannot
@@ -45,7 +51,12 @@ package planner
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"slices"
+	"strings"
+
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/memgraph/kubernetes-operator/internal/memgraph"
 )
@@ -104,19 +115,84 @@ func (c RegisterInstance) String() string {
 	return "REGISTER INSTANCE " + c.Instance.Name
 }
 
-// SetInstanceToMain promotes the named data instance to MAIN: at bootstrap,
-// when the cluster has no MAIN yet, and after a retiring MAIN was demoted.
+// SetInstanceToMain promotes a data instance to MAIN: at bootstrap, when the
+// cluster has no MAIN yet, and after a retiring MAIN was demoted.
+//
+// It carries every instance the planner considers safe rather than one name,
+// because this is the one command with no second chance. The demotion that
+// precedes it in a handover has already landed by the time it runs, so the
+// cluster is MAIN-less until something is promoted, and a later pass cannot
+// recompute the choice: SHOW REPLICATION LAG is served by the MAIN, so with none
+// there is nothing left to measure. Candidates are tried in order and the first
+// the cluster accepts wins.
+//
+// Restore is the MAIN the same plan demoted, and it is the last resort when no
+// candidate can be promoted. It is safe by construction: a MAIN-less cluster
+// accepts no writes, so nothing has advanced past the instance that was MAIN a
+// moment ago, which makes it the most up-to-date member of the cluster by
+// definition. Falling back to it still fails the pass on purpose — the cluster is
+// serving again, but the retirement made no progress, and the unregistration that
+// follows in the plan would be aimed at a MAIN. A rolled-back handover has to be
+// reported and retried, not read as a step forward.
 type SetInstanceToMain struct {
-	Name string
+	// Candidates are the instances to try, in order.
+	Candidates []string
+
+	// Restore is the demoted MAIN to promote back when every candidate fails, or
+	// empty at bootstrap, where no MAIN was demoted and none can be restored.
+	Restore string
 }
 
 // Run implements Command.
 func (c SetInstanceToMain) Run(ctx context.Context, client memgraph.Client) error {
-	return client.SetInstanceToMain(ctx, c.Name)
+	log := logf.FromContext(ctx)
+
+	var errs []error
+	for _, name := range c.Candidates {
+		if err := client.SetInstanceToMain(ctx, name); err != nil {
+			log.Info("Promotion of a data instance was refused", "instance", name, "reason", err.Error())
+			errs = append(errs, fmt.Errorf("promoting %s: %w", name, err))
+			continue
+		}
+		if len(errs) > 0 {
+			log.Info("Promoted a fallback data instance to MAIN after earlier candidates were refused",
+				"instance", name, "refused", len(errs))
+		}
+		return nil
+	}
+
+	if c.Restore == "" {
+		// Bootstrap: there is no demoted MAIN to fall back to, and a cluster that
+		// never had one has no writes to lose by being retried.
+		return errors.Join(errs...)
+	}
+	if err := client.SetInstanceToMain(ctx, c.Restore); err != nil {
+		log.Error(err, "Left the cluster without a MAIN: no promotion candidate was accepted "+
+			"and the demoted instance could not be promoted back", "instance", c.Restore)
+		return errors.Join(append(errs, fmt.Errorf("restoring MAIN to %s: %w", c.Restore, err))...)
+	}
+	log.Info("Restored MAIN to the instance being retired because no promotion candidate was accepted, "+
+		"so the retirement made no progress", "instance", c.Restore, "refused", len(errs))
+	return fmt.Errorf("no promotion candidate was accepted, so MAIN was restored to the retiring instance %s: %w",
+		c.Restore, errors.Join(errs...))
 }
 
+// String names the first instance the command promotes, plus the ones it falls
+// back to: which of them ends up MAIN depends on what the cluster accepts, and a
+// condition or log line reporting the command has to name all of them.
 func (c SetInstanceToMain) String() string {
-	return fmt.Sprintf("SET INSTANCE %s TO MAIN", c.Name)
+	targets := c.Candidates
+	if c.Restore != "" {
+		targets = append(slices.Clone(c.Candidates), c.Restore)
+	}
+	if len(targets) == 0 {
+		return "SET INSTANCE TO MAIN (no candidate)"
+	}
+	if len(targets) == 1 {
+		return fmt.Sprintf("SET INSTANCE %s TO MAIN", targets[0])
+	}
+	return fmt.Sprintf("SET INSTANCE %s TO MAIN (or, if refused: %s)",
+		targets[0], strings.Join(targets[1:], ", "))
 }
 
 // DemoteInstance turns a retiring MAIN back into a replica, which is what makes
@@ -211,6 +287,13 @@ func (c YieldLeadership) String() string {
 // unregistered, and retiring coordinators are removed, because neither depends on
 // where MAIN sits.
 //
+// The promotion carries every qualifying survivor plus the demoted MAIN as its
+// last resort, so a refused promotion is retried within the same pass rather than
+// leaving a demoted cluster with no MAIN at all. Falling back to the demoted
+// instance fails the pass on purpose: the cluster serves again, but the retirement
+// has to start over, and the unregistration planned after the promotion would
+// otherwise be aimed at a MAIN.
+//
 // A retiring coordinator that holds Raft leadership cannot be removed at all, so
 // the plan ends with YIELD LEADERSHIP instead and stops there — the retiring
 // coordinators that are not the leader still go out ahead of it in that same
@@ -239,13 +322,14 @@ func Plan(declared Topology, observed []memgraph.Instance, lag []memgraph.Replic
 			hasMain = true
 		}
 	}
-	// The survivor a retiring MAIN can hand over to, and the empty string when
-	// none qualifies — which is what defers the whole retirement to a later pass.
-	successor := ""
+	// The survivors a retiring MAIN can hand over to, in the order to try them, and
+	// empty when none qualifies — which is what defers the whole retirement to a
+	// later pass.
+	var successors []string
 	if retiringMain != "" {
-		successor = handoverTarget(declared, registered, indexLag(lag))
+		successors = handoverCandidates(declared, registered, indexLag(lag))
 	}
-	handover := retiringMain != "" && successor != ""
+	handover := retiringMain != "" && len(successors) > 0
 
 	var commands []Command
 	for _, coordinator := range declared.Coordinators {
@@ -263,9 +347,10 @@ func Plan(declared Topology, observed []memgraph.Instance, lag []memgraph.Replic
 	}
 	switch {
 	case handover && !hasMain:
-		// The demotion above left the cluster MAIN-less on purpose; the survivor
-		// picked for the handover takes over in the next command.
-		commands = append(commands, SetInstanceToMain{Name: successor})
+		// The demotion above left the cluster MAIN-less on purpose; the survivors
+		// picked for the handover take over in the next command, and the demoted
+		// instance is promoted back if none of them can.
+		commands = append(commands, SetInstanceToMain{Candidates: successors, Restore: retiringMain})
 	case retiringMain == "" && !hasMain && len(declared.DataInstances) > 0:
 		// No MAIN and none retiring: a fresh bootstrap, a MAIN whose promotion never
 		// landed, or a pass that died between a retiring MAIN's demotion and the
@@ -273,7 +358,7 @@ func Plan(declared Topology, observed []memgraph.Instance, lag []memgraph.Replic
 		// there is nothing to measure and this promotion goes by reachability alone.
 		// That is also why the handover is gated before the demotion rather than
 		// after: it is the last moment at which the choice is still free.
-		commands = append(commands, SetInstanceToMain{Name: promotionTarget(declared, registered)})
+		commands = append(commands, SetInstanceToMain{Candidates: []string{promotionTarget(declared, registered)}})
 	}
 	for _, instance := range declared.RetiringDataInstances {
 		if _, ok := registered[instance.Name]; !ok {
@@ -401,11 +486,10 @@ func coordinatorRegistered(registered map[string]memgraph.Instance, coordinator 
 	return ok && observed.BoltServer != ""
 }
 
-// handoverTarget picks the survivor a retiring MAIN hands MAIN over to: the
-// lowest-ordinal declared instance the coordinator leader observes as up and that
-// SHOW REPLICATION LAG reports as holding every transaction the MAIN has
-// committed, in every database. It returns the empty string when no survivor
-// qualifies.
+// handoverCandidates are the survivors a retiring MAIN may hand MAIN over to, in
+// ordinal order: every declared instance the coordinator leader observes as up and
+// that SHOW REPLICATION LAG reports as holding every transaction the MAIN has
+// committed, in every database. It returns none when no survivor qualifies.
 //
 // Both conditions are needed and neither implies the other. Health says the
 // leader can reach the instance, which a caught-up replica can still fail —
@@ -414,25 +498,32 @@ func coordinatorRegistered(registered map[string]memgraph.Instance, coordinator 
 // ago still appears there at the offset it last reached. Lag says the instance
 // holds the writes, which a reachable one need not.
 //
-// There is deliberately no fallback, which is what separates this from
-// promotionTarget. A cluster with no MAIN is worse off than one whose promotion
-// has to be retried, so that one guesses rather than stall. A retiring MAIN is
-// still serving: waiting costs nothing but the scale-down's completion, while
-// promoting a lagging survivor discards every transaction it never received.
-func handoverTarget(
+// Every qualifying survivor is returned, not just the first, because the choice
+// cannot be made again later: once the demotion lands there is no MAIN, and lag is
+// served by the MAIN. Carrying the alternatives is what lets a refused promotion be
+// retried against another instance that was proven caught up by the same view.
+//
+// There is deliberately no fallback onto an instance that fails the conditions,
+// which is what separates this from promotionTarget. A cluster with no MAIN is
+// worse off than one whose promotion has to be retried, so that one guesses rather
+// than stall. A retiring MAIN is still serving: waiting costs nothing but the
+// scale-down's completion, while promoting a lagging survivor discards every
+// transaction it never received.
+func handoverCandidates(
 	declared Topology,
 	registered map[string]memgraph.Instance,
 	lag map[string]memgraph.ReplicationLag,
-) string {
+) []string {
+	var candidates []string
 	for _, instance := range declared.DataInstances {
 		if observed, ok := registered[instance.Name]; !ok || !observed.IsUp() {
 			continue
 		}
 		if lag[instance.Name].IsCaughtUp() {
-			return instance.Name
+			candidates = append(candidates, instance.Name)
 		}
 	}
-	return ""
+	return candidates
 }
 
 // promotionTarget picks the data instance to promote when the cluster has no

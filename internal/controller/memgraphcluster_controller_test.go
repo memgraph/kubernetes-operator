@@ -636,11 +636,11 @@ var _ = Describe("MemgraphCluster Controller", func() {
 				resourceName, ordinal, resourceName, resourceNamespace)
 		}
 
-		// convergedWithMainOn is the fully registered default 3/2 topology with the
-		// data instance on the given ordinal elected MAIN, so a spec can put MAIN
-		// where it needs it before lowering a count.
-		convergedWithMainOn := func(mainOrdinal int) []memgraph.Instance {
-			instances := make([]memgraph.Instance, 0, 5)
+		// convergedWith is the fully registered 3-coordinator topology with the given
+		// number of data instances, the one on mainOrdinal elected MAIN — so a spec
+		// can put MAIN where it needs it before lowering a count.
+		convergedWith := func(dataInstances, mainOrdinal int) []memgraph.Instance {
+			instances := make([]memgraph.Instance, 0, 3+dataInstances)
 			for id := 1; id <= 3; id++ {
 				role := memgraph.RoleFollower
 				if id == 1 {
@@ -651,7 +651,7 @@ var _ = Describe("MemgraphCluster Controller", func() {
 					Health: memgraph.HealthUp, Role: role,
 				})
 			}
-			for ordinal := range 2 {
+			for ordinal := range dataInstances {
 				role := memgraph.RoleReplica
 				if ordinal == mainOrdinal {
 					role = memgraph.RoleMain
@@ -661,6 +661,11 @@ var _ = Describe("MemgraphCluster Controller", func() {
 				})
 			}
 			return instances
+		}
+
+		// convergedWithMainOn is that view at the default 2 data instances.
+		convergedWithMainOn := func(mainOrdinal int) []memgraph.Instance {
+			return convergedWith(2, mainOrdinal)
 		}
 
 		status := func() memgraphcomv1alpha1.MemgraphClusterStatus {
@@ -1035,6 +1040,74 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			Expect(s.DataInstances).To(Equal(int32(1)))
 			Expect(apimeta.IsStatusConditionTrue(s.Conditions,
 				memgraphcomv1alpha1.ConditionConverged)).To(BeTrue())
+		})
+
+		// The promotion is the one command of a retirement with no second chance: the
+		// demotion has already landed, and a later pass cannot recompute which
+		// survivor is safe because lag is served by the MAIN. So it carries every
+		// survivor the lag view proved caught up, and a refused one moves to the next.
+		It("should promote the next caught-up survivor when the first one is refused", func() {
+			setCounts(3, 3)
+			fake.setInstances(convergedWith(3, 2))
+			baseline := bootstrapped()
+			Expect(status().Main).To(Equal("instance_2"))
+
+			fake.rejectCommand("SET INSTANCE instance_0 TO MAIN", errors.New("instance is not registered"))
+			setCounts(3, 2)
+			reconcileCluster(resourceName)
+
+			leader := coordinatorAddress(0)
+			Expect(sinceBootstrap(baseline)).To(Equal([]string{
+				leader + ": DEMOTE INSTANCE instance_2",
+				leader + ": SET INSTANCE instance_1 TO MAIN",
+				leader + ": UNREGISTER INSTANCE instance_2",
+			}), "the refused survivor is skipped and the retirement completes in the same pass")
+
+			reconcileCluster(resourceName)
+			Expect(replicas(dataSuffix)).To(Equal(int32(2)))
+			reconcileCluster(resourceName)
+
+			s := status()
+			Expect(s.Main).To(Equal("instance_1"))
+			Expect(apimeta.IsStatusConditionTrue(s.Conditions,
+				memgraphcomv1alpha1.ConditionConverged)).To(BeTrue())
+		})
+
+		// When no survivor can be promoted the cluster would be left MAIN-less by the
+		// demotion that already landed, so MAIN goes back to the instance being
+		// retired: it was MAIN a moment ago and a MAIN-less cluster accepts no writes,
+		// so nothing has advanced past it. The pass still fails — the cluster serves
+		// again, but the retirement made no progress and has to be retried.
+		It("should restore MAIN to the retiring instance when every survivor is refused", func() {
+			fake.setInstances(convergedWithMainOn(1))
+			baseline := bootstrapped()
+			Expect(status().Main).To(Equal("instance_1"))
+
+			fake.rejectCommand("SET INSTANCE instance_0 TO MAIN", errors.New("instance is down"))
+			setCounts(3, 1)
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: resourceName, Namespace: resourceNamespace},
+			})
+			Expect(err).To(HaveOccurred(), "a rolled-back handover is reported, not read as progress")
+
+			leader := coordinatorAddress(0)
+			Expect(sinceBootstrap(baseline)).To(Equal([]string{
+				leader + ": DEMOTE INSTANCE instance_1",
+				leader + ": SET INSTANCE instance_1 TO MAIN",
+			}), "MAIN goes back to the demoted instance, and the unregistration never runs")
+			Expect(replicas(dataSuffix)).To(Equal(int32(2)),
+				"the retiring pod outlives a retirement that did not finish")
+
+			s := status()
+			Expect(s.Main).To(Equal("instance_1"))
+			Expect(apimeta.IsStatusConditionTrue(s.Conditions, memgraphcomv1alpha1.ConditionReady)).To(BeTrue(),
+				"the cluster serves from the restored MAIN")
+			converged := convergedCondition()
+			Expect(converged.Status).To(Equal(metav1.ConditionFalse))
+			Expect(converged.Reason).To(Equal(memgraphcomv1alpha1.ReasonRegistrationFailed))
+			Expect(converged.Message).To(ContainSubstring("MAIN was restored to the retiring instance instance_1"))
+			Expect(converged.Message).To(ContainSubstring("instance is down"),
+				"the condition carries why the survivor was refused")
 		})
 
 		// The readiness gate covers the pods on their way out too: they belong to
