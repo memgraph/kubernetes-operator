@@ -21,7 +21,7 @@ spec:
   # to YIELD LEADERSHIP first, reported as LeadershipTransferInProgress while that
   # is pending.
   coordinators: 3
-  dataInstances: 0
+  dataInstances: 3
   # repository carries the registry host and image path only — the version
   # belongs in tag, and admission rejects a digest or a tag smuggled into the
   # repository.
