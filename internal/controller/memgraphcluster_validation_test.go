@@ -328,7 +328,7 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 							CSI: &corev1.CSIVolumeSource{
 								Driver:           "secrets-store.csi.k8s.io",
 								ReadOnly:         ptr.To(true),
-								VolumeAttributes: map[string]string{"secretProviderClass": "memgraph"},
+								VolumeAttributes: map[string]string{"secretProviderClass": memgraphDbName},
 							},
 						},
 					}},
@@ -350,7 +350,7 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 			csi := stored.Spec.ExtraVolumes.Coordinators[0].CSI
 			Expect(csi).NotTo(BeNil())
 			Expect(csi.Driver).To(Equal("secrets-store.csi.k8s.io"))
-			Expect(csi.VolumeAttributes).To(HaveKeyWithValue("secretProviderClass", "memgraph"))
+			Expect(csi.VolumeAttributes).To(HaveKeyWithValue("secretProviderClass", memgraphDbName))
 
 			Expect(stored.Spec.ExtraVolumeMounts.Data[0].MountPath).To(Equal("/etc/memgraph/ssl"))
 			Expect(stored.Spec.ExtraVolumeMounts.Coordinators).To(BeEmpty())

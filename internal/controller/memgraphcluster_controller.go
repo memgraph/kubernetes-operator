@@ -41,6 +41,7 @@ import (
 	"github.com/memgraph/kubernetes-operator/internal/memgraph"
 	"github.com/memgraph/kubernetes-operator/internal/planner"
 	"github.com/memgraph/kubernetes-operator/internal/resources"
+	"github.com/memgraph/kubernetes-operator/internal/rollout"
 )
 
 // fieldOwner identifies this controller as the server-side-apply field
@@ -86,11 +87,17 @@ type MemgraphClusterReconciler struct {
 // is needed to set those owner references: they block owner deletion, which
 // clusters running the OwnerReferencesPermissionEnforcement admission plugin
 // only allow with update access to the owner's finalizers.
+//
+// Pods are the one thing the operator deletes. Both StatefulSets use
+// updateStrategy OnDelete, so replacing a pod whose template changed is the
+// operator's job and nobody else's; get/list/watch reads their revision and
+// readiness, and delete is the restart itself.
 // +kubebuilder:rbac:groups=memgraph.com,resources=memgraphclusters,verbs=get;list;watch
 // +kubebuilder:rbac:groups=memgraph.com,resources=memgraphclusters/status,verbs=get;patch
 // +kubebuilder:rbac:groups=memgraph.com,resources=memgraphclusters/finalizers,verbs=update
 // +kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;create;patch
 // +kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;patch
+// +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;delete
 
 // Reconcile drives the cluster toward the declared MemgraphCluster spec in
 // two stages. First it server-side-applies the builders' desired objects: one
@@ -280,6 +287,128 @@ func (r *MemgraphClusterReconciler) replicaCounts(
 	return counts, nil
 }
 
+// rolloutRoles is both roles' pods as the rolling restart sees them.
+type rolloutRoles struct {
+	coordinators rollout.Role
+	data         rollout.Role
+}
+
+// observeRollout reads both roles' pods and the revision their StatefulSet
+// currently hashes its pod template to, which is everything the rolling restart
+// needs about Kubernetes. It is pure observation: nothing is decided here.
+func (r *MemgraphClusterReconciler) observeRollout(
+	ctx context.Context,
+	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	replicas replicaCounts,
+) (rolloutRoles, error) {
+	var roles rolloutRoles
+	coordinators, err := r.observeRolloutRole(ctx, cluster, replicas.coordinators,
+		resources.CoordinatorPodSelector(cluster), resources.CoordinatorInstanceName)
+	if err != nil {
+		return rolloutRoles{}, err
+	}
+	data, err := r.observeRolloutRole(ctx, cluster, replicas.data,
+		resources.DataPodSelector(cluster), resources.DataInstanceName)
+	if err != nil {
+		return rolloutRoles{}, err
+	}
+	roles.coordinators, roles.data = coordinators, data
+	return roles, nil
+}
+
+// observeRolloutRole reads one role's pods, in ordinal order, each tagged with
+// the Memgraph instance that runs on it.
+//
+// Pods are looked up by the name their ordinal gives them rather than by
+// iterating whatever the list returned, so a pod that has been deleted and not
+// yet recreated is simply absent from the result — which is how the rolling
+// restart learns to wait for it, and what keeps a pod belonging to some other
+// generation of the StatefulSet from being counted.
+//
+// A pod on its way out is not ready no matter what its conditions still say. Its
+// containers keep passing their probes for as long as they take to shut down, and
+// a restart that trusted that would delete the next pod while this one is still
+// running.
+func (r *MemgraphClusterReconciler) observeRolloutRole(
+	ctx context.Context,
+	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	role roleReplicas,
+	selector map[string]string,
+	instanceName func(ordinal int32) string,
+) (rollout.Role, error) {
+	observed := rollout.Role{Replicas: role.applied}
+
+	var sts appsv1.StatefulSet
+	if err := r.Get(ctx, types.NamespacedName{Name: role.name, Namespace: cluster.Namespace}, &sts); err != nil {
+		if apierrors.IsNotFound(err) {
+			// Nothing has been provisioned yet, so there is no revision to measure
+			// pods against and nothing to restart.
+			return observed, nil
+		}
+		return rollout.Role{}, fmt.Errorf("getting StatefulSet %s: %w", role.name, err)
+	}
+	observed.UpdateRevision = sts.Status.UpdateRevision
+
+	var pods corev1.PodList
+	if err := r.List(ctx, &pods,
+		client.InNamespace(cluster.Namespace), client.MatchingLabels(selector)); err != nil {
+		return rollout.Role{}, fmt.Errorf("listing pods of StatefulSet %s: %w", role.name, err)
+	}
+	byName := make(map[string]*corev1.Pod, len(pods.Items))
+	for i := range pods.Items {
+		byName[pods.Items[i].Name] = &pods.Items[i]
+	}
+
+	for ordinal := int32(0); ordinal < role.applied; ordinal++ {
+		pod, ok := byName[fmt.Sprintf("%s-%d", role.name, ordinal)]
+		if !ok {
+			continue
+		}
+		observed.Pods = append(observed.Pods, rollout.Pod{
+			Name:         pod.Name,
+			UID:          string(pod.UID),
+			Instance:     instanceName(ordinal),
+			Ordinal:      ordinal,
+			RevisionHash: pod.Labels[appsv1.StatefulSetRevisionLabel],
+			Ready:        pod.DeletionTimestamp == nil && podReady(pod),
+		})
+	}
+	return observed, nil
+}
+
+// podReady reports the pod's Ready condition.
+func podReady(pod *corev1.Pod) bool {
+	for _, condition := range pod.Status.Conditions {
+		if condition.Type == corev1.PodReady {
+			return condition.Status == corev1.ConditionTrue
+		}
+	}
+	return false
+}
+
+// restartPod deletes the pod a rolling restart picked, so its StatefulSet
+// recreates it on the current pod template. The delete is conditioned on the UID
+// that was observed: a pod already replaced between the observation and here is
+// left alone rather than restarted twice, and a pod that is simply gone is not an
+// error — the next pass re-observes and decides again.
+func (r *MemgraphClusterReconciler) restartPod(
+	ctx context.Context,
+	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	decision rollout.Decision,
+) error {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: decision.Pod.Name, Namespace: cluster.Namespace},
+	}
+	uid := types.UID(decision.Pod.UID)
+	err := r.Delete(ctx, pod, client.Preconditions{UID: &uid})
+	switch {
+	case err == nil, apierrors.IsNotFound(err), apierrors.IsConflict(err):
+		return nil
+	default:
+		return fmt.Errorf("deleting pod %s to restart it: %w", decision.Pod.Name, err)
+	}
+}
+
 // currentReplicas is the replica count the operator's own previous apply left on
 // a role's StatefulSet, or zero when the cluster has not been provisioned yet.
 func (r *MemgraphClusterReconciler) currentReplicas(
@@ -324,7 +453,15 @@ func (r *MemgraphClusterReconciler) reconcileRegistration(
 ) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
-	ready, err := r.workloadsReady(ctx, cluster, replicas)
+	// Both roles' pods are read once per pass: the readiness gate needs to know
+	// whether a restart is under way to tolerate the pod it took down, and the
+	// restart itself needs the same view further down.
+	roles, err := r.observeRollout(ctx, cluster, replicas)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	ready, err := r.workloadsReady(ctx, cluster, replicas, roles)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -417,13 +554,48 @@ func (r *MemgraphClusterReconciler) reconcileRegistration(
 			return ctrl.Result{RequeueAfter: requeueAfterRegistration}, nil
 		}
 
-		// Converged, but keep re-observing: a registration a pod loses later
-		// produces no watch event, so drift is only caught by resyncing.
-		log.Info("Confirmed cluster registration is converged")
+		// Registration is converged, so this is where a changed pod template gets
+		// rolled through the cluster. It is deliberately the only place: a
+		// retirement is still moving MAIN around and a pending registration means
+		// the cluster is not the one the spec describes, so neither is a moment to
+		// start deleting pods.
 		converged := trueCondition(memgraphcomv1alpha1.ConditionConverged,
 			memgraphcomv1alpha1.ReasonAllInstancesRegistered,
 			fmt.Sprintf("All %d declared instances are registered", len(topology.Coordinators)+len(topology.DataInstances)))
-		if statusErr := r.writeStatus(ctx, cluster, latest, readyOrNot(latest.main), converged); statusErr != nil {
+
+		switch decision := rollout.Next(roles.data, roles.coordinators, observed, lag); decision.Action {
+		case rollout.Delete:
+			// Reported before the pod goes, for the reason a rejected apply is: the
+			// next pass has to explain an absence it caused, and a restart nobody
+			// announced looks like the cluster losing a pod on its own.
+			if statusErr := r.writeStatus(ctx, cluster, latest, readyOrNot(latest.main), converged,
+				notUpdatedCondition(decision.Reason, decision.Message)); statusErr != nil {
+				return ctrl.Result{}, statusErr
+			}
+			if err := r.restartPod(ctx, cluster, decision); err != nil {
+				return ctrl.Result{}, err
+			}
+			log.Info("Deleted a workload pod to restart it onto the current pod template",
+				"pod", decision.Pod.Name, "reason", decision.Message)
+			return ctrl.Result{RequeueAfter: requeueWhilePending}, nil
+
+		case rollout.Wait:
+			log.Info("Deferred the next pod restart", "reason", decision.Message)
+			if statusErr := r.writeStatus(ctx, cluster, latest, readyOrNot(latest.main), converged,
+				notUpdatedCondition(decision.Reason, decision.Message)); statusErr != nil {
+				return ctrl.Result{}, statusErr
+			}
+			return ctrl.Result{RequeueAfter: requeueWhilePending}, nil
+		}
+
+		// Converged, but keep re-observing: a registration a pod loses later
+		// produces no watch event, so drift is only caught by resyncing.
+		log.Info("Confirmed cluster registration is converged")
+		updated := trueCondition(memgraphcomv1alpha1.ConditionUpdated,
+			memgraphcomv1alpha1.ReasonAllPodsUpdated,
+			"All workload pods run the pod template the spec describes")
+		if statusErr := r.writeStatus(ctx, cluster, latest,
+			readyOrNot(latest.main), converged, updated); statusErr != nil {
 			return ctrl.Result{}, statusErr
 		}
 		return ctrl.Result{RequeueAfter: resyncInterval}, nil
@@ -542,11 +714,18 @@ func lastObserved(cluster *memgraphcomv1alpha1.MemgraphCluster) observation {
 	}
 }
 
-// observedMain returns the name of the data instance reported as MAIN, or the
-// empty string when none is elected yet.
+// observedMain returns the name of the data instance reported as MAIN *and*
+// reachable, or the empty string when the cluster has none it can serve writes
+// from.
+//
+// Reachability is part of the question, not a refinement of it. A MAIN whose pod
+// is gone keeps its role in the coordinators' Raft state and keeps being reported
+// as MAIN, so a check on the role alone would claim the cluster serves writes for
+// the whole failover window — including every window the rolling restart opens on
+// purpose by deleting the MAIN's pod.
 func observedMain(observed []memgraph.Instance) string {
 	for _, instance := range observed {
-		if instance.IsMain() {
+		if instance.IsMain() && instance.IsUp() {
 			return instance.Name
 		}
 	}
@@ -589,6 +768,12 @@ func notReadyCondition(reason, message string) metav1.Condition {
 func notConvergedCondition(reason, message string) metav1.Condition {
 	return metav1.Condition{
 		Type: memgraphcomv1alpha1.ConditionConverged, Status: metav1.ConditionFalse, Reason: reason, Message: message,
+	}
+}
+
+func notUpdatedCondition(reason, message string) metav1.Condition {
+	return metav1.Condition{
+		Type: memgraphcomv1alpha1.ConditionUpdated, Status: metav1.ConditionFalse, Reason: reason, Message: message,
 	}
 }
 
@@ -638,20 +823,44 @@ func (r *MemgraphClusterReconciler) writeStatus(
 // A StatefulSet the apply just created is not ready, not an error: the same lag
 // makes an absent StatefulSet the same waiting state as one whose pods have not
 // come up yet.
+//
+// One absence is tolerated: the pod a rolling restart itself took down. Without
+// that, the first pod the restart deletes would make this gate false, the pass
+// would return before ever connecting to a coordinator, and the restart could
+// never learn whether that pod came back — a roll that deletes one pod and then
+// waits forever. The exception is deliberately narrow, and both halves of the
+// condition matter. It applies only to a role that has outdated pods, so a
+// healthy cluster is still held to every pod being ready; and only when all of
+// the role's pods exist, because a role short of its replicas is exactly the
+// stale-informer case above — during a 3-to-4 scale-up a readyReplicas of 3
+// against an applied 4 would otherwise read as "one pod down, mid-roll,
+// tolerated" and let registration run against a pod that does not exist yet.
 func (r *MemgraphClusterReconciler) workloadsReady(
 	ctx context.Context,
 	cluster *memgraphcomv1alpha1.MemgraphCluster,
 	replicas replicaCounts,
+	roles rolloutRoles,
 ) (bool, error) {
-	for _, role := range []roleReplicas{replicas.coordinators, replicas.data} {
+	for _, role := range []struct {
+		replicas roleReplicas
+		rollout  rollout.Role
+	}{
+		{replicas.coordinators, roles.coordinators},
+		{replicas.data, roles.data},
+	} {
 		var sts appsv1.StatefulSet
-		if err := r.Get(ctx, types.NamespacedName{Name: role.name, Namespace: cluster.Namespace}, &sts); err != nil {
+		name := role.replicas.name
+		if err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: cluster.Namespace}, &sts); err != nil {
 			if apierrors.IsNotFound(err) {
 				return false, nil
 			}
-			return false, fmt.Errorf("getting StatefulSet %s: %w", role.name, err)
+			return false, fmt.Errorf("getting StatefulSet %s: %w", name, err)
 		}
-		if sts.Status.ReadyReplicas < role.applied {
+		required := role.replicas.applied
+		if rollout.InProgress(role.rollout) && sts.Status.Replicas == required {
+			required--
+		}
+		if sts.Status.ReadyReplicas < required {
 			return false, nil
 		}
 	}

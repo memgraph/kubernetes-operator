@@ -83,8 +83,24 @@ type CoordinatorSpec struct {
 // Name returns the instance name Memgraph derives from the coordinator ID and
 // reports in SHOW INSTANCES.
 func (c CoordinatorSpec) Name() string {
-	return fmt.Sprintf("coordinator_%d", c.ID)
+	return fmt.Sprintf(coordinatorNameFormat, c.ID)
 }
+
+// CoordinatorIDFromName is the inverse of Name: the Raft ID of the coordinator a
+// view names. It sits here rather than with its callers so that the format and its
+// parser cannot drift — a changed name would otherwise leave the parser silently
+// matching nothing.
+func CoordinatorIDFromName(name string) (int32, error) {
+	var id int32
+	if _, err := fmt.Sscanf(name, coordinatorNameFormat, &id); err != nil {
+		return 0, fmt.Errorf("parsing coordinator name %q: %w", name, err)
+	}
+	return id, nil
+}
+
+// coordinatorNameFormat is how Memgraph derives a coordinator's instance name
+// from its Raft ID, stated once for both directions.
+const coordinatorNameFormat = "coordinator_%d"
 
 // DataInstanceSpec declares one data instance to register with the cluster.
 type DataInstanceSpec struct {

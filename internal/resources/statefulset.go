@@ -56,6 +56,16 @@ const (
 	// Container names of the two optional containers core dumps bring along.
 	corePatternContainerName = "init-core-pattern"
 	uploaderContainerName    = "core-dumps-uploader"
+
+	// terminationGracePeriod is how long a pod gets to shut down cleanly before
+	// SIGKILL. Kubernetes' own default of 30 seconds was harmless while nothing
+	// routinely deleted these pods; it is wrong now that the operator deletes
+	// every one of them on every pod-template change, because an instance killed
+	// mid-shutdown recovers from its write-ahead log on startup and lengthens
+	// exactly the catch-up the rolling restart then waits on. This is a ceiling
+	// and not a delay — an instance that exits in two seconds costs two seconds —
+	// so it is a constant rather than a knob until someone needs a different one.
+	terminationGracePeriod int64 = 300
 )
 
 // CoordinatorStatefulSet builds the single StatefulSet running all
@@ -391,7 +401,21 @@ func statefulSet(
 			Replicas:            ptr.To(replicas),
 			ServiceName:         name,
 			PodManagementPolicy: appsv1.ParallelPodManagement,
-			Selector:            &metav1.LabelSelector{MatchLabels: selectorLabels(cluster, component)},
+			// The operator replaces pods itself, one at a time and in an order
+			// Kubernetes cannot express: data instances before coordinators, the
+			// MAIN last, the Raft leader last. RollingUpdate sweeps highest ordinal
+			// to lowest and `partition` is a descending cutoff rather than a set, so
+			// a MAIN on any ordinal but 0 would be restarted mid-sweep and every
+			// such restart costs another coordinator-driven failover.
+			//
+			// The cost of this is real and permanent: nothing but the operator will
+			// ever restart one of these pods again, so a pod-template change no
+			// reconcile acts on takes effect never. That is what the Updated
+			// condition is for.
+			UpdateStrategy: appsv1.StatefulSetUpdateStrategy{
+				Type: appsv1.OnDeleteStatefulSetStrategyType,
+			},
+			Selector: &metav1.LabelSelector{MatchLabels: selectorLabels(cluster, component)},
 			// The StatefulSet controller is the only thing that ever deletes
 			// this cluster's storage; the operator owns no finalizer and runs
 			// no cleanup of its own. Both halves of the policy follow the one
@@ -408,8 +432,9 @@ func statefulSet(
 					Labels: labels(cluster, component, role.podLabels),
 				},
 				Spec: corev1.PodSpec{
-					InitContainers: podInitContainers(spec, role),
-					Containers:     podContainers(container, role),
+					TerminationGracePeriodSeconds: ptr.To(terminationGracePeriod),
+					InitContainers:                podInitContainers(spec, role),
+					Containers:                    podContainers(container, role),
 					SecurityContext: &corev1.PodSecurityContext{
 						RunAsUser:      ptr.To(memgraphUserID),
 						RunAsGroup:     ptr.To(memgraphGroupID),

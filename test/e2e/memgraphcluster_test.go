@@ -29,6 +29,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"sort"
 	"strings"
 	"time"
 
@@ -37,6 +38,7 @@ import (
 	"sigs.k8s.io/yaml"
 
 	memgraphcomv1alpha1 "github.com/memgraph/kubernetes-operator/api/v1alpha1"
+	"github.com/memgraph/kubernetes-operator/internal/resources"
 	"github.com/memgraph/kubernetes-operator/test/utils"
 )
 
@@ -147,10 +149,10 @@ func loadExample() *memgraphcomv1alpha1.MemgraphCluster {
 func (c clusterUnderTest) declaredInstances() []string {
 	names := make([]string, 0, c.coordinators+c.dataInstances)
 	for ordinal := range c.coordinators {
-		names = append(names, utils.CoordinatorName(ordinal))
+		names = append(names, resources.CoordinatorInstanceName(ordinal))
 	}
 	for ordinal := range c.dataInstances {
-		names = append(names, utils.DataInstanceName(ordinal))
+		names = append(names, resources.DataInstanceName(ordinal))
 	}
 	return names
 }
@@ -252,6 +254,78 @@ var _ = Describe("MemgraphCluster", Ordered, func() {
 	// Storage survives the cluster under the default retention policy: an
 	// accidental `kubectl delete mgc` must not take a production database with
 	// it. This deletes the CR, so it runs last in this Ordered container.
+	// The sequenced rolling restart, on the converged cluster the preceding specs
+	// left behind (Ordered). Both StatefulSets use updateStrategy OnDelete, so
+	// Kubernetes replaces nothing on its own: every pod here moves because the
+	// operator deleted it, in an order it chose.
+	//
+	// The trigger is a benign pod-template edit rather than an image bump. The
+	// operator has no version logic at all, so what is under test is the ordering,
+	// and an extra environment variable exercises the identical revision change
+	// without a second image pull or Memgraph version skew in the way.
+	//
+	// What is deliberately not asserted here: that no acknowledged write is lost
+	// across the roll. That needs a write workload running through the whole
+	// sequence, and it belongs to the chaos-testing project rather than a spec that
+	// gates every pull request.
+	It("rolls a changed pod template through the data instances before the coordinators", func() {
+		By("confirming the cluster is converged before changing the pod template")
+		Eventually(quickstartCluster.verifyRegistered, 10*time.Minute, 10*time.Second).Should(Succeed())
+		quickstartCluster.awaitConverged(2 * time.Minute)
+
+		By("recording which pods exist and which instance is MAIN")
+		before, err := quickstartCluster.podUIDs()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(before).To(HaveLen(int(quickstartCluster.coordinators + quickstartCluster.dataInstances)))
+
+		view, err := quickstartCluster.leaderView()
+		Expect(err).NotTo(HaveOccurred())
+		main := mainOf(view)
+		Expect(main).NotTo(BeEmpty(), "the roll's order is defined against the MAIN")
+		mainOrdinal, err := resources.DataInstanceOrdinal(main)
+		Expect(err).NotTo(HaveOccurred())
+		mainPod := fmt.Sprintf("%s-data-%d", quickstartCluster.name, mainOrdinal)
+
+		By("adding an environment variable to both roles, which changes the pod template")
+		cmd := exec.Command("kubectl", "patch", "memgraphcluster", quickstartCluster.name,
+			"-n", quickstartCluster.namespace, "--type=merge", "-p",
+			`{"spec":{"extraEnv":{`+
+				`"coordinators":[{"name":"E2E_ROLLING_RESTART","value":"1"}],`+
+				`"data":[{"name":"E2E_ROLLING_RESTART","value":"1"}]}}}`)
+		_, err = utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred(), "the operator must accept an extra environment variable")
+
+		By("watching the operator replace every pod, one at a time")
+		order, maxDown := quickstartCluster.watchRoll(before, 25*time.Minute)
+
+		Expect(order).To(HaveLen(len(before)), "every pod must be replaced exactly once")
+		Expect(maxDown).To(BeNumerically("<=", 1),
+			"at most one pod of the cluster may be unready at a time; observed %d", maxDown)
+
+		By("confirming data instances went before coordinators, and MAIN last of its role")
+		var dataOrder, coordinatorOrder []string
+		for _, pod := range order {
+			if strings.Contains(pod, "-data-") {
+				dataOrder = append(dataOrder, pod)
+				continue
+			}
+			coordinatorOrder = append(coordinatorOrder, pod)
+			Expect(dataOrder).To(HaveLen(int(quickstartCluster.dataInstances)),
+				"a coordinator pod (%s) was restarted before the data plane finished: %v", pod, order)
+		}
+		Expect(dataOrder).To(HaveLen(int(quickstartCluster.dataInstances)))
+		Expect(coordinatorOrder).To(HaveLen(int(quickstartCluster.coordinators)))
+		Expect(dataOrder[len(dataOrder)-1]).To(Equal(mainPod),
+			"the MAIN's pod must be the last data pod restarted, order was %v", dataOrder)
+
+		By("confirming the cluster converges with the new template and one MAIN")
+		Eventually(quickstartCluster.verifyRegistered, 10*time.Minute, 10*time.Second).Should(Succeed())
+		cmd = exec.Command("kubectl", "wait", "--for=condition=Updated",
+			"memgraphcluster/"+quickstartCluster.name, "-n", quickstartCluster.namespace, "--timeout=5m")
+		_, err = utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred(), "the MemgraphCluster never reported Updated")
+	})
+
 	It("leaves the PVCs behind when the default-retention CR is deleted", func() {
 		By("confirming the cluster is converged before deleting it")
 		Eventually(quickstartCluster.verifyRegistered, 10*time.Minute, 10*time.Second).Should(Succeed())
@@ -456,7 +530,7 @@ spec:
 	AfterAll(func() {
 		By("removing the cluster namespace and waiting for its pods to go")
 		cmd := exec.Command("kubectl", "delete", "ns", scalingNamespace,
-			"--ignore-not-found", "--wait=true", "--timeout=5m")
+			"--ignore-not-found", "--wait=true", "--timeout=10m")
 		_, _ = utils.Run(cmd)
 	})
 
@@ -548,10 +622,13 @@ spec:
 		}, 10*time.Minute, 5*time.Second).Should(Succeed())
 
 		By("waiting for its pod to be shed")
+		// Comfortably above terminationGracePeriodSeconds: a pod that needs its full
+		// shutdown budget takes five minutes to go, so a five-minute timeout here
+		// would be a coin flip rather than an assertion.
 		Eventually(func(g Gomega) {
 			g.Expect(shrunk.replicas("data")).To(Equal("2"))
 			g.Expect(shrunk.podExists("data", 2)).To(BeFalse())
-		}, 5*time.Minute, 5*time.Second).Should(Succeed())
+		}, 8*time.Minute, 5*time.Second).Should(Succeed())
 
 		By("confirming the shrunk cluster is registered, converged, and led by a survivor")
 		Eventually(shrunk.verifyRegistered, 10*time.Minute, 10*time.Second).Should(Succeed())
@@ -632,11 +709,13 @@ spec:
 		}, 10*time.Minute, 5*time.Second).Should(Succeed())
 
 		By("waiting for their pods to be shed")
+		// Above terminationGracePeriodSeconds, for the reason the data-instance
+		// shrink's own shed assertion is.
 		Eventually(func(g Gomega) {
 			g.Expect(shrunk.replicas("coordinator")).To(Equal("3"))
 			g.Expect(shrunk.podExists("coordinator", 3)).To(BeFalse())
 			g.Expect(shrunk.podExists("coordinator", 4)).To(BeFalse())
-		}, 5*time.Minute, 5*time.Second).Should(Succeed())
+		}, 8*time.Minute, 5*time.Second).Should(Succeed())
 
 		By("confirming the shrunk cluster is registered, converged, and led by a survivor")
 		Eventually(shrunk.verifyRegistered, 10*time.Minute, 10*time.Second).Should(Succeed())
@@ -823,6 +902,98 @@ func (c clusterUnderTest) podExists(component string, ordinal int32) (bool, erro
 	return strings.TrimSpace(output) != "", nil
 }
 
+// podUIDs maps every workload pod of the cluster to the UID it currently has.
+// A pod that has been replaced carries a different one, which is how a rolling
+// restart is observed from the outside: the name is stable across a restart and
+// says nothing, the UID changes exactly once per replacement.
+func (c clusterUnderTest) podUIDs() (map[string]string, error) {
+	cmd := exec.Command("kubectl", "get", "pods", "-n", c.namespace,
+		"-l", "app.kubernetes.io/instance="+c.name,
+		"-o", `jsonpath={range .items[*]}{.metadata.name}{" "}{.metadata.uid}{" "}`+
+			`{range .status.conditions[?(@.type=="Ready")]}{.status}{end}{"\n"}{end}`)
+	output, err := utils.Run(cmd)
+	if err != nil {
+		return nil, fmt.Errorf("listing pod UIDs: %w", err)
+	}
+	uids := map[string]string{}
+	for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		uids[fields[0]] = fields[1]
+	}
+	return uids, nil
+}
+
+// notReadyPods is how many of the cluster's pods are not ready right now,
+// counting a pod that has gone away entirely.
+func (c clusterUnderTest) notReadyPods(expected int) (int, error) {
+	cmd := exec.Command("kubectl", "get", "pods", "-n", c.namespace,
+		"-l", "app.kubernetes.io/instance="+c.name,
+		"-o", `jsonpath={range .items[*]}{range .status.conditions[?(@.type=="Ready")]}{.status}{end}{"\n"}{end}`)
+	output, err := utils.Run(cmd)
+	if err != nil {
+		return 0, fmt.Errorf("counting unready pods: %w", err)
+	}
+	ready := 0
+	for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		if strings.TrimSpace(line) == "True" {
+			ready++
+		}
+	}
+	// Counted against the pods the cluster should have, not the ones that happen to
+	// exist: a pod the operator deleted is missing rather than unready, and the
+	// invariant is about the cluster.
+	return max(0, expected-ready), nil
+}
+
+// watchRoll polls until every pod's UID has changed from the given baseline,
+// returning the order the replacements were first observed in and the highest
+// number of pods seen unready at once.
+//
+// The order is what the whole feature is about, and a UID is the only evidence of
+// it that survives: by the time a roll finishes, nothing on the cluster says which
+// pod went first. The concurrency count is sampled rather than watched, so it can
+// only ever under-report — it is evidence that one pod at a time held, not proof.
+func (c clusterUnderTest) watchRoll(before map[string]string, timeout time.Duration) ([]string, int) {
+	GinkgoHelper()
+
+	var order []string
+	replaced := map[string]bool{}
+	maxDown := 0
+
+	Eventually(func(g Gomega) {
+		if down, err := c.notReadyPods(len(before)); err == nil && down > maxDown {
+			maxDown = down
+		}
+		now, err := c.podUIDs()
+		g.Expect(err).NotTo(HaveOccurred())
+		// Ordinal order within a poll, so a sample that catches two replacements at
+		// once is at least deterministic. One pod at a time is asserted separately;
+		// this only keeps the recorded order stable.
+		names := make([]string, 0, len(now))
+		for name := range now {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			if replaced[name] || now[name] == "" || now[name] == before[name] {
+				continue
+			}
+			replaced[name] = true
+			order = append(order, name)
+		}
+		g.Expect(order).To(HaveLen(len(before)),
+			"still waiting for every pod to be replaced; so far %v", order)
+	}, timeout, 2*time.Second).Should(Succeed())
+
+	return order, maxDown
+}
+
 // wipeInstanceRegistration unregisters the named data instance on the
 // coordinator leader, simulating registration state a pod loses when it is
 // rescheduled onto a fresh node. UNREGISTER INSTANCE must run on the leader —
@@ -854,10 +1025,10 @@ func removeCoordinatorRegistration() (string, error) {
 		return "", fmt.Errorf("no coordinator leader found to remove a coordinator: %w", err)
 	}
 	ordinal := int32(0)
-	if coordinatorLeaderOf(view) == utils.CoordinatorName(ordinal) {
+	if coordinatorLeaderOf(view) == resources.CoordinatorInstanceName(ordinal) {
 		ordinal = 1
 	}
-	name := utils.CoordinatorName(ordinal)
+	name := resources.CoordinatorInstanceName(ordinal)
 	cmd := exec.Command("kubectl", "exec", pod, "-n", clusterNamespace, "-c", "memgraph", "--",
 		"bash", "-c", fmt.Sprintf("echo 'REMOVE COORDINATOR %d;' | mgconsole", ordinal+1))
 	if _, err := utils.Run(cmd); err != nil {
@@ -1012,7 +1183,7 @@ func (c clusterUnderTest) leaderPod() (string, []instanceRow, error) {
 				pod, len(view)))
 			continue
 		}
-		leaderOrdinal, err := utils.CoordinatorOrdinal(leader)
+		leaderOrdinal, err := resources.CoordinatorOrdinal(leader)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("%s named %s as leader: %w", pod, leader, err))
 			continue

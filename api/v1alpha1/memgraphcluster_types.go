@@ -133,6 +133,16 @@ const (
 	// --for=condition=Converged` therefore means a scale is genuinely finished,
 	// not merely accepted.
 	ConditionConverged = "Converged"
+
+	// ConditionUpdated is True when every workload pod runs the pod template the
+	// spec currently describes. Because both StatefulSets use updateStrategy
+	// OnDelete, Kubernetes replaces no pod on its own: the operator restarts them
+	// one at a time, data instances before coordinators, MAIN and the Raft leader
+	// last. It is kept apart from Converged deliberately — Converged answers
+	// "does the cluster have the declared members", this one answers "do they run
+	// the declared template", and a user looking at a False condition needs to
+	// know which of the two is happening.
+	ConditionUpdated = "Updated"
 )
 
 // Condition reasons reported on MemgraphCluster status. Reasons are CamelCase
@@ -197,6 +207,23 @@ const (
 	// loses data. It persisting means replication is not progressing — the
 	// survivors are down, or too far behind to catch up.
 	ReasonNoCaughtUpSurvivor = "NoCaughtUpSurvivor"
+
+	// ReasonRollingRestartInProgress is set while the operator is restarting pods
+	// to bring them onto the pod template the spec currently describes. The
+	// message names the pod being restarted and why it is that one's turn, because
+	// the order is the whole safety argument: every data instance except MAIN
+	// first, then MAIN, then the coordinators with the Raft leader last.
+	ReasonRollingRestartInProgress = "RollingRestartInProgress"
+
+	// ReasonWaitingForCatchUp is set while a rolling restart waits for the data
+	// instance it restarted last to hold every transaction the MAIN has committed
+	// again. Until it does, restarting the next pod would leave recent writes on
+	// the MAIN alone.
+	ReasonWaitingForCatchUp = "WaitingForCatchUp"
+
+	// ReasonAllPodsUpdated is set when every workload pod runs the pod template
+	// the spec currently describes.
+	ReasonAllPodsUpdated = "AllPodsUpdated"
 
 	// ReasonMainElected is set when a data instance is observed as MAIN.
 	ReasonMainElected = "MainElected"
