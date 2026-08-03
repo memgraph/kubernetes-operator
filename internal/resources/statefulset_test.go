@@ -386,13 +386,23 @@ func TestCoordinatorStatefulSetDefaults(t *testing.T) {
 			Replicas:            ptr.To(int32(3)),
 			ServiceName:         coordinatorName,
 			PodManagementPolicy: appsv1.ParallelPodManagement,
-			Selector:            &metav1.LabelSelector{MatchLabels: expectedSelectorLabels(coordinatorComponent)},
+			// The operator replaces these pods itself, one at a time and MAIN or Raft
+			// leader last, which no RollingUpdate can express.
+			UpdateStrategy: appsv1.StatefulSetUpdateStrategy{
+				Type: appsv1.OnDeleteStatefulSetStrategyType,
+			},
+			Selector: &metav1.LabelSelector{MatchLabels: expectedSelectorLabels(coordinatorComponent)},
 			PersistentVolumeClaimRetentionPolicy: expectedRetentionPolicy(
 				appsv1.RetainPersistentVolumeClaimRetentionPolicyType),
 			VolumeClaimTemplates: expectedClaimTemplates(),
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: expectedLabels(coordinatorComponent)},
 				Spec: corev1.PodSpec{
+					// Kubernetes' 30-second default is too short for a database that is
+					// now restarted on every pod-template change: an instance killed
+					// mid-shutdown recovers from its WAL and lengthens the catch-up the
+					// rolling restart waits on.
+					TerminationGracePeriodSeconds: ptr.To(int64(300)),
 					Containers: []corev1.Container{{
 						Name:            memgraphName,
 						Image:           defaultImageRef,
@@ -441,13 +451,21 @@ func TestDataStatefulSetDefaults(t *testing.T) {
 			Replicas:            ptr.To(int32(2)),
 			ServiceName:         dataName,
 			PodManagementPolicy: appsv1.ParallelPodManagement,
-			Selector:            &metav1.LabelSelector{MatchLabels: expectedSelectorLabels(dataComponent)},
+			UpdateStrategy: appsv1.StatefulSetUpdateStrategy{
+				Type: appsv1.OnDeleteStatefulSetStrategyType,
+			},
+			Selector: &metav1.LabelSelector{MatchLabels: expectedSelectorLabels(dataComponent)},
 			PersistentVolumeClaimRetentionPolicy: expectedRetentionPolicy(
 				appsv1.RetainPersistentVolumeClaimRetentionPolicyType),
 			VolumeClaimTemplates: expectedClaimTemplates(),
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: expectedLabels(dataComponent)},
 				Spec: corev1.PodSpec{
+					// Kubernetes' 30-second default is too short for a database that is
+					// now restarted on every pod-template change: an instance killed
+					// mid-shutdown recovers from its WAL and lengthens the catch-up the
+					// rolling restart waits on.
+					TerminationGracePeriodSeconds: ptr.To(int64(300)),
 					Containers: []corev1.Container{{
 						Name:            memgraphName,
 						Image:           defaultImageRef,

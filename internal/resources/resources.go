@@ -36,6 +36,13 @@ const (
 
 	coordinatorComponent = "coordinator"
 	dataComponent        = "data"
+
+	// ManagedByLabel and ManagedByValue mark every object the operator builds.
+	// They are exported because the manager scopes its Pod cache to them: the
+	// rolling restart needs per-pod revisions, and caching every pod in the
+	// cluster to get them would be a rude surprise on a large one.
+	ManagedByLabel = "app.kubernetes.io/managed-by"
+	ManagedByValue = "memgraph-operator"
 )
 
 // Named container and Service port names shared by both roles.
@@ -70,8 +77,20 @@ func labels(
 	l := make(map[string]string, len(custom)+4)
 	maps.Copy(l, custom)
 	maps.Copy(l, selectorLabels(cluster, component))
-	l["app.kubernetes.io/managed-by"] = "memgraph-operator"
+	l[ManagedByLabel] = ManagedByValue
 	return l
+}
+
+// CoordinatorPodSelector matches the pods of this cluster's coordinator
+// StatefulSet, and DataPodSelector those of its data StatefulSet. Both are the
+// StatefulSets' own selectors, so they cannot drift from the pods they describe.
+func CoordinatorPodSelector(cluster *memgraphcomv1alpha1.MemgraphCluster) map[string]string {
+	return selectorLabels(cluster, coordinatorComponent)
+}
+
+// DataPodSelector matches the pods of this cluster's data StatefulSet.
+func DataPodSelector(cluster *memgraphcomv1alpha1.MemgraphCluster) map[string]string {
+	return selectorLabels(cluster, dataComponent)
 }
 
 // selectorLabels returns the immutable subset of labels used as StatefulSet

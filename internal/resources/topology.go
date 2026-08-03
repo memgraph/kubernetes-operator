@@ -37,6 +37,53 @@ func DeclaredDataInstances(cluster *memgraphcomv1alpha1.MemgraphCluster) int32 {
 	return normalize(cluster.Spec).dataInstances
 }
 
+// CoordinatorID is the Raft coordinator ID of the coordinator running on the pod
+// with the given ordinal. IDs are 1-based because Memgraph treats ID 0 as unset.
+func CoordinatorID(ordinal int32) int32 {
+	return ordinal + 1
+}
+
+// CoordinatorInstanceName and DataInstanceName are the names the members running
+// on a pod ordinal are known by in SHOW INSTANCES.
+//
+// They are exported because this mapping has to exist in exactly one place.
+// Anything that matches an observed cluster row against a pod — the rolling
+// restart, which has nothing but pods to work from — needs the same derivation the
+// builders and the declared topology use, and a second spelling of it would fail
+// quietly: a name that is merely wrong matches no row at all, so the caller
+// concludes the instance is absent rather than that it asked the wrong question.
+func CoordinatorInstanceName(ordinal int32) string {
+	return memgraph.CoordinatorSpec{ID: CoordinatorID(ordinal)}.Name()
+}
+
+// DataInstanceName is the SHOW INSTANCES name of the data instance on the pod
+// with the given ordinal.
+func DataInstanceName(ordinal int32) string {
+	return fmt.Sprintf("instance_%d", ordinal)
+}
+
+// CoordinatorOrdinal and DataInstanceOrdinal are the inverses: the ordinal of the
+// pod running the member an observed view names. They live next to the functions
+// they invert so the two cannot drift apart, and they are what anything holding a
+// name and needing the pod behind it uses — the e2e suite reading MAIN out of
+// SHOW INSTANCES, for one.
+func CoordinatorOrdinal(name string) (int32, error) {
+	id, err := memgraph.CoordinatorIDFromName(name)
+	if err != nil {
+		return 0, err
+	}
+	return id - 1, nil
+}
+
+// DataInstanceOrdinal is the ordinal of the pod running the named data instance.
+func DataInstanceOrdinal(name string) (int32, error) {
+	var ordinal int32
+	if _, err := fmt.Sscanf(name, "instance_%d", &ordinal); err != nil {
+		return 0, fmt.Errorf("parsing data instance name %q: %w", name, err)
+	}
+	return ordinal, nil
+}
+
 // DeclaredTopology derives the registration topology the planner drives the
 // cluster toward. Identity follows the pod ordinal exactly as the workload
 // pods advertise it: coordinator ordinal N is Raft coordinator N+1 (Memgraph
@@ -117,7 +164,7 @@ func coordinator(
 ) memgraph.CoordinatorSpec {
 	fqdn := podFQDN(cluster, CoordinatorName(cluster), spec, ordinal)
 	return memgraph.CoordinatorSpec{
-		ID:                ordinal + 1,
+		ID:                CoordinatorID(ordinal),
 		BoltServer:        hostPort(fqdn, spec.ports.bolt),
 		CoordinatorServer: hostPort(fqdn, spec.ports.coordinator),
 		ManagementServer:  hostPort(fqdn, spec.ports.management),
@@ -135,7 +182,7 @@ func dataInstance(
 ) memgraph.DataInstanceSpec {
 	fqdn := podFQDN(cluster, DataName(cluster), spec, ordinal)
 	return memgraph.DataInstanceSpec{
-		Name:              fmt.Sprintf("instance_%d", ordinal),
+		Name:              DataInstanceName(ordinal),
 		BoltServer:        hostPort(fqdn, spec.ports.bolt),
 		ManagementServer:  hostPort(fqdn, spec.ports.management),
 		ReplicationServer: hostPort(fqdn, spec.ports.replication),

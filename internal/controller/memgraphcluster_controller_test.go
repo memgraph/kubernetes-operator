@@ -25,6 +25,7 @@ import (
 	. "github.com/onsi/gomega"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -41,6 +42,10 @@ import (
 const (
 	coordinatorSuffix = "-coordinator"
 	dataSuffix        = "-data"
+
+	// memgraphDbName is the value of the app.kubernetes.io/name label the operator
+	// stamps on everything, and the container name inside its pods.
+	memgraphDbName = "memgraph"
 )
 
 // Non-default spec values the specs in this package override with, chosen so
@@ -1157,13 +1162,16 @@ var _ = Describe("MemgraphCluster Controller", func() {
 				coordinators: roleReplicas{name: resourceName + coordinatorSuffix, declared: 3, applied: 3},
 				data:         roleReplicas{name: resourceName + dataSuffix, declared: 2, applied: 2},
 			}
-			ready, err := reconciler.workloadsReady(ctx, cluster, held)
+			// A zero rolloutRoles is a cluster with no restart under way, which is what
+			// keeps this about the count comparison alone: the gate only ever tolerates
+			// an unready pod while a role actually has pods left to restart.
+			ready, err := reconciler.workloadsReady(ctx, cluster, held, rolloutRoles{})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(ready).To(BeTrue(), "the cluster is ready at the size this pass applies")
 
 			grown := held
 			grown.data.declared, grown.data.applied = 3, 3
-			ready, err = reconciler.workloadsReady(ctx, cluster, grown)
+			ready, err = reconciler.workloadsReady(ctx, cluster, grown, rolloutRoles{})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(ready).To(BeFalse(),
 				"a pass applying 3 must not read 2-ready-of-2 as ready, whatever spec.replicas still says")
@@ -1461,6 +1469,260 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			get(resourceName, cluster)
 			Expect(&cluster.Spec).To(Equal(specBefore), "status updates must never mutate spec")
 			Expect(cluster.Status.Conditions).NotTo(BeEmpty())
+		})
+
+		// A MAIN whose pod is gone keeps its role in the coordinators' Raft state, so
+		// the role alone would claim the cluster serves writes for the whole failover
+		// window — including every window a rolling restart opens on purpose.
+		It("should report NotReady while the MAIN is unreachable", func() {
+			fake.setInstances(convergedCluster())
+			reconcileCluster(resourceName)
+			markWorkloadsReady(resourceName)
+			reconcileCluster(resourceName)
+			Expect(status().Main).To(Equal("instance_0"))
+
+			fake.setInstances([]memgraph.Instance{
+				observedCoordinator(1, memgraph.RoleLeader),
+				observedCoordinator(2, memgraph.RoleFollower),
+				observedCoordinator(3, memgraph.RoleFollower),
+				func() memgraph.Instance {
+					main := observedDataInstance(0, memgraph.RoleMain)
+					main.Health = "down"
+					return main
+				}(),
+				observedDataInstance(1, memgraph.RoleReplica),
+			})
+			reconcileCluster(resourceName)
+
+			Expect(status().Main).To(BeEmpty(), "an unreachable MAIN is not a MAIN the cluster can serve from")
+			ready := condition(memgraphcomv1alpha1.ConditionReady)
+			Expect(ready.Status).To(Equal(metav1.ConditionFalse))
+			Expect(ready.Reason).To(Equal(memgraphcomv1alpha1.ReasonNoMainElected))
+			Expect(fake.executedCommands()).To(BeEmpty(),
+				"the coordinators own the failover; the operator issues no promotion")
+		})
+	})
+
+	Context("when a changed pod template has to be rolled through the cluster", func() {
+		const (
+			resourceName = "mgc-rollout"
+			oldRevision  = "mgc-rollout-6c9f8b7d5"
+			newRevision  = "mgc-rollout-77b4c8f9d"
+		)
+
+		observedCoordinator := func(id int, role string) memgraph.Instance {
+			host := fmt.Sprintf("%s-coordinator-%d.%s-coordinator.%s.svc.cluster.local",
+				resourceName, id-1, resourceName, resourceNamespace)
+			return memgraph.Instance{
+				Name: fmt.Sprintf("coordinator_%d", id), BoltServer: host + ":7687",
+				CoordinatorServer: host + ":12000", ManagementServer: host + ":10000",
+				Health: "up", Role: role,
+			}
+		}
+		observedDataInstance := func(i int, role string) memgraph.Instance {
+			return memgraph.Instance{Name: fmt.Sprintf("instance_%d", i), Health: "up", Role: role}
+		}
+		convergedCluster := func() []memgraph.Instance {
+			return []memgraph.Instance{
+				observedCoordinator(1, memgraph.RoleLeader),
+				observedCoordinator(2, memgraph.RoleFollower),
+				observedCoordinator(3, memgraph.RoleFollower),
+				observedDataInstance(0, memgraph.RoleMain),
+				observedDataInstance(1, memgraph.RoleReplica),
+			}
+		}
+		condition := func(condType string) *metav1.Condition {
+			GinkgoHelper()
+			cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+			get(resourceName, cluster)
+			return apimeta.FindStatusCondition(cluster.Status.Conditions, condType)
+		}
+
+		// putPod stands in for the StatefulSet controller envtest does not run: it
+		// creates or replaces one role pod at the given revision, ready.
+		putPod := func(suffix, component string, ordinal int, revision string) {
+			GinkgoHelper()
+			name := fmt.Sprintf("%s%s-%d", resourceName, suffix, ordinal)
+			existing := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: resourceNamespace}}
+			Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, existing))).To(Succeed())
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      name,
+					Namespace: resourceNamespace,
+					Labels: map[string]string{
+						"app.kubernetes.io/name":        memgraphDbName,
+						"app.kubernetes.io/instance":    resourceName,
+						"app.kubernetes.io/component":   component,
+						"app.kubernetes.io/managed-by":  "memgraph-operator",
+						appsv1.StatefulSetRevisionLabel: revision,
+					},
+				},
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: memgraphDbName, Image: memgraphDbName}}},
+			}
+			Expect(k8sClient.Create(ctx, pod)).To(Succeed())
+			pod.Status.Conditions = []corev1.PodCondition{{
+				Type: corev1.PodReady, Status: corev1.ConditionTrue,
+				LastTransitionTime: metav1.Now(),
+			}}
+			Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
+		}
+
+		// putPods places every pod of both roles at one revision.
+		putPods := func(revision string) {
+			GinkgoHelper()
+			for ordinal := range 3 {
+				putPod(coordinatorSuffix, "coordinator", ordinal, revision)
+			}
+			for ordinal := range 2 {
+				putPod(dataSuffix, "data", ordinal, revision)
+			}
+		}
+
+		// declareRevision publishes the revision both StatefulSets' current pod
+		// template hashes to, which is what makes the pods above outdated.
+		declareRevision := func(revision string) {
+			GinkgoHelper()
+			for _, suffix := range []string{coordinatorSuffix, dataSuffix} {
+				sts := &appsv1.StatefulSet{}
+				get(resourceName+suffix, sts)
+				sts.Status.UpdateRevision = revision
+				Expect(k8sClient.Status().Update(ctx, sts)).To(Succeed())
+			}
+		}
+
+		podExists := func(suffix string, ordinal int) bool {
+			GinkgoHelper()
+			pod := &corev1.Pod{}
+			err := k8sClient.Get(ctx, types.NamespacedName{
+				Name:      fmt.Sprintf("%s%s-%d", resourceName, suffix, ordinal),
+				Namespace: resourceNamespace,
+			}, pod)
+			if apierrors.IsNotFound(err) {
+				return false
+			}
+			Expect(err).NotTo(HaveOccurred())
+			return pod.DeletionTimestamp == nil
+		}
+
+		BeforeEach(func() {
+			resource := &memgraphcomv1alpha1.MemgraphCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: resourceNamespace},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+
+			fake.setInstances(convergedCluster())
+			reconcileCluster(resourceName)
+			markWorkloadsReady(resourceName)
+			reconcileCluster(resourceName)
+		})
+
+		AfterEach(func() {
+			cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+			get(resourceName, cluster)
+			Expect(k8sClient.Delete(ctx, cluster)).To(Succeed())
+			deleteOwned(resourceName)
+			Expect(k8sClient.DeleteAllOf(ctx, &corev1.Pod{},
+				client.InNamespace(resourceNamespace),
+				client.MatchingLabels{"app.kubernetes.io/instance": resourceName},
+				client.GracePeriodSeconds(0),
+			)).To(Succeed())
+		})
+
+		It("should report Updated once every pod runs the declared template", func() {
+			putPods(newRevision)
+			declareRevision(newRevision)
+			reconcileCluster(resourceName)
+
+			updated := condition(memgraphcomv1alpha1.ConditionUpdated)
+			Expect(updated).NotTo(BeNil())
+			Expect(updated.Status).To(Equal(metav1.ConditionTrue))
+			Expect(updated.Reason).To(Equal(memgraphcomv1alpha1.ReasonAllPodsUpdated))
+		})
+
+		// The whole order in one spec: replicas before MAIN, data plane before
+		// coordinators, Raft leader last, one pod at a time throughout.
+		It("should restart data pods before coordinators, MAIN and the leader last", func() {
+			putPods(oldRevision)
+			declareRevision(newRevision)
+
+			// instance_0 is MAIN, so the replica on ordinal 1 goes first.
+			reconcileCluster(resourceName)
+			Expect(podExists(dataSuffix, 1)).To(BeFalse(), "the non-MAIN data pod is restarted first")
+			Expect(podExists(dataSuffix, 0)).To(BeTrue(), "the MAIN's pod is not touched yet")
+			Expect(podExists(coordinatorSuffix, 2)).To(BeTrue(), "coordinators wait for the data plane")
+			updated := condition(memgraphcomv1alpha1.ConditionUpdated)
+			Expect(updated.Status).To(Equal(metav1.ConditionFalse))
+			Expect(updated.Reason).To(Equal(memgraphcomv1alpha1.ReasonRollingRestartInProgress))
+
+			// It comes back on the new revision, reachable and caught up.
+			putPod(dataSuffix, "data", 1, newRevision)
+			reconcileCluster(resourceName)
+			Expect(podExists(dataSuffix, 0)).To(BeFalse(), "the MAIN's pod is restarted last of its role")
+			Expect(podExists(coordinatorSuffix, 2)).To(BeTrue())
+
+			// The coordinators fail over to instance_1, and the old MAIN returns as a
+			// replica — which is what the operator observes rather than arranges.
+			fake.setInstances([]memgraph.Instance{
+				observedCoordinator(1, memgraph.RoleLeader),
+				observedCoordinator(2, memgraph.RoleFollower),
+				observedCoordinator(3, memgraph.RoleFollower),
+				observedDataInstance(0, memgraph.RoleReplica),
+				observedDataInstance(1, memgraph.RoleMain),
+			})
+			putPod(dataSuffix, "data", 0, newRevision)
+
+			// Data done: coordinator_1 leads on ordinal 0, so ordinal 2 goes first.
+			reconcileCluster(resourceName)
+			Expect(podExists(coordinatorSuffix, 2)).To(BeFalse())
+			Expect(podExists(coordinatorSuffix, 0)).To(BeTrue(), "the Raft leader's pod is last")
+
+			putPod(coordinatorSuffix, "coordinator", 2, newRevision)
+			reconcileCluster(resourceName)
+			Expect(podExists(coordinatorSuffix, 1)).To(BeFalse())
+			Expect(podExists(coordinatorSuffix, 0)).To(BeTrue())
+
+			putPod(coordinatorSuffix, "coordinator", 1, newRevision)
+			reconcileCluster(resourceName)
+			Expect(podExists(coordinatorSuffix, 0)).To(BeFalse(), "the leader goes once nothing else is left")
+
+			putPod(coordinatorSuffix, "coordinator", 0, newRevision)
+			reconcileCluster(resourceName)
+			Expect(condition(memgraphcomv1alpha1.ConditionUpdated).Status).To(Equal(metav1.ConditionTrue))
+			Expect(fake.executedCommands()).To(BeEmpty(),
+				"a rolling restart issues no registration commands at all")
+		})
+
+		It("should not restart the MAIN while no replica is caught up", func() {
+			putPods(oldRevision)
+			putPod(dataSuffix, "data", 1, newRevision)
+			declareRevision(newRevision)
+			fake.setBehind("instance_1", 7)
+
+			reconcileCluster(resourceName)
+
+			Expect(podExists(dataSuffix, 0)).To(BeTrue(), "the MAIN keeps serving; the roll waits")
+			updated := condition(memgraphcomv1alpha1.ConditionUpdated)
+			Expect(updated.Status).To(Equal(metav1.ConditionFalse))
+			Expect(updated.Reason).To(Equal(memgraphcomv1alpha1.ReasonNoCaughtUpSurvivor))
+		})
+
+		// Registration convergence comes first: a cluster missing a registration is
+		// not the one the spec describes, so it is no moment to start deleting pods.
+		It("should not restart any pod while a registration is pending", func() {
+			putPods(oldRevision)
+			declareRevision(newRevision)
+			fake.setInstances([]memgraph.Instance{
+				observedCoordinator(1, memgraph.RoleLeader),
+				observedCoordinator(2, memgraph.RoleFollower),
+				observedCoordinator(3, memgraph.RoleFollower),
+				observedDataInstance(0, memgraph.RoleMain),
+			})
+
+			reconcileCluster(resourceName)
+
+			Expect(podExists(dataSuffix, 1)).To(BeTrue())
+			Expect(podExists(coordinatorSuffix, 2)).To(BeTrue())
+			Expect(fake.executedCommands()).To(ContainElement(ContainSubstring("REGISTER INSTANCE instance_1")))
 		})
 	})
 })

@@ -175,6 +175,17 @@ func downDataInstance(i int) memgraph.Instance {
 	return instance
 }
 
+// mainDownDataInstance is the MAIN with its pod gone: Raft still records it as the
+// current MAIN, and the coordinator leader cannot reach it. This is what a
+// coordinator-driven failover looks like from the moment the MAIN dies until a
+// successor is promoted, and what the rolling restart deliberately creates when it
+// deletes the MAIN's pod.
+func mainDownDataInstance(i int) memgraph.Instance {
+	instance := observedDataInstance(i, memgraph.RoleMain)
+	instance.Health = "down"
+	return instance
+}
+
 // caughtUp is the SHOW REPLICATION LAG view of the given data instances with every
 // one of them holding all of the MAIN's transactions: the state that lets a
 // retiring MAIN hand over. The MAIN reports itself in the view too, at zero
@@ -869,6 +880,27 @@ func TestPlan(t *testing.T) {
 			want: []planner.Command{
 				planner.UnregisterInstance{Name: thirdInstance},
 			},
+		},
+		// The property the sequenced rolling restart rests on. It deletes the MAIN's
+		// pod on purpose and leaves the promotion to the coordinators, so the state
+		// below happens on every upgrade: MAIN still holds its role in Raft, but the
+		// leader cannot reach it. The planner must plan nothing at all — a promotion
+		// here would be the operator racing the failover it just triggered, which is
+		// two control systems choosing a MAIN at once.
+		//
+		// It only holds on a Memgraph that keeps reporting role=main for an
+		// unreachable MAIN. A release that reports role=unknown instead vacates the
+		// main row, and this same view would take the bootstrap promotion branch.
+		{
+			name: "an unreachable MAIN is left to the coordinators, not promoted around",
+			observed: []memgraph.Instance{
+				observedCoordinator(1, memgraph.RoleLeader),
+				observedCoordinator(2, memgraph.RoleFollower),
+				observedCoordinator(3, memgraph.RoleFollower),
+				mainDownDataInstance(0),
+				observedDataInstance(1, memgraph.RoleReplica),
+			},
+			want: nil,
 		},
 	}
 

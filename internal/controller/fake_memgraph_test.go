@@ -211,7 +211,7 @@ func (c *fakeClient) ShowReplicationLag(context.Context) ([]memgraph.Replication
 		lag = append(lag, memgraph.ReplicationLag{
 			Instance: instance.Name,
 			Databases: []memgraph.DatabaseLag{{
-				Database:       "memgraph",
+				Database:       memgraphDbName,
 				CommittedTxns:  100 - behind,
 				TxnsBehindMain: behind,
 			}},
