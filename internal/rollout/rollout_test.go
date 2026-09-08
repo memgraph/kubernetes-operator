@@ -100,7 +100,7 @@ func cluster(dataInstances, coordinators int, main string) []memgraph.Instance {
 		}
 		view = append(view, memgraph.Instance{
 			Name:       fmt.Sprintf("coordinator_%d", ordinal+1),
-			BoltServer: "coordinator:7687",
+			BoltServer: fmt.Sprintf("coordinator:%d", memgraphcomv1alpha1.BoltPort),
 			Health:     memgraph.HealthUp,
 			Role:       role,
 		})
@@ -436,7 +436,7 @@ func TestNoCoordinatorLeaderStopsTheCoordinatorRoll(t *testing.T) {
 	for ordinal := range 3 {
 		view = append(view, memgraph.Instance{
 			Name:       fmt.Sprintf("coordinator_%d", ordinal+1),
-			BoltServer: "coordinator:7687",
+			BoltServer: fmt.Sprintf("coordinator:%d", memgraphcomv1alpha1.BoltPort),
 			Health:     memgraph.HealthUp,
 			Role:       memgraph.RoleFollower,
 		})

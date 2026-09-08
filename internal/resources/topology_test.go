@@ -49,35 +49,35 @@ func TestDeclaredTopologyDefaults(t *testing.T) {
 		Coordinators: []memgraph.CoordinatorSpec{
 			{
 				ID:                1,
-				BoltServer:        coordinatorFQDN(0) + ":7687",
-				CoordinatorServer: coordinatorFQDN(0) + ":12000",
-				ManagementServer:  coordinatorFQDN(0) + ":10000",
+				BoltServer:        endpoint(coordinatorFQDN(0), memgraphcomv1alpha1.BoltPort),
+				CoordinatorServer: endpoint(coordinatorFQDN(0), memgraphcomv1alpha1.CoordinatorPort),
+				ManagementServer:  endpoint(coordinatorFQDN(0), memgraphcomv1alpha1.ManagementPort),
 			},
 			{
 				ID:                2,
-				BoltServer:        coordinatorFQDN(1) + ":7687",
-				CoordinatorServer: coordinatorFQDN(1) + ":12000",
-				ManagementServer:  coordinatorFQDN(1) + ":10000",
+				BoltServer:        endpoint(coordinatorFQDN(1), memgraphcomv1alpha1.BoltPort),
+				CoordinatorServer: endpoint(coordinatorFQDN(1), memgraphcomv1alpha1.CoordinatorPort),
+				ManagementServer:  endpoint(coordinatorFQDN(1), memgraphcomv1alpha1.ManagementPort),
 			},
 			{
 				ID:                3,
-				BoltServer:        coordinatorFQDN(2) + ":7687",
-				CoordinatorServer: coordinatorFQDN(2) + ":12000",
-				ManagementServer:  coordinatorFQDN(2) + ":10000",
+				BoltServer:        endpoint(coordinatorFQDN(2), memgraphcomv1alpha1.BoltPort),
+				CoordinatorServer: endpoint(coordinatorFQDN(2), memgraphcomv1alpha1.CoordinatorPort),
+				ManagementServer:  endpoint(coordinatorFQDN(2), memgraphcomv1alpha1.ManagementPort),
 			},
 		},
 		DataInstances: []memgraph.DataInstanceSpec{
 			{
 				Name:              "instance_0",
-				BoltServer:        dataFQDN(0) + ":7687",
-				ManagementServer:  dataFQDN(0) + ":10000",
-				ReplicationServer: dataFQDN(0) + ":20000",
+				BoltServer:        endpoint(dataFQDN(0), memgraphcomv1alpha1.BoltPort),
+				ManagementServer:  endpoint(dataFQDN(0), memgraphcomv1alpha1.ManagementPort),
+				ReplicationServer: endpoint(dataFQDN(0), memgraphcomv1alpha1.ReplicationPort),
 			},
 			{
 				Name:              secondDataInstance,
-				BoltServer:        dataFQDN(1) + ":7687",
-				ManagementServer:  dataFQDN(1) + ":10000",
-				ReplicationServer: dataFQDN(1) + ":20000",
+				BoltServer:        endpoint(dataFQDN(1), memgraphcomv1alpha1.BoltPort),
+				ManagementServer:  endpoint(dataFQDN(1), memgraphcomv1alpha1.ManagementPort),
+				ReplicationServer: endpoint(dataFQDN(1), memgraphcomv1alpha1.ReplicationPort),
 			},
 		},
 	}
@@ -201,7 +201,7 @@ func TestRetiringCoordinators(t *testing.T) {
 // the same ordinal was — otherwise the plan would aim REMOVE COORDINATOR at the
 // wrong ID.
 func TestRetiringCoordinatorMatchesItsDeclaredForm(t *testing.T) {
-	// The tuned cluster (non-default ports and cluster domain) declares three
+	// The tuned cluster (non-default cluster domain) declares three
 	// coordinators. Lowering the count is not possible below three, so the declared
 	// form is taken from a five-coordinator variant of the same spec.
 	grown := tunedCluster()
@@ -238,7 +238,7 @@ func dataInstancesCluster(dataInstances int32) *memgraphcomv1alpha1.MemgraphClus
 // ordinal was — otherwise the plan would aim its removal at a name the cluster
 // does not know.
 func TestRetiringDataInstanceMatchesItsDeclaredForm(t *testing.T) {
-	// The tuned cluster (non-default ports and cluster domain) declares two
+	// The tuned cluster (non-default cluster domain) declares two
 	// instances. Lowering the count to one leaves instance_1 retiring, which must
 	// equal the instance_1 the same spec declared before the edit, verbatim.
 	declared := resources.DeclaredTopology(tunedCluster()).DataInstances
@@ -268,17 +268,17 @@ func TestDeclaredTopologyMatchesCoordinatorStartScript(t *testing.T) {
 		t.Errorf("coordinator start script does not advertise the headless-service pod FQDN:\n%s", script)
 	}
 	for i, coordinator := range topology.Coordinators {
-		wantHost := fmt.Sprintf("%s-%d.%s:12000", coordinatorName, i, suffix)
+		wantHost := fmt.Sprintf("%s-%d.%s:%d", coordinatorName, i, suffix, memgraphcomv1alpha1.CoordinatorPort)
 		if coordinator.CoordinatorServer != wantHost {
 			t.Errorf("coordinator %d advertises %q, want %q", coordinator.ID, coordinator.CoordinatorServer, wantHost)
 		}
 	}
 }
 
-// TestDeclaredTopologyPortsAndClusterDomain asserts the configured ports and
-// cluster domain reach every advertised address, since these are exactly the
-// addresses the operator registers with the cluster.
-func TestDeclaredTopologyPortsAndClusterDomain(t *testing.T) {
+// TestDeclaredTopologyFixedPortsAndClusterDomain asserts the fixed ports and
+// configured cluster domain reach every advertised address, since these are
+// exactly the addresses the operator registers with the cluster.
+func TestDeclaredTopologyFixedPortsAndClusterDomain(t *testing.T) {
 	got := resources.DeclaredTopology(tunedCluster())
 
 	coordinatorFQDN := func(ordinal int) string {
@@ -292,35 +292,35 @@ func TestDeclaredTopologyPortsAndClusterDomain(t *testing.T) {
 		Coordinators: []memgraph.CoordinatorSpec{
 			{
 				ID:                1,
-				BoltServer:        coordinatorFQDN(0) + ":7777",
-				CoordinatorServer: coordinatorFQDN(0) + ":12001",
-				ManagementServer:  coordinatorFQDN(0) + ":10001",
+				BoltServer:        endpoint(coordinatorFQDN(0), memgraphcomv1alpha1.BoltPort),
+				CoordinatorServer: endpoint(coordinatorFQDN(0), memgraphcomv1alpha1.CoordinatorPort),
+				ManagementServer:  endpoint(coordinatorFQDN(0), memgraphcomv1alpha1.ManagementPort),
 			},
 			{
 				ID:                2,
-				BoltServer:        coordinatorFQDN(1) + ":7777",
-				CoordinatorServer: coordinatorFQDN(1) + ":12001",
-				ManagementServer:  coordinatorFQDN(1) + ":10001",
+				BoltServer:        endpoint(coordinatorFQDN(1), memgraphcomv1alpha1.BoltPort),
+				CoordinatorServer: endpoint(coordinatorFQDN(1), memgraphcomv1alpha1.CoordinatorPort),
+				ManagementServer:  endpoint(coordinatorFQDN(1), memgraphcomv1alpha1.ManagementPort),
 			},
 			{
 				ID:                3,
-				BoltServer:        coordinatorFQDN(2) + ":7777",
-				CoordinatorServer: coordinatorFQDN(2) + ":12001",
-				ManagementServer:  coordinatorFQDN(2) + ":10001",
+				BoltServer:        endpoint(coordinatorFQDN(2), memgraphcomv1alpha1.BoltPort),
+				CoordinatorServer: endpoint(coordinatorFQDN(2), memgraphcomv1alpha1.CoordinatorPort),
+				ManagementServer:  endpoint(coordinatorFQDN(2), memgraphcomv1alpha1.ManagementPort),
 			},
 		},
 		DataInstances: []memgraph.DataInstanceSpec{
 			{
 				Name:              "instance_0",
-				BoltServer:        dataFQDN(0) + ":7777",
-				ManagementServer:  dataFQDN(0) + ":10001",
-				ReplicationServer: dataFQDN(0) + ":20001",
+				BoltServer:        endpoint(dataFQDN(0), memgraphcomv1alpha1.BoltPort),
+				ManagementServer:  endpoint(dataFQDN(0), memgraphcomv1alpha1.ManagementPort),
+				ReplicationServer: endpoint(dataFQDN(0), memgraphcomv1alpha1.ReplicationPort),
 			},
 			{
 				Name:              secondDataInstance,
-				BoltServer:        dataFQDN(1) + ":7777",
-				ManagementServer:  dataFQDN(1) + ":10001",
-				ReplicationServer: dataFQDN(1) + ":20001",
+				BoltServer:        endpoint(dataFQDN(1), memgraphcomv1alpha1.BoltPort),
+				ManagementServer:  endpoint(dataFQDN(1), memgraphcomv1alpha1.ManagementPort),
+				ReplicationServer: endpoint(dataFQDN(1), memgraphcomv1alpha1.ReplicationPort),
 			},
 		},
 	}
@@ -330,9 +330,9 @@ func TestDeclaredTopologyPortsAndClusterDomain(t *testing.T) {
 	}
 }
 
-// The coordinator pods must advertise the same non-default identity the
-// registration topology declares for them, otherwise the Raft cluster and the
-// registrations disagree about who is who.
+// The coordinator pods must advertise the same configured domain and fixed
+// port the registration topology declares for them, otherwise the Raft cluster
+// and registrations disagree about who is who.
 func TestDeclaredTopologyMatchesTunedCoordinatorStartScript(t *testing.T) {
 	cluster := tunedCluster()
 	topology := resources.DeclaredTopology(cluster)
@@ -343,11 +343,11 @@ func TestDeclaredTopologyMatchesTunedCoordinatorStartScript(t *testing.T) {
 	if !strings.Contains(script, `--coordinator-hostname="${POD_NAME}.`+suffix+`"`) {
 		t.Errorf("coordinator start script does not advertise the configured cluster domain:\n%s", script)
 	}
-	if !strings.Contains(script, "--coordinator-port=12001") {
-		t.Errorf("coordinator start script does not listen on the configured coordinator port:\n%s", script)
+	if !strings.Contains(script, fmt.Sprintf("--coordinator-port=%d", memgraphcomv1alpha1.CoordinatorPort)) {
+		t.Errorf("coordinator start script does not listen on the fixed coordinator port:\n%s", script)
 	}
 	for i, coordinator := range topology.Coordinators {
-		wantHost := fmt.Sprintf("%s-%d.%s:12001", coordinatorName, i, suffix)
+		wantHost := fmt.Sprintf("%s-%d.%s:%d", coordinatorName, i, suffix, memgraphcomv1alpha1.CoordinatorPort)
 		if coordinator.CoordinatorServer != wantHost {
 			t.Errorf("coordinator %d advertises %q, want %q", coordinator.ID, coordinator.CoordinatorServer, wantHost)
 		}

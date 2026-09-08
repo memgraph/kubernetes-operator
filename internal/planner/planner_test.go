@@ -112,9 +112,9 @@ func coordinatorSpec(id int32) memgraph.CoordinatorSpec {
 	host := fmt.Sprintf("example-coordinator-%d.example-coordinator.default.svc.cluster.local", id-1)
 	return memgraph.CoordinatorSpec{
 		ID:                id,
-		BoltServer:        host + ":7687",
-		CoordinatorServer: host + ":12000",
-		ManagementServer:  host + ":10000",
+		BoltServer:        fmt.Sprintf("%s:%d", host, memgraphcomv1alpha1.BoltPort),
+		CoordinatorServer: fmt.Sprintf("%s:%d", host, memgraphcomv1alpha1.CoordinatorPort),
+		ManagementServer:  fmt.Sprintf("%s:%d", host, memgraphcomv1alpha1.ManagementPort),
 	}
 }
 
@@ -122,9 +122,9 @@ func dataInstanceSpec(i int) memgraph.DataInstanceSpec {
 	host := fmt.Sprintf("example-data-%d.example-data.default.svc.cluster.local", i)
 	return memgraph.DataInstanceSpec{
 		Name:              fmt.Sprintf("instance_%d", i),
-		BoltServer:        host + ":7687",
-		ManagementServer:  host + ":10000",
-		ReplicationServer: host + ":20000",
+		BoltServer:        fmt.Sprintf("%s:%d", host, memgraphcomv1alpha1.BoltPort),
+		ManagementServer:  fmt.Sprintf("%s:%d", host, memgraphcomv1alpha1.ManagementPort),
+		ReplicationServer: fmt.Sprintf("%s:%d", host, memgraphcomv1alpha1.ReplicationPort),
 	}
 }
 
@@ -1106,23 +1106,16 @@ func TestRegistered(t *testing.T) {
 	}
 }
 
-// TestPlanUsesConfiguredPortsAndClusterDomain plans a fresh bootstrap over a
-// topology derived from a CR with non-default ports and cluster domain: the
-// registration commands must carry exactly those addresses, because they are
-// what the coordinators will use to reach every instance.
-func TestPlanUsesConfiguredPortsAndClusterDomain(t *testing.T) {
+// TestPlanUsesFixedPortsAndConfiguredClusterDomain plans a fresh bootstrap
+// whose registration commands carry the fixed ports and configured domain that
+// the coordinators use to reach every instance.
+func TestPlanUsesFixedPortsAndConfiguredClusterDomain(t *testing.T) {
 	cluster := &memgraphcomv1alpha1.MemgraphCluster{
 		ObjectMeta: metav1.ObjectMeta{Name: "example", Namespace: "memgraph-test"},
 		Spec: memgraphcomv1alpha1.MemgraphClusterSpec{
 			Coordinators:  ptr.To(int32(1)),
 			DataInstances: ptr.To(int32(1)),
 			ClusterDomain: "k8s.example.com",
-			Ports: memgraphcomv1alpha1.PortsSpec{
-				BoltPort:        ptr.To(int32(7777)),
-				ManagementPort:  ptr.To(int32(10001)),
-				ReplicationPort: ptr.To(int32(20001)),
-				CoordinatorPort: ptr.To(int32(12001)),
-			},
 		},
 	}
 
@@ -1131,15 +1124,15 @@ func TestPlanUsesConfiguredPortsAndClusterDomain(t *testing.T) {
 	want := []planner.Command{
 		planner.AddCoordinator{Coordinator: memgraph.CoordinatorSpec{
 			ID:                1,
-			BoltServer:        coordinatorHost + ":7777",
-			CoordinatorServer: coordinatorHost + ":12001",
-			ManagementServer:  coordinatorHost + ":10001",
+			BoltServer:        fmt.Sprintf("%s:%d", coordinatorHost, memgraphcomv1alpha1.BoltPort),
+			CoordinatorServer: fmt.Sprintf("%s:%d", coordinatorHost, memgraphcomv1alpha1.CoordinatorPort),
+			ManagementServer:  fmt.Sprintf("%s:%d", coordinatorHost, memgraphcomv1alpha1.ManagementPort),
 		}},
 		planner.RegisterInstance{Instance: memgraph.DataInstanceSpec{
 			Name:              firstInstance,
-			BoltServer:        dataHost + ":7777",
-			ManagementServer:  dataHost + ":10001",
-			ReplicationServer: dataHost + ":20001",
+			BoltServer:        fmt.Sprintf("%s:%d", dataHost, memgraphcomv1alpha1.BoltPort),
+			ManagementServer:  fmt.Sprintf("%s:%d", dataHost, memgraphcomv1alpha1.ManagementPort),
+			ReplicationServer: fmt.Sprintf("%s:%d", dataHost, memgraphcomv1alpha1.ReplicationPort),
 		}},
 		promote(firstInstance),
 	}
@@ -1150,17 +1143,15 @@ func TestPlanUsesConfiguredPortsAndClusterDomain(t *testing.T) {
 	}
 }
 
-// A cluster already registered on the configured addresses is converged: the
-// planner must not re-issue registrations just because the ports are not the
-// defaults.
-func TestPlanConvergedOnConfiguredPorts(t *testing.T) {
+// A cluster already registered on the fixed addresses is converged: the
+// planner must not re-issue registrations.
+func TestPlanConvergedOnFixedPorts(t *testing.T) {
 	cluster := &memgraphcomv1alpha1.MemgraphCluster{
 		ObjectMeta: metav1.ObjectMeta{Name: "example", Namespace: "memgraph-test"},
 		Spec: memgraphcomv1alpha1.MemgraphClusterSpec{
 			Coordinators:  ptr.To(int32(1)),
 			DataInstances: ptr.To(int32(1)),
 			ClusterDomain: "k8s.example.com",
-			Ports:         memgraphcomv1alpha1.PortsSpec{BoltPort: ptr.To(int32(7777))},
 		},
 	}
 	declared := resources.DeclaredTopology(cluster)

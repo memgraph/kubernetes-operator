@@ -374,8 +374,8 @@ var _ = Describe("MemgraphCluster Controller", func() {
 		const resourceName = "mgc-bootstrap"
 
 		coordinatorAddress := func(ordinal int) string {
-			return fmt.Sprintf("%s-coordinator-%d.%s-coordinator.%s.svc.cluster.local:7687",
-				resourceName, ordinal, resourceName, resourceNamespace)
+			return fmt.Sprintf("%s-coordinator-%d.%s-coordinator.%s.svc.cluster.local:%d",
+				resourceName, ordinal, resourceName, resourceNamespace, memgraphcomv1alpha1.BoltPort)
 		}
 
 		// observedCoordinator reports the coordinator with the given 1-based
@@ -637,8 +637,8 @@ var _ = Describe("MemgraphCluster Controller", func() {
 		const resourceName = "mgc-scale"
 
 		coordinatorAddress := func(ordinal int) string {
-			return fmt.Sprintf("%s-coordinator-%d.%s-coordinator.%s.svc.cluster.local:7687",
-				resourceName, ordinal, resourceName, resourceNamespace)
+			return fmt.Sprintf("%s-coordinator-%d.%s-coordinator.%s.svc.cluster.local:%d",
+				resourceName, ordinal, resourceName, resourceNamespace, memgraphcomv1alpha1.BoltPort)
 		}
 
 		// convergedWith is the fully registered 3-coordinator topology with the given
@@ -1208,8 +1208,8 @@ var _ = Describe("MemgraphCluster Controller", func() {
 		observedCoordinator := func(id int, role string) memgraph.Instance {
 			return memgraph.Instance{
 				Name: fmt.Sprintf("coordinator_%d", id),
-				BoltServer: fmt.Sprintf("%s-coordinator-%d.%s-coordinator.%s.svc.cluster.local:7687",
-					resourceName, id-1, resourceName, resourceNamespace),
+				BoltServer: fmt.Sprintf("%s-coordinator-%d.%s-coordinator.%s.svc.cluster.local:%d",
+					resourceName, id-1, resourceName, resourceNamespace, memgraphcomv1alpha1.BoltPort),
 				Health: "up",
 				Role:   role,
 			}
@@ -1514,8 +1514,12 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			host := fmt.Sprintf("%s-coordinator-%d.%s-coordinator.%s.svc.cluster.local",
 				resourceName, id-1, resourceName, resourceNamespace)
 			return memgraph.Instance{
-				Name: fmt.Sprintf("coordinator_%d", id), BoltServer: host + ":7687",
-				CoordinatorServer: host + ":12000", ManagementServer: host + ":10000",
+				Name:       fmt.Sprintf("coordinator_%d", id),
+				BoltServer: fmt.Sprintf("%s:%d", host, memgraphcomv1alpha1.BoltPort),
+				CoordinatorServer: fmt.Sprintf("%s:%d", host,
+					memgraphcomv1alpha1.CoordinatorPort),
+				ManagementServer: fmt.Sprintf("%s:%d", host,
+					memgraphcomv1alpha1.ManagementPort),
 				Health: "up", Role: role,
 			}
 		}

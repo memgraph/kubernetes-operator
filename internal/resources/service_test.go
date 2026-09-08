@@ -23,6 +23,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	memgraphcomv1alpha1 "github.com/memgraph/kubernetes-operator/api/v1alpha1"
 	"github.com/memgraph/kubernetes-operator/internal/resources"
 )
 
@@ -39,9 +40,9 @@ func TestCoordinatorHeadlessService(t *testing.T) {
 			Selector:                 expectedSelectorLabels(coordinatorComponent),
 			PublishNotReadyAddresses: true,
 			Ports: []corev1.ServicePort{
-				{Name: boltPortName, Port: 7687},
-				{Name: managementPortName, Port: 10000},
-				{Name: coordinatorComponent, Port: 12000},
+				{Name: boltPortName, Port: memgraphcomv1alpha1.BoltPort},
+				{Name: managementPortName, Port: memgraphcomv1alpha1.ManagementPort},
+				{Name: coordinatorComponent, Port: memgraphcomv1alpha1.CoordinatorPort},
 			},
 		},
 	}
@@ -65,9 +66,9 @@ func TestDataHeadlessService(t *testing.T) {
 			Selector:                 expectedSelectorLabels(dataComponent),
 			PublishNotReadyAddresses: true,
 			Ports: []corev1.ServicePort{
-				{Name: boltPortName, Port: 7687},
-				{Name: managementPortName, Port: 10000},
-				{Name: replicationPortName, Port: 20000},
+				{Name: boltPortName, Port: memgraphcomv1alpha1.BoltPort},
+				{Name: managementPortName, Port: memgraphcomv1alpha1.ManagementPort},
+				{Name: replicationPortName, Port: memgraphcomv1alpha1.ReplicationPort},
 			},
 		},
 	}
@@ -78,7 +79,7 @@ func TestDataHeadlessService(t *testing.T) {
 	}
 }
 
-// TestHeadlessServicePortsAndLabels asserts the Services publish the configured
+// TestHeadlessServicePortsAndLabels asserts the Services publish the fixed
 // ports — the pods listen on nothing else — and carry the role's custom Service
 // labels while keeping the operator-owned selector.
 func TestHeadlessServicePortsAndLabels(t *testing.T) {
@@ -97,9 +98,9 @@ func TestHeadlessServicePortsAndLabels(t *testing.T) {
 			component: coordinatorComponent,
 			labels:    map[string]string{exposeLabel: "internal"},
 			ports: []corev1.ServicePort{
-				{Name: boltPortName, Port: customBoltPort},
-				{Name: managementPortName, Port: customManagementPort},
-				{Name: coordinatorComponent, Port: customCoordinatorPort},
+				{Name: boltPortName, Port: memgraphcomv1alpha1.BoltPort},
+				{Name: managementPortName, Port: memgraphcomv1alpha1.ManagementPort},
+				{Name: coordinatorComponent, Port: memgraphcomv1alpha1.CoordinatorPort},
 			},
 		},
 		{
@@ -108,9 +109,9 @@ func TestHeadlessServicePortsAndLabels(t *testing.T) {
 			component: dataComponent,
 			labels:    map[string]string{exposeLabel: "bolt"},
 			ports: []corev1.ServicePort{
-				{Name: boltPortName, Port: customBoltPort},
-				{Name: managementPortName, Port: customManagementPort},
-				{Name: replicationPortName, Port: customReplicationPort},
+				{Name: boltPortName, Port: memgraphcomv1alpha1.BoltPort},
+				{Name: managementPortName, Port: memgraphcomv1alpha1.ManagementPort},
+				{Name: replicationPortName, Port: memgraphcomv1alpha1.ReplicationPort},
 			},
 		},
 	}

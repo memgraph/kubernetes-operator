@@ -30,9 +30,9 @@ func CoordinatorHeadlessService(cluster *memgraphcomv1alpha1.MemgraphCluster) *c
 
 	return headlessService(cluster, coordinatorComponent, CoordinatorName(cluster),
 		spec.coordinatorRole.serviceLabels, []corev1.ServicePort{
-			{Name: boltPortName, Port: spec.ports.bolt},
-			{Name: managementPortName, Port: spec.ports.management},
-			{Name: coordinatorPortName, Port: spec.ports.coordinator},
+			{Name: boltPortName, Port: memgraphcomv1alpha1.BoltPort},
+			{Name: managementPortName, Port: memgraphcomv1alpha1.ManagementPort},
+			{Name: coordinatorPortName, Port: memgraphcomv1alpha1.CoordinatorPort},
 		})
 }
 
@@ -43,9 +43,9 @@ func DataHeadlessService(cluster *memgraphcomv1alpha1.MemgraphCluster) *corev1.S
 
 	return headlessService(cluster, dataComponent, DataName(cluster),
 		spec.dataRole.serviceLabels, []corev1.ServicePort{
-			{Name: boltPortName, Port: spec.ports.bolt},
-			{Name: managementPortName, Port: spec.ports.management},
-			{Name: replicationPortName, Port: spec.ports.replication},
+			{Name: boltPortName, Port: memgraphcomv1alpha1.BoltPort},
+			{Name: managementPortName, Port: memgraphcomv1alpha1.ManagementPort},
+			{Name: replicationPortName, Port: memgraphcomv1alpha1.ReplicationPort},
 		})
 }
 

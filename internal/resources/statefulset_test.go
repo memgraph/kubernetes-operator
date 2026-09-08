@@ -99,6 +99,10 @@ func dataStatefulSet(cluster *memgraphcomv1alpha1.MemgraphCluster) *appsv1.State
 	return resources.DataStatefulSet(cluster, resources.DeclaredDataInstances(cluster))
 }
 
+func endpoint(host string, port int32) string {
+	return fmt.Sprintf("%s:%d", host, port)
+}
+
 func specifiedCluster() *memgraphcomv1alpha1.MemgraphCluster {
 	return &memgraphcomv1alpha1.MemgraphCluster{
 		ObjectMeta: metav1.ObjectMeta{Name: clusterName, Namespace: testNamespace},
@@ -119,29 +123,14 @@ func specifiedCluster() *memgraphcomv1alpha1.MemgraphCluster {
 	}
 }
 
-// Non-default ports and cluster domain shared by the tuning tests. Every one
-// differs from its default, so a knob that fails to propagate cannot hide
-// behind a value that happened to be right anyway.
-const (
-	customBoltPort        int32 = 7777
-	customManagementPort  int32 = 10001
-	customReplicationPort int32 = 20001
-	customCoordinatorPort int32 = 12001
-
-	customClusterDomain = "k8s.example.com"
-)
+// Non-default cluster domain shared by the tuning tests.
+const customClusterDomain = "k8s.example.com"
 
 // tunedCluster returns a MemgraphCluster with every pod-tuning knob set away
 // from its default, so the golden tests can pin what each one lands on.
 func tunedCluster() *memgraphcomv1alpha1.MemgraphCluster {
 	cluster := minimalCluster()
 	cluster.Spec.ClusterDomain = customClusterDomain
-	cluster.Spec.Ports = memgraphcomv1alpha1.PortsSpec{
-		BoltPort:        ptr.To(customBoltPort),
-		ManagementPort:  ptr.To(customManagementPort),
-		ReplicationPort: ptr.To(customReplicationPort),
-		CoordinatorPort: ptr.To(customCoordinatorPort),
-	}
 	cluster.Spec.Probes = memgraphcomv1alpha1.ProbesSpec{
 		Coordinators: memgraphcomv1alpha1.RoleProbesSpec{
 			StartupProbe: memgraphcomv1alpha1.ProbeSpec{FailureThreshold: ptr.To(int32(30))},
@@ -367,12 +356,12 @@ func expectedSelectorLabels(component string) map[string]string {
 	}
 }
 
-const expectedCoordinatorScript = `ordinal="${POD_NAME##*-}"
+var expectedCoordinatorScript = fmt.Sprintf(`ordinal="${POD_NAME##*-}"
 exec /usr/lib/memgraph/memgraph \
   --coordinator-id="$((ordinal + 1))" \
   --coordinator-hostname="${POD_NAME}.example-coordinator.memgraph-test.svc.cluster.local" \
-  --coordinator-port=12000 \
-  "$@"`
+  --coordinator-port=%d \
+  "$@"`, memgraphcomv1alpha1.CoordinatorPort)
 
 func TestCoordinatorStatefulSetDefaults(t *testing.T) {
 	want := &appsv1.StatefulSet{
@@ -408,7 +397,8 @@ func TestCoordinatorStatefulSetDefaults(t *testing.T) {
 						Image:           defaultImageRef,
 						ImagePullPolicy: corev1.PullIfNotPresent,
 						Command:         expectedCommand(expectedCoordinatorScript),
-						Args:            expectedCoordinatorArgs(7687, 10000, logFilePath),
+						Args: expectedCoordinatorArgs(memgraphcomv1alpha1.BoltPort,
+							memgraphcomv1alpha1.ManagementPort, logFilePath),
 						Env: append([]corev1.EnvVar{{
 							Name: "POD_NAME",
 							ValueFrom: &corev1.EnvVarSource{
@@ -416,13 +406,13 @@ func TestCoordinatorStatefulSetDefaults(t *testing.T) {
 							},
 						}}, licenseEnv("memgraph-secrets", "MEMGRAPH_ENTERPRISE_LICENSE", "MEMGRAPH_ORGANIZATION_NAME")...),
 						Ports: []corev1.ContainerPort{
-							{Name: boltPortName, ContainerPort: 7687},
-							{Name: managementPortName, ContainerPort: 10000},
-							{Name: coordinatorComponent, ContainerPort: 12000},
+							{Name: boltPortName, ContainerPort: memgraphcomv1alpha1.BoltPort},
+							{Name: managementPortName, ContainerPort: memgraphcomv1alpha1.ManagementPort},
+							{Name: coordinatorComponent, ContainerPort: memgraphcomv1alpha1.CoordinatorPort},
 						},
-						StartupProbe:    tcpProbe(12000, 20),
-						ReadinessProbe:  tcpProbe(12000, 20),
-						LivenessProbe:   tcpProbe(12000, 20),
+						StartupProbe:    tcpProbe(memgraphcomv1alpha1.CoordinatorPort, 20),
+						ReadinessProbe:  tcpProbe(memgraphcomv1alpha1.CoordinatorPort, 20),
+						LivenessProbe:   tcpProbe(memgraphcomv1alpha1.CoordinatorPort, 20),
 						VolumeMounts:    expectedVolumeMounts(),
 						SecurityContext: expectedContainerSecurityContext(),
 					}},
@@ -470,16 +460,17 @@ func TestDataStatefulSetDefaults(t *testing.T) {
 						Name:            memgraphName,
 						Image:           defaultImageRef,
 						ImagePullPolicy: corev1.PullIfNotPresent,
-						Args:            expectedArgs(7687, 10000, logFilePath),
-						Env:             licenseEnv("memgraph-secrets", "MEMGRAPH_ENTERPRISE_LICENSE", "MEMGRAPH_ORGANIZATION_NAME"),
+						Args: expectedArgs(memgraphcomv1alpha1.BoltPort,
+							memgraphcomv1alpha1.ManagementPort, logFilePath),
+						Env: licenseEnv("memgraph-secrets", "MEMGRAPH_ENTERPRISE_LICENSE", "MEMGRAPH_ORGANIZATION_NAME"),
 						Ports: []corev1.ContainerPort{
-							{Name: boltPortName, ContainerPort: 7687},
-							{Name: managementPortName, ContainerPort: 10000},
-							{Name: replicationPortName, ContainerPort: 20000},
+							{Name: boltPortName, ContainerPort: memgraphcomv1alpha1.BoltPort},
+							{Name: managementPortName, ContainerPort: memgraphcomv1alpha1.ManagementPort},
+							{Name: replicationPortName, ContainerPort: memgraphcomv1alpha1.ReplicationPort},
 						},
-						StartupProbe:    tcpProbe(7687, 1440),
-						ReadinessProbe:  tcpProbe(7687, 20),
-						LivenessProbe:   tcpProbe(7687, 20),
+						StartupProbe:    tcpProbe(memgraphcomv1alpha1.BoltPort, 1440),
+						ReadinessProbe:  tcpProbe(memgraphcomv1alpha1.BoltPort, 20),
+						LivenessProbe:   tcpProbe(memgraphcomv1alpha1.BoltPort, 20),
 						VolumeMounts:    expectedVolumeMounts(),
 						SecurityContext: expectedContainerSecurityContext(),
 					}},
@@ -665,7 +656,8 @@ func TestStatefulSetWithoutLogStorageClaim(t *testing.T) {
 		if diff := cmp.Diff(wantCommand, container.Command); diff != "" {
 			t.Errorf("start script mismatch (-want +got):\n%s", diff)
 		}
-		wantArgs := expectedCoordinatorArgs(7687, 10000, "")
+		wantArgs := expectedCoordinatorArgs(memgraphcomv1alpha1.BoltPort,
+			memgraphcomv1alpha1.ManagementPort, "")
 		if diff := cmp.Diff(wantArgs, container.Args); diff != "" {
 			t.Errorf("args mismatch (-want +got):\n%s", diff)
 		}
@@ -987,37 +979,37 @@ func TestStatefulSetRetentionPolicy(t *testing.T) {
 }
 
 // The coordinator start script derives per-pod identity at runtime, so the
-// configured coordinator port and cluster domain have to be baked into it —
-// this is the same identity the operator registers with the cluster.
-const expectedTunedCoordinatorScript = `ordinal="${POD_NAME##*-}"
+// fixed coordinator port and configured cluster domain have to be baked into
+// it — this is the same identity the operator registers with the cluster.
+var expectedTunedCoordinatorScript = fmt.Sprintf(`ordinal="${POD_NAME##*-}"
 exec /usr/lib/memgraph/memgraph \
   --coordinator-id="$((ordinal + 1))" \
   --coordinator-hostname="${POD_NAME}.example-coordinator.memgraph-test.svc.k8s.example.com" \
-  --coordinator-port=12001 \
-  "$@"`
+  --coordinator-port=%d \
+  "$@"`, memgraphcomv1alpha1.CoordinatorPort)
 
-// The remaining flags — the configured ports among them — reach the wrapper as
+// The remaining flags reach the wrapper as
 // container arguments, which is what keeps a value with whitespace or shell
 // metacharacters from being re-parsed by the shell. spec.extraArgs.coordinators
 // comes last so it wins.
 func expectedTunedCoordinatorArgs() []string {
-	return expectedCoordinatorArgs(customBoltPort, customManagementPort, logFilePath, "--log-level=WARNING")
+	return expectedCoordinatorArgs(memgraphcomv1alpha1.BoltPort, memgraphcomv1alpha1.ManagementPort,
+		logFilePath, "--log-level=WARNING")
 }
 
-// TestStatefulSetPortsAndClusterDomain pins every place a configured port or
-// cluster domain has to surface: the container ports, the flags Memgraph is
-// started with, the ports the probes dial, and the coordinator's advertised
-// hostname.
-func TestStatefulSetPortsAndClusterDomain(t *testing.T) {
+// TestStatefulSetFixedPortsAndClusterDomain pins the fixed ports and configured
+// cluster domain everywhere they surface: container ports, Memgraph flags,
+// probes, and the coordinator's advertised hostname.
+func TestStatefulSetFixedPortsAndClusterDomain(t *testing.T) {
 	cluster := tunedCluster()
 
 	t.Run(coordinatorComponent, func(t *testing.T) {
 		container := coordinatorStatefulSet(cluster).Spec.Template.Spec.Containers[0]
 
 		wantPorts := []corev1.ContainerPort{
-			{Name: boltPortName, ContainerPort: customBoltPort},
-			{Name: managementPortName, ContainerPort: customManagementPort},
-			{Name: coordinatorComponent, ContainerPort: customCoordinatorPort},
+			{Name: boltPortName, ContainerPort: memgraphcomv1alpha1.BoltPort},
+			{Name: managementPortName, ContainerPort: memgraphcomv1alpha1.ManagementPort},
+			{Name: coordinatorComponent, ContainerPort: memgraphcomv1alpha1.CoordinatorPort},
 		}
 		if diff := cmp.Diff(wantPorts, container.Ports); diff != "" {
 			t.Errorf("container ports mismatch (-want +got):\n%s", diff)
@@ -1034,9 +1026,9 @@ func TestStatefulSetPortsAndClusterDomain(t *testing.T) {
 			"readiness": container.ReadinessProbe,
 			"liveness":  container.LivenessProbe,
 		} {
-			if got := probe.TCPSocket.Port; got != intstr.FromInt32(customCoordinatorPort) {
-				t.Errorf("%s probe dials %v, want the configured coordinator port %d",
-					name, got, customCoordinatorPort)
+			if got := probe.TCPSocket.Port; got != intstr.FromInt32(memgraphcomv1alpha1.CoordinatorPort) {
+				t.Errorf("%s probe dials %v, want the fixed coordinator port %d",
+					name, got, memgraphcomv1alpha1.CoordinatorPort)
 			}
 		}
 	})
@@ -1045,14 +1037,14 @@ func TestStatefulSetPortsAndClusterDomain(t *testing.T) {
 		container := dataStatefulSet(cluster).Spec.Template.Spec.Containers[0]
 
 		wantPorts := []corev1.ContainerPort{
-			{Name: boltPortName, ContainerPort: customBoltPort},
-			{Name: managementPortName, ContainerPort: customManagementPort},
-			{Name: replicationPortName, ContainerPort: customReplicationPort},
+			{Name: boltPortName, ContainerPort: memgraphcomv1alpha1.BoltPort},
+			{Name: managementPortName, ContainerPort: memgraphcomv1alpha1.ManagementPort},
+			{Name: replicationPortName, ContainerPort: memgraphcomv1alpha1.ReplicationPort},
 		}
 		if diff := cmp.Diff(wantPorts, container.Ports); diff != "" {
 			t.Errorf("container ports mismatch (-want +got):\n%s", diff)
 		}
-		wantArgs := expectedArgs(customBoltPort, customManagementPort, logFilePath,
+		wantArgs := expectedArgs(memgraphcomv1alpha1.BoltPort, memgraphcomv1alpha1.ManagementPort, logFilePath,
 			"--storage-snapshot-on-exit=true", "--memory-limit=2048")
 		if diff := cmp.Diff(wantArgs, container.Args); diff != "" {
 			t.Errorf("args mismatch (-want +got):\n%s", diff)
@@ -1062,8 +1054,9 @@ func TestStatefulSetPortsAndClusterDomain(t *testing.T) {
 			"readiness": container.ReadinessProbe,
 			"liveness":  container.LivenessProbe,
 		} {
-			if got := probe.TCPSocket.Port; got != intstr.FromInt32(customBoltPort) {
-				t.Errorf("%s probe dials %v, want the configured bolt port %d", name, got, customBoltPort)
+			if got := probe.TCPSocket.Port; got != intstr.FromInt32(memgraphcomv1alpha1.BoltPort) {
+				t.Errorf("%s probe dials %v, want the fixed bolt port %d",
+					name, got, memgraphcomv1alpha1.BoltPort)
 			}
 		}
 	})
@@ -1120,17 +1113,17 @@ func TestStatefulSetProbeOverrides(t *testing.T) {
 			name: coordinatorComponent,
 			sts:  coordinatorStatefulSet(cluster),
 			// Only the failure threshold was raised, so the timings default.
-			startup: tunedTCPProbe(customCoordinatorPort, 30, 10, 5),
+			startup: tunedTCPProbe(memgraphcomv1alpha1.CoordinatorPort, 30, 10, 5),
 			// Timings tightened, failure threshold left at its default.
-			readiness: tunedTCPProbe(customCoordinatorPort, 20, 3, 2),
-			liveness:  tunedTCPProbe(customCoordinatorPort, 20, 10, 5),
+			readiness: tunedTCPProbe(memgraphcomv1alpha1.CoordinatorPort, 20, 3, 2),
+			liveness:  tunedTCPProbe(memgraphcomv1alpha1.CoordinatorPort, 20, 10, 5),
 		},
 		{
 			name:      dataComponent,
 			sts:       dataStatefulSet(cluster),
-			startup:   tunedTCPProbe(customBoltPort, 4320, 15, 10),
-			readiness: tunedTCPProbe(customBoltPort, 20, 10, 5),
-			liveness:  tunedTCPProbe(customBoltPort, 6, 10, 5),
+			startup:   tunedTCPProbe(memgraphcomv1alpha1.BoltPort, 4320, 15, 10),
+			readiness: tunedTCPProbe(memgraphcomv1alpha1.BoltPort, 20, 10, 5),
+			liveness:  tunedTCPProbe(memgraphcomv1alpha1.BoltPort, 6, 10, 5),
 		},
 	}
 	for _, tc := range tests {

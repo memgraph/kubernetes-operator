@@ -356,11 +356,11 @@ spec:
                     maxItems: 64
                     type: array
                     x-kubernetes-validations:
-                    - message: extraArgs must not set a port or the coordinator identity
-                        the operator derives (bolt-port, management-port, coordinator-id,
-                        coordinator-hostname, coordinator-port), in any spelling gflags
-                        accepts; configure ports through spec.ports
-                      rule: self.all(a, !a.replace('-', '_').matches('^_{1,2}(bolt_port|management_port|coordinator_id|coordinator_hostname|coordinator_port)($|[=
+                    - message: extraArgs must not set a fixed port or the coordinator
+                        identity the operator derives (bolt-port, management-port,
+                        replication-port, coordinator-id, coordinator-hostname, coordinator-port),
+                        in any spelling gflags accepts
+                      rule: self.all(a, !a.replace('-', '_').matches('^_{1,2}(bolt_port|management_port|replication_port|coordinator_id|coordinator_hostname|coordinator_port)($|[=
                         ])'))
                   data:
                     description: data are appended to every data instance pod's Memgraph
@@ -372,11 +372,11 @@ spec:
                     maxItems: 64
                     type: array
                     x-kubernetes-validations:
-                    - message: extraArgs must not set a port or the coordinator identity
-                        the operator derives (bolt-port, management-port, coordinator-id,
-                        coordinator-hostname, coordinator-port), in any spelling gflags
-                        accepts; configure ports through spec.ports
-                      rule: self.all(a, !a.replace('-', '_').matches('^_{1,2}(bolt_port|management_port|coordinator_id|coordinator_hostname|coordinator_port)($|[=
+                    - message: extraArgs must not set a fixed port or the coordinator
+                        identity the operator derives (bolt-port, management-port,
+                        replication-port, coordinator-id, coordinator-hostname, coordinator-port),
+                        in any spelling gflags accepts
+                      rule: self.all(a, !a.replace('-', '_').matches('^_{1,2}(bolt_port|management_port|replication_port|coordinator_id|coordinator_hostname|coordinator_port)($|[=
                         ])'))
                 type: object
               extraEnv:
@@ -705,53 +705,6 @@ spec:
                         type: object
                     type: object
                 type: object
-              ports:
-                default: {}
-                description: ports configures the internal ports Memgraph listens
-                  on.
-                properties:
-                  boltPort:
-                    default: 7687
-                    description: |-
-                      boltPort is the port Memgraph serves the Bolt protocol on. Clients and
-                      the operator's own management queries both use it.
-                    format: int32
-                    maximum: 65535
-                    minimum: 1
-                    type: integer
-                  coordinatorPort:
-                    default: 12000
-                    description: coordinatorPort is the port coordinators run their
-                      Raft protocol on.
-                    format: int32
-                    maximum: 65535
-                    minimum: 1
-                    type: integer
-                  managementPort:
-                    default: 10000
-                    description: managementPort is the port instances exchange HA
-                      management traffic on.
-                    format: int32
-                    maximum: 65535
-                    minimum: 1
-                    type: integer
-                  replicationPort:
-                    default: 20000
-                    description: replicationPort is the port data instances replicate
-                      over.
-                    format: int32
-                    maximum: 65535
-                    minimum: 1
-                    type: integer
-                type: object
-                x-kubernetes-validations:
-                - message: boltPort, managementPort, replicationPort and coordinatorPort
-                    must all be different ports
-                  rule: '!(has(self.boltPort) && has(self.managementPort) && has(self.replicationPort)
-                    && has(self.coordinatorPort)) || [self.boltPort, self.managementPort,
-                    self.replicationPort, self.coordinatorPort].all(p, [self.boltPort,
-                    self.managementPort, self.replicationPort, self.coordinatorPort].exists_one(q,
-                    q == p))'
               probes:
                 description: probes tunes the probe timings of both roles.
                 properties:

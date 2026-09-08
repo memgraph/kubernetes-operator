@@ -96,7 +96,7 @@ func CoordinatorStatefulSet(
 	// a value carrying whitespace or shell metacharacters is never re-parsed by
 	// the shell. `sh -c` assigns the first operand to $0, so it is a placeholder
 	// name and not a flag.
-	container.Args = append([]string{containerName}, append(commonArgs(spec, role), role.extraArgs...)...)
+	container.Args = append([]string{containerName}, append(commonArgs(role), role.extraArgs...)...)
 	container.Env = append([]corev1.EnvVar{{
 		Name: memgraphcomv1alpha1.EnvPodName,
 		ValueFrom: &corev1.EnvVarSource{
@@ -104,15 +104,15 @@ func CoordinatorStatefulSet(
 		},
 	}}, container.Env...)
 	container.Ports = []corev1.ContainerPort{
-		{Name: boltPortName, ContainerPort: spec.ports.bolt},
-		{Name: managementPortName, ContainerPort: spec.ports.management},
-		{Name: coordinatorPortName, ContainerPort: spec.ports.coordinator},
+		{Name: boltPortName, ContainerPort: memgraphcomv1alpha1.BoltPort},
+		{Name: managementPortName, ContainerPort: memgraphcomv1alpha1.ManagementPort},
+		{Name: coordinatorPortName, ContainerPort: memgraphcomv1alpha1.CoordinatorPort},
 	}
 	// Coordinators are probed on their Raft port: it is the one they serve
 	// even before the Raft cluster has been formed.
-	container.StartupProbe = tcpProbe(spec.ports.coordinator, role.startupProbe)
-	container.ReadinessProbe = tcpProbe(spec.ports.coordinator, role.readinessProbe)
-	container.LivenessProbe = tcpProbe(spec.ports.coordinator, role.livenessProbe)
+	container.StartupProbe = tcpProbe(memgraphcomv1alpha1.CoordinatorPort, role.startupProbe)
+	container.ReadinessProbe = tcpProbe(memgraphcomv1alpha1.CoordinatorPort, role.readinessProbe)
+	container.LivenessProbe = tcpProbe(memgraphcomv1alpha1.CoordinatorPort, role.livenessProbe)
 
 	return statefulSet(cluster, coordinatorComponent, CoordinatorName(cluster), spec, role, replicas, container)
 }
@@ -125,15 +125,15 @@ func DataStatefulSet(cluster *memgraphcomv1alpha1.MemgraphCluster, replicas int3
 	role := spec.dataRole
 
 	container := memgraphContainer(spec, role)
-	container.Args = append(commonArgs(spec, role), role.extraArgs...)
+	container.Args = append(commonArgs(role), role.extraArgs...)
 	container.Ports = []corev1.ContainerPort{
-		{Name: boltPortName, ContainerPort: spec.ports.bolt},
-		{Name: managementPortName, ContainerPort: spec.ports.management},
-		{Name: replicationPortName, ContainerPort: spec.ports.replication},
+		{Name: boltPortName, ContainerPort: memgraphcomv1alpha1.BoltPort},
+		{Name: managementPortName, ContainerPort: memgraphcomv1alpha1.ManagementPort},
+		{Name: replicationPortName, ContainerPort: memgraphcomv1alpha1.ReplicationPort},
 	}
-	container.StartupProbe = tcpProbe(spec.ports.bolt, role.startupProbe)
-	container.ReadinessProbe = tcpProbe(spec.ports.bolt, role.readinessProbe)
-	container.LivenessProbe = tcpProbe(spec.ports.bolt, role.livenessProbe)
+	container.StartupProbe = tcpProbe(memgraphcomv1alpha1.BoltPort, role.startupProbe)
+	container.ReadinessProbe = tcpProbe(memgraphcomv1alpha1.BoltPort, role.readinessProbe)
+	container.LivenessProbe = tcpProbe(memgraphcomv1alpha1.BoltPort, role.livenessProbe)
 
 	return statefulSet(cluster, dataComponent, DataName(cluster), spec, role, replicas, container)
 }
@@ -154,7 +154,7 @@ exec %s \
   --coordinator-id="$((ordinal + 1))" \
   --coordinator-hostname="${POD_NAME}.%s" \
   --coordinator-port=%d \
-  "$@"`, memgraphBinary, fqdnSuffix, spec.ports.coordinator)
+  "$@"`, memgraphBinary, fqdnSuffix, memgraphcomv1alpha1.CoordinatorPort)
 }
 
 // commonArgs are the Memgraph flags shared by both roles, mirroring the HA
@@ -169,14 +169,14 @@ exec %s \
 // resulting path is fatal — so an unmounted log directory on a read-only root
 // filesystem would crash-loop the pod. --also-log-to-stderr keeps the logs in
 // `kubectl logs` either way.
-func commonArgs(spec normalizedSpec, role normalizedRole) []string {
+func commonArgs(role normalizedRole) []string {
 	logDestination := logFile
 	if !role.storage.createLogClaim {
 		logDestination = ""
 	}
 	return []string{
-		fmt.Sprintf("--bolt-port=%d", spec.ports.bolt),
-		fmt.Sprintf("--management-port=%d", spec.ports.management),
+		fmt.Sprintf("--bolt-port=%d", memgraphcomv1alpha1.BoltPort),
+		fmt.Sprintf("--management-port=%d", memgraphcomv1alpha1.ManagementPort),
 		"--data-directory=" + dataDirectory,
 		"--log-level=TRACE",
 		"--also-log-to-stderr",

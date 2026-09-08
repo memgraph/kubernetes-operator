@@ -163,7 +163,7 @@ Uninstall the operator with `helm uninstall memgraph-operator --namespace memgra
 
 ## Configuration
 
-Beyond the quickstart's four fields, v1alpha1 exposes storage (PVC size, access mode, storage class, whether the log claim is created at all, retention) per role, optional core dump collection with an uploader sidecar of your choice per role, resource requests and limits per role, probe timings per role, custom labels on pods, StatefulSets and Services, the internal ports, the cluster domain used in advertised addresses, and a freeform passthrough per role for environment variables, Memgraph flags, and extra volumes and volume mounts.
+Beyond the quickstart's four fields, v1alpha1 exposes storage (PVC size, access mode, storage class, whether the log claim is created at all, retention) per role, optional core dump collection with an uploader sidecar of your choice per role, resource requests and limits per role, probe timings per role, custom labels on pods, StatefulSets and Services, the cluster domain used in advertised addresses, and a freeform passthrough per role for environment variables, Memgraph flags, and extra volumes and volume mounts. Internal ports are fixed: Bolt 7687, management 10000, replication 20000, and coordinator 12000.
 
 [`config/samples/v1alpha1_memgraphcluster.yaml`](config/samples/v1alpha1_memgraphcluster.yaml) spells the full surface out with every default and the reasoning behind it. `kubectl explain mgc.spec --recursive` documents the same fields from the installed CRD.
 

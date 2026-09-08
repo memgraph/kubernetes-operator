@@ -66,17 +66,6 @@ func defaultCoreDumps() memgraphcomv1alpha1.CoreDumpsSpec {
 	}
 }
 
-// defaultPorts are the internal ports as the CRD schema defaults materialize
-// them.
-func defaultPorts() memgraphcomv1alpha1.PortsSpec {
-	return memgraphcomv1alpha1.PortsSpec{
-		BoltPort:        ptr.To(memgraphcomv1alpha1.DefaultBoltPort),
-		ManagementPort:  ptr.To(memgraphcomv1alpha1.DefaultManagementPort),
-		ReplicationPort: ptr.To(memgraphcomv1alpha1.DefaultReplicationPort),
-		CoordinatorPort: ptr.To(memgraphcomv1alpha1.DefaultCoordinatorPort),
-	}
-}
-
 var _ = Describe("MemgraphCluster CRD validation", func() {
 	const resourceNamespace = "default"
 
@@ -153,7 +142,6 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 				},
 				CoreDumps:     defaultCoreDumps(),
 				ClusterDomain: memgraphcomv1alpha1.DefaultClusterDomain,
-				Ports:         defaultPorts(),
 				// Probes, resources, labels and the env/args passthrough have no
 				// schema defaults: the probe timings' defaults depend on the role
 				// and the rest default to "nothing added".
@@ -230,12 +218,6 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 		It("should accept a fully tuned pod configuration", func() {
 			stored := createAccepted("valid-pod-tuning", memgraphcomv1alpha1.MemgraphClusterSpec{
 				ClusterDomain: "k8s.example.com",
-				Ports: memgraphcomv1alpha1.PortsSpec{
-					BoltPort:        ptr.To(int32(7777)),
-					ManagementPort:  ptr.To(int32(10001)),
-					ReplicationPort: ptr.To(int32(20001)),
-					CoordinatorPort: ptr.To(int32(12001)),
-				},
 				Probes: memgraphcomv1alpha1.ProbesSpec{
 					Data: memgraphcomv1alpha1.RoleProbesSpec{
 						StartupProbe: memgraphcomv1alpha1.ProbeSpec{FailureThreshold: ptr.To(int32(4320))},
@@ -261,24 +243,12 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 			})
 
 			Expect(stored.Spec.ClusterDomain).To(Equal("k8s.example.com"))
-			Expect(stored.Spec.Ports.BoltPort).To(HaveValue(Equal(int32(7777))))
 			Expect(stored.Spec.Probes.Data.StartupProbe.FailureThreshold).To(HaveValue(Equal(int32(4320))))
 			Expect(stored.Spec.Probes.Data.ReadinessProbe).To(Equal(memgraphcomv1alpha1.ProbeSpec{}),
 				"an unset probe stays unset; its defaults are resolved by the builders, not the schema")
 			Expect(stored.Spec.ExtraEnv.Data).To(HaveLen(1))
 			Expect(stored.Spec.ExtraArgs.Data).To(ConsistOf(
 				"--storage-snapshot-on-exit=true", "--bolt-num-workers=8"))
-		})
-
-		It("should default the ports a partially specified block leaves out", func() {
-			stored := createAccepted("valid-partial-ports", memgraphcomv1alpha1.MemgraphClusterSpec{
-				Ports: memgraphcomv1alpha1.PortsSpec{BoltPort: ptr.To(int32(7777))},
-			})
-
-			Expect(stored.Spec.Ports.BoltPort).To(HaveValue(Equal(int32(7777))))
-			Expect(stored.Spec.Ports.ManagementPort).To(HaveValue(Equal(memgraphcomv1alpha1.DefaultManagementPort)))
-			Expect(stored.Spec.Ports.ReplicationPort).To(HaveValue(Equal(memgraphcomv1alpha1.DefaultReplicationPort)))
-			Expect(stored.Spec.Ports.CoordinatorPort).To(HaveValue(Equal(memgraphcomv1alpha1.DefaultCoordinatorPort)))
 		})
 
 		It("should accept core dumps with an uploader and default what it leaves out", func() {
@@ -424,23 +394,6 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 					},
 				},
 				`Unsupported value: "ReadWriteSometimes"`),
-			Entry("a port outside the valid range", "invalid-port-range",
-				memgraphcomv1alpha1.MemgraphClusterSpec{
-					Ports: memgraphcomv1alpha1.PortsSpec{BoltPort: ptr.To(int32(70000))},
-				},
-				"should be less than or equal to 65535"),
-			Entry("a port of zero", "invalid-port-zero",
-				memgraphcomv1alpha1.MemgraphClusterSpec{
-					Ports: memgraphcomv1alpha1.PortsSpec{ManagementPort: ptr.To(int32(0))},
-				},
-				"should be greater than or equal to 1"),
-			// Two roles sharing a port number would make the advertised
-			// addresses ambiguous, so it is rejected instead of half-working.
-			Entry("two ports colliding", "invalid-ports-collide",
-				memgraphcomv1alpha1.MemgraphClusterSpec{
-					Ports: memgraphcomv1alpha1.PortsSpec{ManagementPort: ptr.To(memgraphcomv1alpha1.DefaultBoltPort)},
-				},
-				"must all be different ports"),
 			// Two mounts cannot share a path, and mounting over the data or log
 			// directory would hide Memgraph's own storage behind another volume.
 			Entry("an extra mount over the data directory", "invalid-extra-mount-lib",
@@ -524,7 +477,12 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 				memgraphcomv1alpha1.MemgraphClusterSpec{
 					ExtraArgs: memgraphcomv1alpha1.ExtraArgsSpec{Data: []string{"--bolt-port=7777"}},
 				},
-				"configure ports through spec.ports"),
+				"must not set a fixed port"),
+			Entry("an extra arg overriding the replication port", "invalid-args-replication-port",
+				memgraphcomv1alpha1.MemgraphClusterSpec{
+					ExtraArgs: memgraphcomv1alpha1.ExtraArgsSpec{Data: []string{"--replication-port=20001"}},
+				},
+				"must not set a fixed port"),
 			Entry("an extra arg overriding the coordinator identity", "invalid-args-coordinator-id",
 				memgraphcomv1alpha1.MemgraphClusterSpec{
 					ExtraArgs: memgraphcomv1alpha1.ExtraArgsSpec{Coordinators: []string{"--coordinator-id=9"}},
@@ -539,12 +497,12 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 				memgraphcomv1alpha1.MemgraphClusterSpec{
 					ExtraArgs: memgraphcomv1alpha1.ExtraArgsSpec{Data: []string{"-bolt-port=7777"}},
 				},
-				"configure ports through spec.ports"),
+				"must not set a fixed port"),
 			Entry("a reserved flag spelled with underscores", "invalid-args-underscores",
 				memgraphcomv1alpha1.MemgraphClusterSpec{
 					ExtraArgs: memgraphcomv1alpha1.ExtraArgsSpec{Data: []string{"--bolt_port=7777"}},
 				},
-				"configure ports through spec.ports"),
+				"must not set a fixed port"),
 			Entry("a reserved flag spelled with one dash and underscores", "invalid-args-single-underscore",
 				memgraphcomv1alpha1.MemgraphClusterSpec{
 					ExtraArgs: memgraphcomv1alpha1.ExtraArgsSpec{Coordinators: []string{"-coordinator_id=9"}},
@@ -556,7 +514,7 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 				memgraphcomv1alpha1.MemgraphClusterSpec{
 					ExtraArgs: memgraphcomv1alpha1.ExtraArgsSpec{Data: []string{"--bolt-port", "7777"}},
 				},
-				"configure ports through spec.ports"),
+				"must not set a fixed port"),
 			Entry("a probe timing below one", "invalid-probe-period",
 				memgraphcomv1alpha1.MemgraphClusterSpec{
 					Probes: memgraphcomv1alpha1.ProbesSpec{

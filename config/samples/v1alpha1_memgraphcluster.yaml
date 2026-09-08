@@ -123,16 +123,10 @@ spec:
     #   resources:
     #     requests:
     #       memory: 64Mi
-  # The cluster domain and the internal ports are part of every advertised
-  # address the operator registers with the cluster, so they reach the
-  # container ports, the Services and the registration commands together.
-  # Changing them on a live cluster is not supported in v1alpha1.
+  # The cluster domain is part of every advertised address the operator
+  # registers with the cluster. The internal ports are fixed: Bolt 7687,
+  # management 10000, replication 20000, and coordinator 12000.
   clusterDomain: cluster.local
-  ports:
-    boltPort: 7687
-    managementPort: 10000
-    replicationPort: 20000
-    coordinatorPort: 12000
   # Every probe is a TCP-socket check against the role's own port (the
   # coordinator port for coordinators, the Bolt port for data instances); only
   # the timings are configurable. Timings left out keep their defaults:

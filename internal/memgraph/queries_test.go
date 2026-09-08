@@ -17,10 +17,13 @@ limitations under the License.
 package memgraph
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j/db"
+
+	memgraphcomv1alpha1 "github.com/memgraph/kubernetes-operator/api/v1alpha1"
 )
 
 const testInstanceName = "instance_1"
@@ -39,32 +42,40 @@ const (
 )
 
 func TestAddCoordinatorQuery(t *testing.T) {
+	host := "example-coordinator-1.example-coordinator.default.svc.cluster.local"
 	got := addCoordinatorQuery(CoordinatorSpec{
 		ID:                2,
-		BoltServer:        "example-coordinator-1.example-coordinator.default.svc.cluster.local:7687",
-		CoordinatorServer: "example-coordinator-1.example-coordinator.default.svc.cluster.local:12000",
-		ManagementServer:  "example-coordinator-1.example-coordinator.default.svc.cluster.local:10000",
+		BoltServer:        fmt.Sprintf("%s:%d", host, memgraphcomv1alpha1.BoltPort),
+		CoordinatorServer: fmt.Sprintf("%s:%d", host, memgraphcomv1alpha1.CoordinatorPort),
+		ManagementServer:  fmt.Sprintf("%s:%d", host, memgraphcomv1alpha1.ManagementPort),
 	})
-	want := `ADD COORDINATOR 2 WITH CONFIG {` +
-		`"bolt_server": "example-coordinator-1.example-coordinator.default.svc.cluster.local:7687", ` +
-		`"coordinator_server": "example-coordinator-1.example-coordinator.default.svc.cluster.local:12000", ` +
-		`"management_server": "example-coordinator-1.example-coordinator.default.svc.cluster.local:10000"}`
+	want := fmt.Sprintf(`ADD COORDINATOR 2 WITH CONFIG {`+
+		`"bolt_server": "%s:%d", `+
+		`"coordinator_server": "%s:%d", `+
+		`"management_server": "%s:%d"}`,
+		host, memgraphcomv1alpha1.BoltPort,
+		host, memgraphcomv1alpha1.CoordinatorPort,
+		host, memgraphcomv1alpha1.ManagementPort)
 	if got != want {
 		t.Errorf("addCoordinatorQuery() = %q, want %q", got, want)
 	}
 }
 
 func TestRegisterInstanceQuery(t *testing.T) {
+	host := "example-data-0.example-data.default.svc.cluster.local"
 	got := registerInstanceQuery(DataInstanceSpec{
 		Name:              testInstanceName,
-		BoltServer:        "example-data-0.example-data.default.svc.cluster.local:7687",
-		ManagementServer:  "example-data-0.example-data.default.svc.cluster.local:10000",
-		ReplicationServer: "example-data-0.example-data.default.svc.cluster.local:20000",
+		BoltServer:        fmt.Sprintf("%s:%d", host, memgraphcomv1alpha1.BoltPort),
+		ManagementServer:  fmt.Sprintf("%s:%d", host, memgraphcomv1alpha1.ManagementPort),
+		ReplicationServer: fmt.Sprintf("%s:%d", host, memgraphcomv1alpha1.ReplicationPort),
 	})
-	want := `REGISTER INSTANCE instance_1 WITH CONFIG {` +
-		`"bolt_server": "example-data-0.example-data.default.svc.cluster.local:7687", ` +
-		`"management_server": "example-data-0.example-data.default.svc.cluster.local:10000", ` +
-		`"replication_server": "example-data-0.example-data.default.svc.cluster.local:20000"}`
+	want := fmt.Sprintf(`REGISTER INSTANCE instance_1 WITH CONFIG {`+
+		`"bolt_server": "%s:%d", `+
+		`"management_server": "%s:%d", `+
+		`"replication_server": "%s:%d"}`,
+		host, memgraphcomv1alpha1.BoltPort,
+		host, memgraphcomv1alpha1.ManagementPort,
+		host, memgraphcomv1alpha1.ReplicationPort)
 	if got != want {
 		t.Errorf("registerInstanceQuery() = %q, want %q", got, want)
 	}
@@ -270,14 +281,18 @@ func TestInstanceFromRecord(t *testing.T) {
 			"name", "bolt_server", "coordinator_server", "management_server", "health", "role", "last_succ_resp_ms",
 		},
 		Values: []any{
-			"coordinator_1", "localhost:7687", "localhost:12000", "localhost:10000", "up", "leader", int64(12),
+			"coordinator_1",
+			fmt.Sprintf("localhost:%d", memgraphcomv1alpha1.BoltPort),
+			fmt.Sprintf("localhost:%d", memgraphcomv1alpha1.CoordinatorPort),
+			fmt.Sprintf("localhost:%d", memgraphcomv1alpha1.ManagementPort),
+			"up", "leader", int64(12),
 		},
 	}
 	want := Instance{
 		Name:              "coordinator_1",
-		BoltServer:        "localhost:7687",
-		CoordinatorServer: "localhost:12000",
-		ManagementServer:  "localhost:10000",
+		BoltServer:        fmt.Sprintf("localhost:%d", memgraphcomv1alpha1.BoltPort),
+		CoordinatorServer: fmt.Sprintf("localhost:%d", memgraphcomv1alpha1.CoordinatorPort),
+		ManagementServer:  fmt.Sprintf("localhost:%d", memgraphcomv1alpha1.ManagementPort),
 		Health:            "up",
 		Role:              "leader",
 	}

@@ -165,9 +165,9 @@ func coordinator(
 	fqdn := podFQDN(cluster, CoordinatorName(cluster), spec, ordinal)
 	return memgraph.CoordinatorSpec{
 		ID:                CoordinatorID(ordinal),
-		BoltServer:        hostPort(fqdn, spec.ports.bolt),
-		CoordinatorServer: hostPort(fqdn, spec.ports.coordinator),
-		ManagementServer:  hostPort(fqdn, spec.ports.management),
+		BoltServer:        hostPort(fqdn, memgraphcomv1alpha1.BoltPort),
+		CoordinatorServer: hostPort(fqdn, memgraphcomv1alpha1.CoordinatorPort),
+		ManagementServer:  hostPort(fqdn, memgraphcomv1alpha1.ManagementPort),
 	}
 }
 
@@ -183,9 +183,9 @@ func dataInstance(
 	fqdn := podFQDN(cluster, DataName(cluster), spec, ordinal)
 	return memgraph.DataInstanceSpec{
 		Name:              DataInstanceName(ordinal),
-		BoltServer:        hostPort(fqdn, spec.ports.bolt),
-		ManagementServer:  hostPort(fqdn, spec.ports.management),
-		ReplicationServer: hostPort(fqdn, spec.ports.replication),
+		BoltServer:        hostPort(fqdn, memgraphcomv1alpha1.BoltPort),
+		ManagementServer:  hostPort(fqdn, memgraphcomv1alpha1.ManagementPort),
+		ReplicationServer: hostPort(fqdn, memgraphcomv1alpha1.ReplicationPort),
 	}
 }
 

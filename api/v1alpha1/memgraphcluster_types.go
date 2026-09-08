@@ -52,10 +52,12 @@ const (
 
 	DefaultClusterDomain = "cluster.local"
 
-	DefaultBoltPort        int32 = 7687
-	DefaultManagementPort  int32 = 10000
-	DefaultReplicationPort int32 = 20000
-	DefaultCoordinatorPort int32 = 12000
+	// The internal Memgraph ports are fixed so every workload, Service and
+	// advertised registration address always agrees.
+	BoltPort        int32 = 7687
+	ManagementPort  int32 = 10000
+	ReplicationPort int32 = 20000
+	CoordinatorPort int32 = 12000
 )
 
 // Probe timing defaults. Unlike the other defaults these are Go constants only:
@@ -547,52 +549,6 @@ type CoreDumpsSpec struct {
 	Uploader *CoreDumpsUploaderSpec `json:"uploader,omitempty"`
 }
 
-// PortsSpec configures the internal ports Memgraph listens on. The knob names
-// mirror the memgraph-high-availability Helm chart's ports block.
-//
-// These ports are load-bearing beyond the container: they are part of every
-// advertised address the operator registers with the cluster (bolt_server,
-// coordinator_server, management_server, replication_server), so a change
-// reaches container ports, Services, and registration commands together.
-// Changing a port on a live cluster is a day-2 operation and out of scope for
-// v1alpha1: the pods restart on the new ports while the coordinators keep the
-// addresses they were registered with.
-//
-// The has() guards keep the rule evaluable against the block's empty object
-// default, which the API server checks before nested field defaults apply.
-//
-// +kubebuilder:validation:XValidation:rule="!(has(self.boltPort) && has(self.managementPort) && has(self.replicationPort) && has(self.coordinatorPort)) || [self.boltPort, self.managementPort, self.replicationPort, self.coordinatorPort].all(p, [self.boltPort, self.managementPort, self.replicationPort, self.coordinatorPort].exists_one(q, q == p))",message="boltPort, managementPort, replicationPort and coordinatorPort must all be different ports"
-type PortsSpec struct {
-	// boltPort is the port Memgraph serves the Bolt protocol on. Clients and
-	// the operator's own management queries both use it.
-	// +kubebuilder:validation:Minimum=1
-	// +kubebuilder:validation:Maximum=65535
-	// +kubebuilder:default=7687
-	// +optional
-	BoltPort *int32 `json:"boltPort,omitempty"`
-
-	// managementPort is the port instances exchange HA management traffic on.
-	// +kubebuilder:validation:Minimum=1
-	// +kubebuilder:validation:Maximum=65535
-	// +kubebuilder:default=10000
-	// +optional
-	ManagementPort *int32 `json:"managementPort,omitempty"`
-
-	// replicationPort is the port data instances replicate over.
-	// +kubebuilder:validation:Minimum=1
-	// +kubebuilder:validation:Maximum=65535
-	// +kubebuilder:default=20000
-	// +optional
-	ReplicationPort *int32 `json:"replicationPort,omitempty"`
-
-	// coordinatorPort is the port coordinators run their Raft protocol on.
-	// +kubebuilder:validation:Minimum=1
-	// +kubebuilder:validation:Maximum=65535
-	// +kubebuilder:default=12000
-	// +optional
-	CoordinatorPort *int32 `json:"coordinatorPort,omitempty"`
-}
-
 // ProbeSpec tunes the timings of one probe. The probe type itself is not
 // configurable: every probe is a TCP-socket check against the role's own port
 // (the coordinator port for coordinators, the Bolt port for data instances),
@@ -794,14 +750,14 @@ type ExtraVolumeMountsSpec struct {
 // repeated flag, so a flag set here overrides the operator's value.
 //
 // The ports and the coordinator identity are excluded from that override: they
-// must stay consistent with the advertised addresses the operator registers
-// with the cluster. Configure ports through spec.ports instead.
+// must stay consistent with the fixed advertised addresses the operator
+// registers with the cluster.
 type ExtraArgsSpec struct {
 	// coordinators are appended to every coordinator pod's Memgraph flags.
 	// +kubebuilder:validation:MaxItems=64
 	// +kubebuilder:validation:items:MinLength=1
 	// +kubebuilder:validation:items:MaxLength=4096
-	// +kubebuilder:validation:XValidation:rule="self.all(a, !a.replace('-', '_').matches('^_{1,2}(bolt_port|management_port|coordinator_id|coordinator_hostname|coordinator_port)($|[= ])'))",message="extraArgs must not set a port or the coordinator identity the operator derives (bolt-port, management-port, coordinator-id, coordinator-hostname, coordinator-port), in any spelling gflags accepts; configure ports through spec.ports"
+	// +kubebuilder:validation:XValidation:rule="self.all(a, !a.replace('-', '_').matches('^_{1,2}(bolt_port|management_port|replication_port|coordinator_id|coordinator_hostname|coordinator_port)($|[= ])'))",message="extraArgs must not set a fixed port or the coordinator identity the operator derives (bolt-port, management-port, replication-port, coordinator-id, coordinator-hostname, coordinator-port), in any spelling gflags accepts"
 	// +optional
 	Coordinators []string `json:"coordinators,omitempty"`
 
@@ -809,7 +765,7 @@ type ExtraArgsSpec struct {
 	// +kubebuilder:validation:MaxItems=64
 	// +kubebuilder:validation:items:MinLength=1
 	// +kubebuilder:validation:items:MaxLength=4096
-	// +kubebuilder:validation:XValidation:rule="self.all(a, !a.replace('-', '_').matches('^_{1,2}(bolt_port|management_port|coordinator_id|coordinator_hostname|coordinator_port)($|[= ])'))",message="extraArgs must not set a port or the coordinator identity the operator derives (bolt-port, management-port, coordinator-id, coordinator-hostname, coordinator-port), in any spelling gflags accepts; configure ports through spec.ports"
+	// +kubebuilder:validation:XValidation:rule="self.all(a, !a.replace('-', '_').matches('^_{1,2}(bolt_port|management_port|replication_port|coordinator_id|coordinator_hostname|coordinator_port)($|[= ])'))",message="extraArgs must not set a fixed port or the coordinator identity the operator derives (bolt-port, management-port, replication-port, coordinator-id, coordinator-hostname, coordinator-port), in any spelling gflags accepts"
 	// +optional
 	Data []string `json:"data,omitempty"`
 }
@@ -868,11 +824,6 @@ type MemgraphClusterSpec struct {
 	// +kubebuilder:default="cluster.local"
 	// +optional
 	ClusterDomain string `json:"clusterDomain,omitempty"`
-
-	// ports configures the internal ports Memgraph listens on.
-	// +kubebuilder:default={}
-	// +optional
-	Ports PortsSpec `json:"ports,omitzero"`
 
 	// probes tunes the probe timings of both roles.
 	// +optional

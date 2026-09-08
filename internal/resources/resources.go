@@ -116,19 +116,9 @@ type normalizedSpec struct {
 	licenseKey      string
 	organizationKey string
 	clusterDomain   string
-	ports           normalizedPorts
 	retentionPolicy memgraphcomv1alpha1.StorageRetentionPolicy
 	coordinatorRole normalizedRole
 	dataRole        normalizedRole
-}
-
-// normalizedPorts are the internal ports every advertised address, container
-// port and Service port is built from.
-type normalizedPorts struct {
-	bolt        int32
-	management  int32
-	replication int32
-	coordinator int32
 }
 
 // normalizedRole is everything the builders need that is configured per role.
@@ -194,7 +184,6 @@ func normalize(spec memgraphcomv1alpha1.MemgraphClusterSpec) normalizedSpec {
 		licenseKey:      spec.Secrets.LicenseKey,
 		organizationKey: spec.Secrets.OrganizationKey,
 		clusterDomain:   spec.ClusterDomain,
-		ports:           normalizePorts(spec.Ports),
 		retentionPolicy: spec.Storage.RetentionPolicy,
 		coordinatorRole: normalizeRole(roleSpec{
 			storage:      spec.Storage.Coordinators,
@@ -290,17 +279,6 @@ func normalizeRole(role roleSpec) normalizedRole {
 		extraArgs:         role.extraArgs,
 		extraVolumes:      role.extraVolumes,
 		extraMounts:       role.extraMounts,
-	}
-}
-
-// normalizePorts resolves the internal ports, whose defaults mirror the
-// memgraph-high-availability Helm chart's.
-func normalizePorts(spec memgraphcomv1alpha1.PortsSpec) normalizedPorts {
-	return normalizedPorts{
-		bolt:        intOrDefault(spec.BoltPort, memgraphcomv1alpha1.DefaultBoltPort),
-		management:  intOrDefault(spec.ManagementPort, memgraphcomv1alpha1.DefaultManagementPort),
-		replication: intOrDefault(spec.ReplicationPort, memgraphcomv1alpha1.DefaultReplicationPort),
-		coordinator: intOrDefault(spec.CoordinatorPort, memgraphcomv1alpha1.DefaultCoordinatorPort),
 	}
 }
 
