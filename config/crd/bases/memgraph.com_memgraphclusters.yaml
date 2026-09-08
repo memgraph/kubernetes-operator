@@ -1,0 +1,1341 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.21.0
+  name: memgraphclusters.memgraph.com
+spec:
+  group: memgraph.com
+  names:
+    kind: MemgraphCluster
+    listKind: MemgraphClusterList
+    plural: memgraphclusters
+    shortNames:
+    - mgc
+    singular: memgraphcluster
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.coordinators
+      name: Coordinators
+      type: integer
+    - jsonPath: .spec.dataInstances
+      name: Data
+      type: integer
+    - jsonPath: .status.coordinators
+      name: Registered-Coordinators
+      priority: 1
+      type: integer
+    - jsonPath: .status.dataInstances
+      name: Registered-Data
+      priority: 1
+      type: integer
+    - jsonPath: .status.main
+      name: Main
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: Ready
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Converged")].status
+      name: Converged
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: MemgraphCluster is the Schema for the memgraphclusters API
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: spec defines the desired state of MemgraphCluster
+            properties:
+              clusterDomain:
+                default: cluster.local
+                description: |-
+                  clusterDomain is the Kubernetes cluster domain the advertised FQDN
+                  addresses are built from: <pod>.<service>.<namespace>.svc.<clusterDomain>.
+                  Override it on clusters configured with a domain other than the default.
+                maxLength: 253
+                minLength: 1
+                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                type: string
+              coordinators:
+                default: 3
+                description: |-
+                  coordinators is the number of Raft coordinator instances. It must be odd
+                  so the Raft quorum cannot split, and at least three, which is the
+                  smallest quorum that survives losing a coordinator — this operator
+                  builds real HA clusters, so the floor holds at creation as well as on an
+                  update. Raising the count on a live cluster grows it: the operator adds
+                  the new coordinators to the Raft cluster as their pods become ready.
+                format: int32
+                minimum: 3
+                type: integer
+                x-kubernetes-validations:
+                - message: coordinators must be an odd number so the Raft quorum cannot
+                    split
+                  rule: self % 2 == 1
+              coreDumps:
+                default: {}
+                description: |-
+                  coreDumps optionally collects crash dumps of either role onto a volume of
+                  its own.
+                properties:
+                  configureCorePattern:
+                    default: true
+                    description: |-
+                      configureCorePattern lets the operator point the kernel at
+                      /var/core/memgraph by running a privileged init container that writes
+                      /proc/sys/kernel/core_pattern. It uses the cluster's own Memgraph image,
+                      so no second image has to be pulled.
+
+                      It is cluster-wide rather than per role for two reasons: core_pattern is a
+                      property of the **node**, so it applies to every process that crashes
+                      there regardless of which role asked for it, and what really decides this
+                      is whether the namespace tolerates a privileged container at all.
+                      PodSecurity "restricted" does not — set this to false there, or wherever
+                      the platform manages core_pattern itself, and the operator only provisions
+                      and mounts the volumes, trusting the node to already point at them.
+                    type: boolean
+                  coordinators:
+                    default: {}
+                    description: |-
+                      coordinators decides whether every coordinator pod collects dumps, and
+                      how much room it gets for them.
+                    properties:
+                      enabled:
+                        default: false
+                        description: |-
+                          enabled provisions a core dumps volume for every pod of the role and
+                          mounts it at /var/core/memgraph. It is off by default: a crashing Memgraph
+                          is not the normal case, and the volume costs a third
+                          PersistentVolumeClaim per pod.
+                        type: boolean
+                      size:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        default: 10Gi
+                        description: |-
+                          size is the requested size of the role's core dumps claim. A dump is
+                          roughly as large as the crashing process' resident memory, which is why
+                          this is per role: a data instance holds the graph, a coordinator holds
+                          Raft state. Size it against the role's memory limit, not its data.
+                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                        x-kubernetes-int-or-string: true
+                    type: object
+                  data:
+                    default: {}
+                    description: |-
+                      data decides whether every data instance pod collects dumps, and how much
+                      room it gets for them.
+                    properties:
+                      enabled:
+                        default: false
+                        description: |-
+                          enabled provisions a core dumps volume for every pod of the role and
+                          mounts it at /var/core/memgraph. It is off by default: a crashing Memgraph
+                          is not the normal case, and the volume costs a third
+                          PersistentVolumeClaim per pod.
+                        type: boolean
+                      size:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        default: 10Gi
+                        description: |-
+                          size is the requested size of the role's core dumps claim. A dump is
+                          roughly as large as the crashing process' resident memory, which is why
+                          this is per role: a data instance holds the graph, a coordinator holds
+                          Raft state. Size it against the role's memory limit, not its data.
+                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                        x-kubernetes-int-or-string: true
+                    type: object
+                  storageClassName:
+                    description: |-
+                      storageClassName is the StorageClass backing every core dumps claim of
+                      this cluster. Leave it unset to use the cluster's default StorageClass;
+                      set it to the empty string to disable dynamic provisioning and bind
+                      pre-created PersistentVolumes.
+                    maxLength: 253
+                    type: string
+                  uploader:
+                    description: |-
+                      uploader is an optional sidecar that ships collected dumps off the volume
+                      — to object storage, a debug host, wherever. Any image and destination
+                      works, so no provider or credential vocabulary has to live in this API:
+                      the operator mounts the core dumps volume into the sidecar read-only,
+                      passes the directory as CORE_DUMPS_DIR, and gives it the same locked-down
+                      security context as the Memgraph container. See
+                      config/samples/v1alpha1_memgraphcluster.yaml for an S3 uploader
+                      equivalent to the Helm chart's.
+
+                      One definition serves both roles — the destination and credentials do not
+                      differ between them, and the pods are already distinguishable by hostname
+                      — and it joins the pods of every role that collects dumps. It counts
+                      toward pod readiness, so a sidecar that crash-loops keeps those roles from
+                      ever being registered.
+                    properties:
+                      args:
+                        description: args are the arguments passed to the sidecar's
+                          entrypoint.
+                        items:
+                          type: string
+                        type: array
+                      command:
+                        description: command overrides the image's entrypoint.
+                        items:
+                          type: string
+                        type: array
+                      env:
+                        description: |-
+                          env passes literal, non-secret environment variables to the sidecar —
+                          bucket names, prefixes, regions. Credentials belong in envFromSecrets.
+                        items:
+                          description: |-
+                            EnvVar is one non-secret environment variable set on a role's Memgraph
+                            container. Only literal values are supported — there is deliberately no
+                            valueFrom — so secret material stays confined to the secrets block and the CR
+                            remains safe to commit.
+                          properties:
+                            name:
+                              description: name is the environment variable's name.
+                              maxLength: 253
+                              minLength: 1
+                              pattern: ^[A-Za-z_][A-Za-z0-9_]*$
+                              type: string
+                            value:
+                              description: value is the literal, non-secret value.
+                              maxLength: 4096
+                              type: string
+                          required:
+                          - name
+                          type: object
+                        type: array
+                        x-kubernetes-list-map-keys:
+                        - name
+                        x-kubernetes-list-type: map
+                      envFromSecrets:
+                        description: |-
+                          envFromSecrets names Secrets in the cluster's namespace whose keys become
+                          environment variables of the sidecar. This is how credentials reach it:
+                          by reference, so no secret material ever appears in this resource.
+                        items:
+                          type: string
+                        type: array
+                        x-kubernetes-list-type: set
+                      image:
+                        description: |-
+                          image is the full sidecar image reference including its tag, for example
+                          "amazon/aws-cli:2.33.28". Unlike the Memgraph image the operator has no
+                          default for it, so a tag belongs here rather than in a separate field.
+                        maxLength: 383
+                        minLength: 1
+                        type: string
+                      pullPolicy:
+                        default: IfNotPresent
+                        description: pullPolicy is the image pull policy of the sidecar.
+                        enum:
+                        - Always
+                        - IfNotPresent
+                        - Never
+                        type: string
+                      resources:
+                        description: |-
+                          resources sets the sidecar's compute resources. Leave it unset and the
+                          sidecar schedules without requests or limits.
+                        properties:
+                          claims:
+                            description: |-
+                              Claims lists the names of resources, defined in spec.resourceClaims,
+                              that are used by this container.
+
+                              This field depends on the
+                              DynamicResourceAllocation feature gate.
+
+                              This field is immutable. It can only be set for containers.
+                            items:
+                              description: ResourceClaim references one entry in PodSpec.ResourceClaims.
+                              properties:
+                                name:
+                                  description: |-
+                                    Name must match the name of one entry in pod.spec.resourceClaims of
+                                    the Pod where this field is used. It makes that resource available
+                                    inside a container.
+                                  type: string
+                                request:
+                                  description: |-
+                                    Request is the name chosen for a request in the referenced claim.
+                                    If empty, everything from the claim is made available, otherwise
+                                    only the result of this request.
+                                  type: string
+                              required:
+                              - name
+                              type: object
+                            type: array
+                            x-kubernetes-list-map-keys:
+                            - name
+                            x-kubernetes-list-type: map
+                          limits:
+                            additionalProperties:
+                              anyOf:
+                              - type: integer
+                              - type: string
+                              pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                              x-kubernetes-int-or-string: true
+                            description: |-
+                              Limits describes the maximum amount of compute resources allowed.
+                              More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                            type: object
+                          requests:
+                            additionalProperties:
+                              anyOf:
+                              - type: integer
+                              - type: string
+                              pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                              x-kubernetes-int-or-string: true
+                            description: |-
+                              Requests describes the minimum amount of compute resources required.
+                              If Requests is omitted for a container, it defaults to Limits if that is explicitly specified,
+                              otherwise to an implementation-defined value. Requests cannot exceed Limits.
+                              More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                            type: object
+                        type: object
+                    required:
+                    - image
+                    type: object
+                    x-kubernetes-validations:
+                    - message: 'env must not set CORE_DUMPS_DIR: the operator passes
+                        the core dumps mount path in it'
+                      rule: '!has(self.env) || self.env.all(e, e.name != ''CORE_DUMPS_DIR'')'
+                type: object
+                x-kubernetes-validations:
+                - message: uploader requires core dumps enabled for at least one role
+                    — there would be no volume for it to read
+                  rule: '!has(self.uploader) || (has(self.coordinators) && has(self.coordinators.enabled)
+                    && self.coordinators.enabled) || (has(self.data) && has(self.data.enabled)
+                    && self.data.enabled)'
+              dataInstances:
+                default: 2
+                description: |-
+                  dataInstances is the number of data instances. Raising the count on a
+                  live cluster grows it: the operator registers the new instances as their
+                  pods become ready.
+                format: int32
+                minimum: 1
+                type: integer
+              extraArgs:
+                description: extraArgs passes additional Memgraph flags to both roles.
+                properties:
+                  coordinators:
+                    description: coordinators are appended to every coordinator pod's
+                      Memgraph flags.
+                    items:
+                      maxLength: 4096
+                      minLength: 1
+                      type: string
+                    maxItems: 64
+                    type: array
+                    x-kubernetes-validations:
+                    - message: extraArgs must not set a fixed port or the coordinator
+                        identity the operator derives (bolt-port, management-port,
+                        replication-port, coordinator-id, coordinator-hostname, coordinator-port),
+                        in any spelling gflags accepts
+                      rule: self.all(a, !a.replace('-', '_').matches('^_{1,2}(bolt_port|management_port|replication_port|coordinator_id|coordinator_hostname|coordinator_port)($|[=
+                        ])'))
+                  data:
+                    description: data are appended to every data instance pod's Memgraph
+                      flags.
+                    items:
+                      maxLength: 4096
+                      minLength: 1
+                      type: string
+                    maxItems: 64
+                    type: array
+                    x-kubernetes-validations:
+                    - message: extraArgs must not set a fixed port or the coordinator
+                        identity the operator derives (bolt-port, management-port,
+                        replication-port, coordinator-id, coordinator-hostname, coordinator-port),
+                        in any spelling gflags accepts
+                      rule: self.all(a, !a.replace('-', '_').matches('^_{1,2}(bolt_port|management_port|replication_port|coordinator_id|coordinator_hostname|coordinator_port)($|[=
+                        ])'))
+                type: object
+              extraEnv:
+                description: |-
+                  extraEnv passes additional non-secret environment variables to both
+                  roles' Memgraph containers.
+                properties:
+                  coordinators:
+                    description: coordinators are added to every coordinator pod's
+                      Memgraph container.
+                    items:
+                      description: |-
+                        EnvVar is one non-secret environment variable set on a role's Memgraph
+                        container. Only literal values are supported — there is deliberately no
+                        valueFrom — so secret material stays confined to the secrets block and the CR
+                        remains safe to commit.
+                      properties:
+                        name:
+                          description: name is the environment variable's name.
+                          maxLength: 253
+                          minLength: 1
+                          pattern: ^[A-Za-z_][A-Za-z0-9_]*$
+                          type: string
+                        value:
+                          description: value is the literal, non-secret value.
+                          maxLength: 4096
+                          type: string
+                      required:
+                      - name
+                      type: object
+                    maxItems: 64
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - name
+                    x-kubernetes-list-type: map
+                    x-kubernetes-validations:
+                    - message: extraEnv must not set MEMGRAPH_ENTERPRISE_LICENSE or
+                        MEMGRAPH_ORGANIZATION_NAME (they come from the secrets block)
+                        or POD_NAME (it carries the pod's own identity)
+                      rule: self.all(e, !(e.name in ['MEMGRAPH_ENTERPRISE_LICENSE',
+                        'MEMGRAPH_ORGANIZATION_NAME', 'POD_NAME']))
+                  data:
+                    description: data are added to every data instance pod's Memgraph
+                      container.
+                    items:
+                      description: |-
+                        EnvVar is one non-secret environment variable set on a role's Memgraph
+                        container. Only literal values are supported — there is deliberately no
+                        valueFrom — so secret material stays confined to the secrets block and the CR
+                        remains safe to commit.
+                      properties:
+                        name:
+                          description: name is the environment variable's name.
+                          maxLength: 253
+                          minLength: 1
+                          pattern: ^[A-Za-z_][A-Za-z0-9_]*$
+                          type: string
+                        value:
+                          description: value is the literal, non-secret value.
+                          maxLength: 4096
+                          type: string
+                      required:
+                      - name
+                      type: object
+                    maxItems: 64
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - name
+                    x-kubernetes-list-type: map
+                    x-kubernetes-validations:
+                    - message: extraEnv must not set MEMGRAPH_ENTERPRISE_LICENSE or
+                        MEMGRAPH_ORGANIZATION_NAME (they come from the secrets block)
+                        or POD_NAME (it carries the pod's own identity)
+                      rule: self.all(e, !(e.name in ['MEMGRAPH_ENTERPRISE_LICENSE',
+                        'MEMGRAPH_ORGANIZATION_NAME', 'POD_NAME']))
+                type: object
+              extraVolumeMounts:
+                description: |-
+                  extraVolumeMounts mounts volumes into both roles' Memgraph containers
+                  beyond the ones the operator mounts.
+                properties:
+                  coordinators:
+                    description: coordinators are added to every coordinator pod's
+                      Memgraph container.
+                    items:
+                      description: VolumeMount describes a mounting of a Volume within
+                        a container.
+                      properties:
+                        mountPath:
+                          description: |-
+                            Path within the container at which the volume should be mounted.  Must
+                            not contain ':'.
+                          type: string
+                        mountPropagation:
+                          description: |-
+                            mountPropagation determines how mounts are propagated from the host
+                            to container and the other way around.
+                            When not set, MountPropagationNone is used.
+                            This field is beta in 1.10.
+                            When RecursiveReadOnly is set to IfPossible or to Enabled, MountPropagation must be None or unspecified
+                            (which defaults to None).
+                          type: string
+                        name:
+                          description: This must match the Name of a Volume.
+                          type: string
+                        readOnly:
+                          description: |-
+                            Mounted read-only if true, read-write otherwise (false or unspecified).
+                            Defaults to false.
+                          type: boolean
+                        recursiveReadOnly:
+                          description: |-
+                            RecursiveReadOnly specifies whether read-only mounts should be handled
+                            recursively.
+
+                            If ReadOnly is false, this field has no meaning and must be unspecified.
+
+                            If ReadOnly is true, and this field is set to Disabled, the mount is not made
+                            recursively read-only.  If this field is set to IfPossible, the mount is made
+                            recursively read-only, if it is supported by the container runtime.  If this
+                            field is set to Enabled, the mount is made recursively read-only if it is
+                            supported by the container runtime, otherwise the pod will not be started and
+                            an error will be generated to indicate the reason.
+
+                            If this field is set to IfPossible or Enabled, MountPropagation must be set to
+                            None (or be unspecified, which defaults to None).
+
+                            If this field is not specified, it is treated as an equivalent of Disabled.
+                          type: string
+                        subPath:
+                          description: |-
+                            Path within the volume from which the container's volume should be mounted.
+                            Defaults to "" (volume's root).
+                          type: string
+                        subPathExpr:
+                          description: |-
+                            Expanded path within the volume from which the container's volume should be mounted.
+                            Behaves similarly to SubPath but environment variable references $(VAR_NAME) are expanded using the container's environment.
+                            Defaults to "" (volume's root).
+                            SubPathExpr and SubPath are mutually exclusive.
+                          type: string
+                      required:
+                      - mountPath
+                      - name
+                      type: object
+                    maxItems: 64
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - mountPath
+                    x-kubernetes-list-type: map
+                    x-kubernetes-validations:
+                    - message: extraVolumeMounts must not mount over a path the operator
+                        already mounts (/var/lib/memgraph, /var/log/memgraph, /var/core/memgraph,
+                        /tmp)
+                      rule: self.all(m, !(m.mountPath in ['/var/lib/memgraph', '/var/log/memgraph',
+                        '/var/core/memgraph', '/tmp']))
+                  data:
+                    description: data are added to every data instance pod's Memgraph
+                      container.
+                    items:
+                      description: VolumeMount describes a mounting of a Volume within
+                        a container.
+                      properties:
+                        mountPath:
+                          description: |-
+                            Path within the container at which the volume should be mounted.  Must
+                            not contain ':'.
+                          type: string
+                        mountPropagation:
+                          description: |-
+                            mountPropagation determines how mounts are propagated from the host
+                            to container and the other way around.
+                            When not set, MountPropagationNone is used.
+                            This field is beta in 1.10.
+                            When RecursiveReadOnly is set to IfPossible or to Enabled, MountPropagation must be None or unspecified
+                            (which defaults to None).
+                          type: string
+                        name:
+                          description: This must match the Name of a Volume.
+                          type: string
+                        readOnly:
+                          description: |-
+                            Mounted read-only if true, read-write otherwise (false or unspecified).
+                            Defaults to false.
+                          type: boolean
+                        recursiveReadOnly:
+                          description: |-
+                            RecursiveReadOnly specifies whether read-only mounts should be handled
+                            recursively.
+
+                            If ReadOnly is false, this field has no meaning and must be unspecified.
+
+                            If ReadOnly is true, and this field is set to Disabled, the mount is not made
+                            recursively read-only.  If this field is set to IfPossible, the mount is made
+                            recursively read-only, if it is supported by the container runtime.  If this
+                            field is set to Enabled, the mount is made recursively read-only if it is
+                            supported by the container runtime, otherwise the pod will not be started and
+                            an error will be generated to indicate the reason.
+
+                            If this field is set to IfPossible or Enabled, MountPropagation must be set to
+                            None (or be unspecified, which defaults to None).
+
+                            If this field is not specified, it is treated as an equivalent of Disabled.
+                          type: string
+                        subPath:
+                          description: |-
+                            Path within the volume from which the container's volume should be mounted.
+                            Defaults to "" (volume's root).
+                          type: string
+                        subPathExpr:
+                          description: |-
+                            Expanded path within the volume from which the container's volume should be mounted.
+                            Behaves similarly to SubPath but environment variable references $(VAR_NAME) are expanded using the container's environment.
+                            Defaults to "" (volume's root).
+                            SubPathExpr and SubPath are mutually exclusive.
+                          type: string
+                      required:
+                      - mountPath
+                      - name
+                      type: object
+                    maxItems: 64
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - mountPath
+                    x-kubernetes-list-type: map
+                    x-kubernetes-validations:
+                    - message: extraVolumeMounts must not mount over a path the operator
+                        already mounts (/var/lib/memgraph, /var/log/memgraph, /var/core/memgraph,
+                        /tmp)
+                      rule: self.all(m, !(m.mountPath in ['/var/lib/memgraph', '/var/log/memgraph',
+                        '/var/core/memgraph', '/tmp']))
+                type: object
+              extraVolumes:
+                description: |-
+                  extraVolumes adds pod volumes to both roles beyond the ones the operator
+                  provisions.
+                properties:
+                  coordinators:
+                    description: coordinators are added to every coordinator pod.
+                    x-kubernetes-preserve-unknown-fields: true
+                  data:
+                    description: data are added to every data instance pod.
+                    x-kubernetes-preserve-unknown-fields: true
+                type: object
+              image:
+                default: {}
+                description: image selects the Memgraph container image run by all
+                  cluster pods.
+                properties:
+                  pullPolicy:
+                    default: IfNotPresent
+                    description: pullPolicy is the image pull policy applied to all
+                      cluster pods.
+                    enum:
+                    - Always
+                    - IfNotPresent
+                    - Never
+                    type: string
+                  repository:
+                    default: docker.io/memgraph/memgraph
+                    description: |-
+                      repository is the Memgraph container image repository. It carries the
+                      optional registry host and the image path only; the version belongs in
+                      tag.
+                    maxLength: 255
+                    minLength: 1
+                    type: string
+                    x-kubernetes-validations:
+                    - message: repository must not contain a digest; pin the image
+                        with tag instead
+                      rule: '!self.contains(''@'')'
+                    - message: repository must not contain a tag; set image.tag instead
+                      rule: '!self.substring(self.lastIndexOf(''/'') + 1).contains('':'')'
+                  tag:
+                    default: 3.12.0-relwithdebinfo
+                    description: |-
+                      tag is the Memgraph container image tag. Prefer pinning a specific
+                      Memgraph version over mutable tags such as "latest".
+                    maxLength: 128
+                    minLength: 1
+                    pattern: ^[a-zA-Z0-9_][a-zA-Z0-9._-]*$
+                    type: string
+                type: object
+              labels:
+                description: labels adds custom labels to both roles' pods, StatefulSets
+                  and Services.
+                properties:
+                  coordinators:
+                    description: coordinators labels the coordinator objects.
+                    properties:
+                      podLabels:
+                        additionalProperties:
+                          type: string
+                        description: podLabels are added to the role's pods.
+                        type: object
+                      serviceLabels:
+                        additionalProperties:
+                          type: string
+                        description: serviceLabels are added to the role's headless
+                          Service.
+                        type: object
+                      statefulSetLabels:
+                        additionalProperties:
+                          type: string
+                        description: statefulSetLabels are added to the role's StatefulSet.
+                        type: object
+                    type: object
+                  data:
+                    description: data labels the data instance objects.
+                    properties:
+                      podLabels:
+                        additionalProperties:
+                          type: string
+                        description: podLabels are added to the role's pods.
+                        type: object
+                      serviceLabels:
+                        additionalProperties:
+                          type: string
+                        description: serviceLabels are added to the role's headless
+                          Service.
+                        type: object
+                      statefulSetLabels:
+                        additionalProperties:
+                          type: string
+                        description: statefulSetLabels are added to the role's StatefulSet.
+                        type: object
+                    type: object
+                type: object
+              probes:
+                description: probes tunes the probe timings of both roles.
+                properties:
+                  coordinators:
+                    description: coordinators tunes the probes of every coordinator
+                      pod.
+                    properties:
+                      livenessProbe:
+                        description: livenessProbe decides whether the container is
+                          restarted.
+                        properties:
+                          failureThreshold:
+                            description: |-
+                              failureThreshold is how many consecutive failures the probe tolerates
+                              before acting. Defaults to 1440 for the data instances' startup probe —
+                              2h at the default period, so a large snapshot restore is not killed
+                              mid-load — and to 20 for every other probe.
+                            format: int32
+                            minimum: 1
+                            type: integer
+                          periodSeconds:
+                            description: periodSeconds is how often the probe runs.
+                              Defaults to 5.
+                            format: int32
+                            minimum: 1
+                            type: integer
+                          timeoutSeconds:
+                            description: |-
+                              timeoutSeconds is how long a single probe attempt may take. Defaults to
+                              10.
+                            format: int32
+                            minimum: 1
+                            type: integer
+                        type: object
+                      readinessProbe:
+                        description: |-
+                          readinessProbe decides whether the pod receives traffic and whether the
+                          operator considers the workloads ready to register.
+                        properties:
+                          failureThreshold:
+                            description: |-
+                              failureThreshold is how many consecutive failures the probe tolerates
+                              before acting. Defaults to 1440 for the data instances' startup probe —
+                              2h at the default period, so a large snapshot restore is not killed
+                              mid-load — and to 20 for every other probe.
+                            format: int32
+                            minimum: 1
+                            type: integer
+                          periodSeconds:
+                            description: periodSeconds is how often the probe runs.
+                              Defaults to 5.
+                            format: int32
+                            minimum: 1
+                            type: integer
+                          timeoutSeconds:
+                            description: |-
+                              timeoutSeconds is how long a single probe attempt may take. Defaults to
+                              10.
+                            format: int32
+                            minimum: 1
+                            type: integer
+                        type: object
+                      startupProbe:
+                        description: startupProbe gates the other two probes until
+                          the instance has started.
+                        properties:
+                          failureThreshold:
+                            description: |-
+                              failureThreshold is how many consecutive failures the probe tolerates
+                              before acting. Defaults to 1440 for the data instances' startup probe —
+                              2h at the default period, so a large snapshot restore is not killed
+                              mid-load — and to 20 for every other probe.
+                            format: int32
+                            minimum: 1
+                            type: integer
+                          periodSeconds:
+                            description: periodSeconds is how often the probe runs.
+                              Defaults to 5.
+                            format: int32
+                            minimum: 1
+                            type: integer
+                          timeoutSeconds:
+                            description: |-
+                              timeoutSeconds is how long a single probe attempt may take. Defaults to
+                              10.
+                            format: int32
+                            minimum: 1
+                            type: integer
+                        type: object
+                    type: object
+                  data:
+                    description: data tunes the probes of every data instance pod.
+                    properties:
+                      livenessProbe:
+                        description: livenessProbe decides whether the container is
+                          restarted.
+                        properties:
+                          failureThreshold:
+                            description: |-
+                              failureThreshold is how many consecutive failures the probe tolerates
+                              before acting. Defaults to 1440 for the data instances' startup probe —
+                              2h at the default period, so a large snapshot restore is not killed
+                              mid-load — and to 20 for every other probe.
+                            format: int32
+                            minimum: 1
+                            type: integer
+                          periodSeconds:
+                            description: periodSeconds is how often the probe runs.
+                              Defaults to 5.
+                            format: int32
+                            minimum: 1
+                            type: integer
+                          timeoutSeconds:
+                            description: |-
+                              timeoutSeconds is how long a single probe attempt may take. Defaults to
+                              10.
+                            format: int32
+                            minimum: 1
+                            type: integer
+                        type: object
+                      readinessProbe:
+                        description: |-
+                          readinessProbe decides whether the pod receives traffic and whether the
+                          operator considers the workloads ready to register.
+                        properties:
+                          failureThreshold:
+                            description: |-
+                              failureThreshold is how many consecutive failures the probe tolerates
+                              before acting. Defaults to 1440 for the data instances' startup probe —
+                              2h at the default period, so a large snapshot restore is not killed
+                              mid-load — and to 20 for every other probe.
+                            format: int32
+                            minimum: 1
+                            type: integer
+                          periodSeconds:
+                            description: periodSeconds is how often the probe runs.
+                              Defaults to 5.
+                            format: int32
+                            minimum: 1
+                            type: integer
+                          timeoutSeconds:
+                            description: |-
+                              timeoutSeconds is how long a single probe attempt may take. Defaults to
+                              10.
+                            format: int32
+                            minimum: 1
+                            type: integer
+                        type: object
+                      startupProbe:
+                        description: startupProbe gates the other two probes until
+                          the instance has started.
+                        properties:
+                          failureThreshold:
+                            description: |-
+                              failureThreshold is how many consecutive failures the probe tolerates
+                              before acting. Defaults to 1440 for the data instances' startup probe —
+                              2h at the default period, so a large snapshot restore is not killed
+                              mid-load — and to 20 for every other probe.
+                            format: int32
+                            minimum: 1
+                            type: integer
+                          periodSeconds:
+                            description: periodSeconds is how often the probe runs.
+                              Defaults to 5.
+                            format: int32
+                            minimum: 1
+                            type: integer
+                          timeoutSeconds:
+                            description: |-
+                              timeoutSeconds is how long a single probe attempt may take. Defaults to
+                              10.
+                            format: int32
+                            minimum: 1
+                            type: integer
+                        type: object
+                    type: object
+                type: object
+              resources:
+                description: resources sets the compute resources of both roles' Memgraph
+                  containers.
+                properties:
+                  coordinators:
+                    description: |-
+                      coordinators are the resource requests and limits of every coordinator
+                      pod's Memgraph container.
+                    properties:
+                      claims:
+                        description: |-
+                          Claims lists the names of resources, defined in spec.resourceClaims,
+                          that are used by this container.
+
+                          This field depends on the
+                          DynamicResourceAllocation feature gate.
+
+                          This field is immutable. It can only be set for containers.
+                        items:
+                          description: ResourceClaim references one entry in PodSpec.ResourceClaims.
+                          properties:
+                            name:
+                              description: |-
+                                Name must match the name of one entry in pod.spec.resourceClaims of
+                                the Pod where this field is used. It makes that resource available
+                                inside a container.
+                              type: string
+                            request:
+                              description: |-
+                                Request is the name chosen for a request in the referenced claim.
+                                If empty, everything from the claim is made available, otherwise
+                                only the result of this request.
+                              type: string
+                          required:
+                          - name
+                          type: object
+                        type: array
+                        x-kubernetes-list-map-keys:
+                        - name
+                        x-kubernetes-list-type: map
+                      limits:
+                        additionalProperties:
+                          anyOf:
+                          - type: integer
+                          - type: string
+                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                          x-kubernetes-int-or-string: true
+                        description: |-
+                          Limits describes the maximum amount of compute resources allowed.
+                          More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                        type: object
+                      requests:
+                        additionalProperties:
+                          anyOf:
+                          - type: integer
+                          - type: string
+                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                          x-kubernetes-int-or-string: true
+                        description: |-
+                          Requests describes the minimum amount of compute resources required.
+                          If Requests is omitted for a container, it defaults to Limits if that is explicitly specified,
+                          otherwise to an implementation-defined value. Requests cannot exceed Limits.
+                          More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                        type: object
+                    type: object
+                  data:
+                    description: |-
+                      data are the resource requests and limits of every data instance pod's
+                      Memgraph container.
+                    properties:
+                      claims:
+                        description: |-
+                          Claims lists the names of resources, defined in spec.resourceClaims,
+                          that are used by this container.
+
+                          This field depends on the
+                          DynamicResourceAllocation feature gate.
+
+                          This field is immutable. It can only be set for containers.
+                        items:
+                          description: ResourceClaim references one entry in PodSpec.ResourceClaims.
+                          properties:
+                            name:
+                              description: |-
+                                Name must match the name of one entry in pod.spec.resourceClaims of
+                                the Pod where this field is used. It makes that resource available
+                                inside a container.
+                              type: string
+                            request:
+                              description: |-
+                                Request is the name chosen for a request in the referenced claim.
+                                If empty, everything from the claim is made available, otherwise
+                                only the result of this request.
+                              type: string
+                          required:
+                          - name
+                          type: object
+                        type: array
+                        x-kubernetes-list-map-keys:
+                        - name
+                        x-kubernetes-list-type: map
+                      limits:
+                        additionalProperties:
+                          anyOf:
+                          - type: integer
+                          - type: string
+                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                          x-kubernetes-int-or-string: true
+                        description: |-
+                          Limits describes the maximum amount of compute resources allowed.
+                          More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                        type: object
+                      requests:
+                        additionalProperties:
+                          anyOf:
+                          - type: integer
+                          - type: string
+                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                          x-kubernetes-int-or-string: true
+                        description: |-
+                          Requests describes the minimum amount of compute resources required.
+                          If Requests is omitted for a container, it defaults to Limits if that is explicitly specified,
+                          otherwise to an implementation-defined value. Requests cannot exceed Limits.
+                          More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                        type: object
+                    type: object
+                type: object
+              secrets:
+                default: {}
+                description: |-
+                  secrets references the Secret holding the enterprise license and
+                  organization name.
+                properties:
+                  licenseKey:
+                    default: MEMGRAPH_ENTERPRISE_LICENSE
+                    description: licenseKey is the key within the Secret holding the
+                      enterprise license.
+                    maxLength: 253
+                    minLength: 1
+                    pattern: ^[-._a-zA-Z0-9]+$
+                    type: string
+                  name:
+                    default: memgraph-secrets
+                    description: name is the name of the Secret in the cluster's namespace.
+                    maxLength: 253
+                    minLength: 1
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                    type: string
+                  organizationKey:
+                    default: MEMGRAPH_ORGANIZATION_NAME
+                    description: |-
+                      organizationKey is the key within the Secret holding the organization
+                      name the license was issued to.
+                    maxLength: 253
+                    minLength: 1
+                    pattern: ^[-._a-zA-Z0-9]+$
+                    type: string
+                type: object
+                x-kubernetes-validations:
+                - message: licenseKey and organizationKey must name different keys
+                    of the Secret
+                  rule: '!has(self.licenseKey) || !has(self.organizationKey) || self.licenseKey
+                    != self.organizationKey'
+              storage:
+                default: {}
+                description: |-
+                  storage configures the persistent volumes backing both roles and their
+                  retention on cluster deletion.
+                properties:
+                  coordinators:
+                    default: {}
+                    description: coordinators configures the storage of every coordinator
+                      pod.
+                    properties:
+                      createLogStorageClaim:
+                        default: true
+                        description: |-
+                          createLogStorageClaim decides whether every pod of the role gets a log
+                          storage claim at all. With it disabled the operator drops the claim and
+                          passes an empty --log-file, which turns file logging off, so stderr and
+                          `kubectl logs` (plus whatever collects it) become the single log sink. Use
+                          it to avoid a second PersistentVolumeClaim per pod on clusters that ship
+                          logs off-node anyway.
+
+                          The remaining log* knobs below are ignored while this is false.
+
+                          Like the sizes and classes around it this is effectively a create-time
+                          choice: flipping it adds or removes a volumeClaimTemplate, which
+                          Kubernetes forbids on a live StatefulSet, so the operator's apply is
+                          rejected until the StatefulSet is recreated (delete it with
+                          --cascade=orphan and the operator rebuilds it around the running pods).
+                        type: boolean
+                      libPVCSize:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        default: 1Gi
+                        description: |-
+                          libPVCSize is the requested size of the lib storage claim, which backs
+                          Memgraph's data directory (snapshots, WAL, and durability metadata).
+                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                        x-kubernetes-int-or-string: true
+                      libStorageAccessMode:
+                        default: ReadWriteOnce
+                        description: |-
+                          libStorageAccessMode is the access mode requested for the lib storage
+                          claim.
+                        enum:
+                        - ReadWriteOnce
+                        - ReadOnlyMany
+                        - ReadWriteMany
+                        - ReadWriteOncePod
+                        type: string
+                      libStorageClassName:
+                        description: |-
+                          libStorageClassName is the StorageClass backing the lib storage claim.
+                          Leave it unset to use the cluster's default StorageClass; set it to the
+                          empty string to disable dynamic provisioning and bind a pre-created
+                          PersistentVolume.
+                        maxLength: 253
+                        type: string
+                      logPVCSize:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        default: 1Gi
+                        description: |-
+                          logPVCSize is the requested size of the log storage claim, which backs
+                          Memgraph's log file.
+                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                        x-kubernetes-int-or-string: true
+                      logStorageAccessMode:
+                        default: ReadWriteOnce
+                        description: |-
+                          logStorageAccessMode is the access mode requested for the log storage
+                          claim.
+                        enum:
+                        - ReadWriteOnce
+                        - ReadOnlyMany
+                        - ReadWriteMany
+                        - ReadWriteOncePod
+                        type: string
+                      logStorageClassName:
+                        description: |-
+                          logStorageClassName is the StorageClass backing the log storage claim.
+                          Leave it unset to use the cluster's default StorageClass; set it to the
+                          empty string to disable dynamic provisioning and bind a pre-created
+                          PersistentVolume.
+                        maxLength: 253
+                        type: string
+                    type: object
+                  data:
+                    default: {}
+                    description: data configures the storage of every data instance
+                      pod.
+                    properties:
+                      createLogStorageClaim:
+                        default: true
+                        description: |-
+                          createLogStorageClaim decides whether every pod of the role gets a log
+                          storage claim at all. With it disabled the operator drops the claim and
+                          passes an empty --log-file, which turns file logging off, so stderr and
+                          `kubectl logs` (plus whatever collects it) become the single log sink. Use
+                          it to avoid a second PersistentVolumeClaim per pod on clusters that ship
+                          logs off-node anyway.
+
+                          The remaining log* knobs below are ignored while this is false.
+
+                          Like the sizes and classes around it this is effectively a create-time
+                          choice: flipping it adds or removes a volumeClaimTemplate, which
+                          Kubernetes forbids on a live StatefulSet, so the operator's apply is
+                          rejected until the StatefulSet is recreated (delete it with
+                          --cascade=orphan and the operator rebuilds it around the running pods).
+                        type: boolean
+                      libPVCSize:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        default: 1Gi
+                        description: |-
+                          libPVCSize is the requested size of the lib storage claim, which backs
+                          Memgraph's data directory (snapshots, WAL, and durability metadata).
+                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                        x-kubernetes-int-or-string: true
+                      libStorageAccessMode:
+                        default: ReadWriteOnce
+                        description: |-
+                          libStorageAccessMode is the access mode requested for the lib storage
+                          claim.
+                        enum:
+                        - ReadWriteOnce
+                        - ReadOnlyMany
+                        - ReadWriteMany
+                        - ReadWriteOncePod
+                        type: string
+                      libStorageClassName:
+                        description: |-
+                          libStorageClassName is the StorageClass backing the lib storage claim.
+                          Leave it unset to use the cluster's default StorageClass; set it to the
+                          empty string to disable dynamic provisioning and bind a pre-created
+                          PersistentVolume.
+                        maxLength: 253
+                        type: string
+                      logPVCSize:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        default: 1Gi
+                        description: |-
+                          logPVCSize is the requested size of the log storage claim, which backs
+                          Memgraph's log file.
+                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                        x-kubernetes-int-or-string: true
+                      logStorageAccessMode:
+                        default: ReadWriteOnce
+                        description: |-
+                          logStorageAccessMode is the access mode requested for the log storage
+                          claim.
+                        enum:
+                        - ReadWriteOnce
+                        - ReadOnlyMany
+                        - ReadWriteMany
+                        - ReadWriteOncePod
+                        type: string
+                      logStorageClassName:
+                        description: |-
+                          logStorageClassName is the StorageClass backing the log storage claim.
+                          Leave it unset to use the cluster's default StorageClass; set it to the
+                          empty string to disable dynamic provisioning and bind a pre-created
+                          PersistentVolume.
+                        maxLength: 253
+                        type: string
+                    type: object
+                  retentionPolicy:
+                    default: Retain
+                    description: |-
+                      retentionPolicy decides whether a PersistentVolumeClaim of this cluster
+                      survives being orphaned, which happens two ways: the MemgraphCluster is
+                      deleted, or a lowered replica count retires the pod that used it. Both are
+                      the same question — keep this cluster's data, or do not — so the policy
+                      maps onto both halves of the StatefulSets'
+                      persistentVolumeClaimRetentionPolicy, whenDeleted and whenScaled. That
+                      makes the StatefulSet controller the only thing that ever deletes storage;
+                      the operator owns no finalizer and runs no cleanup of its own. The default
+                      keeps production data safe from an accidental delete or shrink; dev
+                      clusters can opt into self-cleanup.
+
+                      Delete therefore makes lowering spec.coordinators or spec.dataInstances
+                      destructive: the retiring pods' claims go with them.
+                    enum:
+                    - Retain
+                    - Delete
+                    type: string
+                type: object
+            type: object
+          status:
+            description: status defines the observed state of MemgraphCluster
+            properties:
+              conditions:
+                description: |-
+                  conditions represent the current state of the MemgraphCluster resource.
+                  Each condition has a unique type and reflects the status of a specific aspect of the resource.
+
+                  Standard condition types include:
+                  - "Available": the resource is fully functional
+                  - "Progressing": the resource is being created or updated
+                  - "Degraded": the resource failed to reach or maintain its desired state
+
+                  The status of each condition is one of True, False, or Unknown.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              coordinators:
+                description: |-
+                  coordinators is how many of the declared coordinators the coordinator
+                  leader reports as registered members of the Raft cluster. It reaches
+                  spec.coordinators once registration has converged, so it is what a scale
+                  is watched through.
+                format: int32
+                type: integer
+              dataInstances:
+                description: |-
+                  dataInstances is how many of the declared data instances the coordinator
+                  leader reports as registered. It reaches spec.dataInstances once
+                  registration has converged.
+                format: int32
+                type: integer
+              main:
+                description: |-
+                  main is the name of the data instance currently observed as MAIN, as
+                  reported by SHOW INSTANCES on the coordinator leader. It is empty before
+                  the initial MAIN is elected and updates when the Raft coordinators fail
+                  over to a different instance.
+                type: string
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
