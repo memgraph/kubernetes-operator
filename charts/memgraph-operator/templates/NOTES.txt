@@ -16,7 +16,7 @@ referencing a Secret that holds your Memgraph enterprise license:
     dataInstances: 2
     image:
       repository: docker.io/memgraph/memgraph
-      tag: 3.12.0-relwithdebinfo
+      tag: 3.13.0-relwithdebinfo
     secrets:
       name: memgraph-secrets
       licenseKey: MEMGRAPH_ENTERPRISE_LICENSE

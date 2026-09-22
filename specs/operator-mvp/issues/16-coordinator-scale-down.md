@@ -25,7 +25,7 @@ The stale view a dormant coordinator would otherwise serve is already handled: `
 - [ ] `Converged` is False with reason `RetirementInProgress`, or `LeadershipTransferInProgress` while a yield is pending, until the pods are gone
 - [ ] Planner unit tests: leader on a retiring ordinal, leader on a survivor, two coordinators retiring at once, an already-removed retiring member, a retiring coordinator alongside retiring data instances
 - [ ] Retiring PVCs follow `spec.storage.retentionPolicy` on scale-down
-- [ ] E2E: on the scaling cluster, leadership is forced onto `coordinator_4` via `YIELD LEADERSHIP`, then the count drops to 3 — leadership moves to a survivor, both retiring members leave the Raft cluster, and the cluster reaches `Converged`
+- [ ] E2E: on the scaling cluster, leadership is forced onto `coordinator_3` via `YIELD LEADERSHIP`, then the count drops to 3 — leadership moves to a survivor, both retiring members leave the Raft cluster, and the cluster reaches `Converged`
 - [ ] Manual verification recorded in this issue: shrink 5 to 3 and re-grow to 5 under `Retain`, confirming `SHOW INSTANCES` converges with the retained coordinator volumes
 
 ## Blocked by

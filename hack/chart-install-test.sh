@@ -103,7 +103,7 @@ spec:
   dataInstances: 1
   image:
     repository: docker.io/memgraph/memgraph
-    tag: 3.12.0
+    tag: 3.13.0
   secrets:
     name: memgraph-secrets
     licenseKey: MEMGRAPH_ENTERPRISE_LICENSE

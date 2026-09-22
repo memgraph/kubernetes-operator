@@ -89,7 +89,7 @@ type Pod struct {
 	UID string
 
 	// Instance is the name this pod's Memgraph instance is known by in SHOW
-	// INSTANCES — instance_N for data pods, coordinator_N+1 for coordinators.
+	// INSTANCES — instance_N for data pods and coordinator_N for coordinators.
 	// The decision matches observations by this name, never by pod name.
 	Instance string
 

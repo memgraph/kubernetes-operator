@@ -27,7 +27,7 @@ spec:
   # repository.
   image:
     repository: docker.io/memgraph/memgraph
-    tag: 3.12.0-relwithdebinfo
+    tag: 3.13.0-relwithdebinfo
     pullPolicy: IfNotPresent
   # References an existing Secret holding the enterprise license; the CR
   # carries no secret material itself.

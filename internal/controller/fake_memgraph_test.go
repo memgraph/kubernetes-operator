@@ -408,7 +408,7 @@ func (c *fakeClient) execute(command string, apply func() error) error {
 // selfName is the instance name of the coordinator this connection is served
 // by. Addresses are the resource builders' pod FQDNs
 // ("<statefulset>-<ordinal>.<service>.<namespace>.svc.<domain>:<port>") and the
-// coordinator on pod ordinal N runs with Raft ID N+1.
+// coordinator on pod ordinal N runs with Raft ID N.
 func (c *fakeClient) selfName() (string, error) {
 	pod, _, _ := strings.Cut(c.address, ".")
 	dash := strings.LastIndex(pod, "-")
@@ -419,7 +419,7 @@ func (c *fakeClient) selfName() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("fake memgraph: %s carries no pod ordinal: %w", c.address, err)
 	}
-	return fmt.Sprintf("coordinator_%d", ordinal+1), nil
+	return fmt.Sprintf("coordinator_%d", ordinal), nil
 }
 
 // hasInstance must be called with the cluster lock held.

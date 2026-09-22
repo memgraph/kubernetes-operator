@@ -51,7 +51,7 @@ spec:
   dataInstances: 2
   image:
     repository: docker.io/memgraph/memgraph
-    tag: "3.12.0"
+    tag: "3.13.0"
   secrets:
     name: memgraph-secrets
     licenseKey: MEMGRAPH_ENTERPRISE_LICENSE
@@ -105,7 +105,7 @@ The resource's identities follow the pod ordinals. For a cluster named `memgraph
 
 | Pod | Registered as | Role |
 | --- | --- | --- |
-| `memgraph-coordinator-0`, `-1`, `-2` | `coordinator_1`, `coordinator_2`, `coordinator_3` | Raft coordinators |
+| `memgraph-coordinator-0`, `-1`, `-2` | `coordinator_0`, `coordinator_1`, `coordinator_2` | Raft coordinators |
 | `memgraph-data-0`, `-1` | `instance_0`, `instance_1` | data instances (one MAIN, the rest replicas) |
 
 Ask a coordinator for the cluster's own view of itself:

@@ -34,7 +34,7 @@ const (
 	DefaultDataInstanceCount int32 = 2
 
 	DefaultImageRepository = "docker.io/memgraph/memgraph"
-	DefaultImageTag        = "3.12.0-relwithdebinfo"
+	DefaultImageTag        = "3.13.0-relwithdebinfo"
 	DefaultImagePullPolicy = corev1.PullIfNotPresent
 
 	DefaultSecretName            = "memgraph-secrets"
@@ -89,7 +89,7 @@ const (
 	EnvOrganization = "MEMGRAPH_ORGANIZATION_NAME"
 
 	// EnvPodName carries the pod's own name, from which a coordinator derives
-	// its ordinal-dependent identity at startup.
+	// its zero-based ordinal identity and stable hostname at startup.
 	EnvPodName = "POD_NAME"
 
 	// EnvCoreDumpsDir carries the core dumps mount path into the uploader
@@ -253,7 +253,7 @@ type ImageSpec struct {
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=128
 	// +kubebuilder:validation:Pattern=`^[a-zA-Z0-9_][a-zA-Z0-9._-]*$`
-	// +kubebuilder:default="3.12.0-relwithdebinfo"
+	// +kubebuilder:default="3.13.0-relwithdebinfo"
 	// +optional
 	Tag string `json:"tag,omitempty"`
 

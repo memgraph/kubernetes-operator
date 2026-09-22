@@ -194,7 +194,7 @@ var _ = Describe("MemgraphCluster Controller", func() {
 				podSpec := sts.Spec.Template.Spec
 				Expect(podSpec.Containers).To(HaveLen(1))
 				container := podSpec.Containers[0]
-				Expect(container.Image).To(Equal("docker.io/memgraph/memgraph:3.12.0-relwithdebinfo"))
+				Expect(container.Image).To(Equal("docker.io/memgraph/memgraph:3.13.0-relwithdebinfo"))
 				Expect(podSpec.SecurityContext.RunAsUser).To(HaveValue(Equal(int64(101))))
 				Expect(podSpec.SecurityContext.RunAsGroup).To(HaveValue(Equal(int64(103))))
 
@@ -378,12 +378,12 @@ var _ = Describe("MemgraphCluster Controller", func() {
 				resourceName, ordinal, resourceName, resourceNamespace, memgraphcomv1alpha1.BoltPort)
 		}
 
-		// observedCoordinator reports the coordinator with the given 1-based
-		// Raft ID, which runs on the pod with ordinal ID-1.
+		// observedCoordinator reports the coordinator with the given zero-based
+		// Raft ID, which equals its pod ordinal.
 		observedCoordinator := func(id int, role string) memgraph.Instance {
 			return memgraph.Instance{
 				Name:       fmt.Sprintf("coordinator_%d", id),
-				BoltServer: coordinatorAddress(id - 1),
+				BoltServer: coordinatorAddress(id),
 				Health:     "up",
 				Role:       role,
 			}
@@ -426,9 +426,9 @@ var _ = Describe("MemgraphCluster Controller", func() {
 
 			leader := coordinatorAddress(0)
 			Expect(fake.executedCommands()).To(Equal([]string{
+				leader + ": ADD COORDINATOR 0",
 				leader + ": ADD COORDINATOR 1",
 				leader + ": ADD COORDINATOR 2",
-				leader + ": ADD COORDINATOR 3",
 				leader + ": REGISTER INSTANCE instance_0",
 				leader + ": REGISTER INSTANCE instance_1",
 				leader + ": SET INSTANCE instance_0 TO MAIN",
@@ -449,8 +449,8 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			// fake rejects duplicate registrations and second promotions, so
 			// re-issuing anything fails this test loudly.
 			fake.setInstances([]memgraph.Instance{
-				observedCoordinator(1, memgraph.RoleLeader),
-				observedCoordinator(2, memgraph.RoleFollower),
+				observedCoordinator(0, memgraph.RoleLeader),
+				observedCoordinator(1, memgraph.RoleFollower),
 				observedDataInstance(0, memgraph.RoleMain),
 			})
 
@@ -460,16 +460,16 @@ var _ = Describe("MemgraphCluster Controller", func() {
 
 			leader := coordinatorAddress(0)
 			Expect(fake.executedCommands()).To(Equal([]string{
-				leader + ": ADD COORDINATOR 3",
+				leader + ": ADD COORDINATOR 2",
 				leader + ": REGISTER INSTANCE instance_1",
 			}))
 		})
 
 		It("should execute registration on the leader a follower reports", func() {
 			fake.setInstances([]memgraph.Instance{
-				observedCoordinator(1, memgraph.RoleFollower),
-				observedCoordinator(2, memgraph.RoleLeader),
-				observedCoordinator(3, memgraph.RoleFollower),
+				observedCoordinator(0, memgraph.RoleFollower),
+				observedCoordinator(1, memgraph.RoleLeader),
+				observedCoordinator(2, memgraph.RoleFollower),
 			})
 
 			reconcileCluster(resourceName)
@@ -491,17 +491,17 @@ var _ = Describe("MemgraphCluster Controller", func() {
 		// planned against.
 		It("should skip a coordinator reporting no leader and plan on the next one's view", func() {
 			fake.setInstances([]memgraph.Instance{
-				observedCoordinator(1, memgraph.RoleFollower),
-				observedCoordinator(2, memgraph.RoleLeader),
-				observedCoordinator(3, memgraph.RoleFollower),
+				observedCoordinator(0, memgraph.RoleFollower),
+				observedCoordinator(1, memgraph.RoleLeader),
+				observedCoordinator(2, memgraph.RoleFollower),
 				observedDataInstance(0, memgraph.RoleMain),
 			})
-			// coordinator_1 lost the leader and still remembers a cluster that
+			// coordinator_0 lost the leader and still remembers a cluster that
 			// has both data instances registered.
 			fake.setStaleView(coordinatorAddress(0), []memgraph.Instance{
+				observedCoordinator(0, memgraph.RoleFollower),
 				observedCoordinator(1, memgraph.RoleFollower),
 				observedCoordinator(2, memgraph.RoleFollower),
-				observedCoordinator(3, memgraph.RoleFollower),
 				observedDataInstance(0, memgraph.RoleMain),
 				observedDataInstance(1, memgraph.RoleReplica),
 			})
@@ -519,9 +519,9 @@ var _ = Describe("MemgraphCluster Controller", func() {
 		It("should issue nothing while no coordinator reports a leader", func() {
 			// Quorum lost: every coordinator answers, none names a leader.
 			fake.setInstances([]memgraph.Instance{
+				observedCoordinator(0, memgraph.RoleFollower),
 				observedCoordinator(1, memgraph.RoleFollower),
 				observedCoordinator(2, memgraph.RoleFollower),
-				observedCoordinator(3, memgraph.RoleFollower),
 			})
 
 			reconcileCluster(resourceName)
@@ -540,10 +540,10 @@ var _ = Describe("MemgraphCluster Controller", func() {
 		// cluster can still hold leadership.
 		It("should register on a leader outside the declared coordinator set", func() {
 			fake.setInstances([]memgraph.Instance{
+				observedCoordinator(0, memgraph.RoleFollower),
 				observedCoordinator(1, memgraph.RoleFollower),
 				observedCoordinator(2, memgraph.RoleFollower),
-				observedCoordinator(3, memgraph.RoleFollower),
-				observedCoordinator(4, memgraph.RoleLeader),
+				observedCoordinator(3, memgraph.RoleLeader),
 				observedDataInstance(0, memgraph.RoleMain),
 			})
 
@@ -561,9 +561,9 @@ var _ = Describe("MemgraphCluster Controller", func() {
 		// steady state drift is introduced against below.
 		convergedCluster := func() []memgraph.Instance {
 			return []memgraph.Instance{
-				observedCoordinator(1, memgraph.RoleLeader),
+				observedCoordinator(0, memgraph.RoleLeader),
+				observedCoordinator(1, memgraph.RoleFollower),
 				observedCoordinator(2, memgraph.RoleFollower),
-				observedCoordinator(3, memgraph.RoleFollower),
 				observedDataInstance(0, memgraph.RoleMain),
 				observedDataInstance(1, memgraph.RoleReplica),
 			}
@@ -579,9 +579,9 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			// instance_1 loses its registration (pod rescheduled onto a fresh
 			// node): drop it from the observed view and reconcile again.
 			fake.setInstances([]memgraph.Instance{
-				observedCoordinator(1, memgraph.RoleLeader),
+				observedCoordinator(0, memgraph.RoleLeader),
+				observedCoordinator(1, memgraph.RoleFollower),
 				observedCoordinator(2, memgraph.RoleFollower),
-				observedCoordinator(3, memgraph.RoleFollower),
 				observedDataInstance(0, memgraph.RoleMain),
 			})
 
@@ -602,10 +602,10 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			reconcileCluster(resourceName)
 			Expect(fake.executedCommands()).To(BeEmpty(), "the cluster started converged")
 
-			// coordinator_3 disappears from the Raft cluster view.
+			// coordinator_2 disappears from the Raft cluster view.
 			fake.setInstances([]memgraph.Instance{
-				observedCoordinator(1, memgraph.RoleLeader),
-				observedCoordinator(2, memgraph.RoleFollower),
+				observedCoordinator(0, memgraph.RoleLeader),
+				observedCoordinator(1, memgraph.RoleFollower),
 				observedDataInstance(0, memgraph.RoleMain),
 				observedDataInstance(1, memgraph.RoleReplica),
 			})
@@ -614,7 +614,7 @@ var _ = Describe("MemgraphCluster Controller", func() {
 
 			leader := coordinatorAddress(0)
 			Expect(fake.executedCommands()).To(Equal([]string{
-				leader + ": ADD COORDINATOR 3",
+				leader + ": ADD COORDINATOR 2",
 			}), "only the missing coordinator is re-added")
 		})
 
@@ -646,13 +646,13 @@ var _ = Describe("MemgraphCluster Controller", func() {
 		// can put MAIN where it needs it before lowering a count.
 		convergedWith := func(dataInstances, mainOrdinal int) []memgraph.Instance {
 			instances := make([]memgraph.Instance, 0, 3+dataInstances)
-			for id := 1; id <= 3; id++ {
+			for id := range 3 {
 				role := memgraph.RoleFollower
-				if id == 1 {
+				if id == 0 {
 					role = memgraph.RoleLeader
 				}
 				instances = append(instances, memgraph.Instance{
-					Name: fmt.Sprintf("coordinator_%d", id), BoltServer: coordinatorAddress(id - 1),
+					Name: fmt.Sprintf("coordinator_%d", id), BoltServer: coordinatorAddress(id),
 					Health: memgraph.HealthUp, Role: role,
 				})
 			}
@@ -759,8 +759,8 @@ var _ = Describe("MemgraphCluster Controller", func() {
 
 			leader := coordinatorAddress(0)
 			Expect(sinceBootstrap(baseline)).To(Equal([]string{
+				leader + ": ADD COORDINATOR 3",
 				leader + ": ADD COORDINATOR 4",
-				leader + ": ADD COORDINATOR 5",
 				leader + ": REGISTER INSTANCE instance_2",
 			}), "the members the cluster already has are left alone, and no MAIN is re-promoted")
 
@@ -802,15 +802,15 @@ var _ = Describe("MemgraphCluster Controller", func() {
 
 			leader := coordinatorAddress(0)
 			Expect(sinceBootstrap(baseline)).To(Equal([]string{
+				leader + ": REMOVE COORDINATOR 3",
 				leader + ": REMOVE COORDINATOR 4",
-				leader + ": REMOVE COORDINATOR 5",
 			}), "both retiring members leave the Raft cluster in one pass under a surviving leader")
 			Expect(replicas(coordinatorSuffix)).To(Equal(int32(5)),
 				"a pass with pending commands must never lower the replica count")
 			converged := convergedCondition()
 			Expect(converged.Status).To(Equal(metav1.ConditionFalse))
 			Expect(converged.Reason).To(Equal(memgraphcomv1alpha1.ReasonRetirementInProgress))
-			Expect(converged.Message).To(ContainSubstring("coordinator_4"),
+			Expect(converged.Message).To(ContainSubstring("coordinator_3"),
 				"the condition must name the coordinators being retired")
 
 			By("shedding the pods once the members have left the Raft cluster")
@@ -838,20 +838,20 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			baseline := grownToFive()
 
 			By("parking Raft leadership on the coordinator the shrink retires")
-			fake.setLeader("coordinator_4")
+			fake.setLeader("coordinator_3")
 
 			setCounts(3, 2)
 			reconcileCluster(resourceName)
 
 			retiringLeader := coordinatorAddress(3)
 			Expect(sinceBootstrap(baseline)).To(Equal([]string{
-				retiringLeader + ": REMOVE COORDINATOR 5",
+				retiringLeader + ": REMOVE COORDINATOR 4",
 				retiringLeader + ": YIELD LEADERSHIP",
 			}), "the yield comes last, after the removal the planner could still order safely")
 			converged := convergedCondition()
 			Expect(converged.Status).To(Equal(metav1.ConditionFalse))
 			Expect(converged.Reason).To(Equal(memgraphcomv1alpha1.ReasonLeadershipTransferInProgress))
-			Expect(converged.Message).To(ContainSubstring("coordinator_4"),
+			Expect(converged.Message).To(ContainSubstring("coordinator_3"),
 				"the condition must name the coordinator being moved off leadership")
 			Expect(replicas(coordinatorSuffix)).To(Equal(int32(5)),
 				"a pass with a pending yield must never lower the replica count")
@@ -859,9 +859,9 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			By("removing the former leader on the next pass, under whichever coordinator won")
 			reconcileCluster(resourceName)
 			Expect(sinceBootstrap(baseline)).To(Equal([]string{
-				retiringLeader + ": REMOVE COORDINATOR 5",
+				retiringLeader + ": REMOVE COORDINATOR 4",
 				retiringLeader + ": YIELD LEADERSHIP",
-				coordinatorAddress(0) + ": REMOVE COORDINATOR 4",
+				coordinatorAddress(0) + ": REMOVE COORDINATOR 3",
 			}))
 			Expect(convergedCondition().Reason).To(Equal(memgraphcomv1alpha1.ReasonRetirementInProgress))
 
@@ -902,13 +902,13 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			leader := coordinatorAddress(0)
 			Expect(sinceBootstrap(baseline)).To(Equal([]string{
 				leader + ": UNREGISTER INSTANCE instance_1",
+				leader + ": REMOVE COORDINATOR 3",
 				leader + ": REMOVE COORDINATOR 4",
-				leader + ": REMOVE COORDINATOR 5",
 			}), "the surviving MAIN is left alone, and each role's removals are planned on their own")
 			Expect(replicas(coordinatorSuffix)).To(Equal(int32(5)))
 			Expect(replicas(dataSuffix)).To(Equal(int32(2)))
 			Expect(convergedCondition().Message).To(SatisfyAll(
-				ContainSubstring("coordinator_4"), ContainSubstring("instance_1")),
+				ContainSubstring("coordinator_3"), ContainSubstring("instance_1")),
 				"the condition must name the retiring members of both roles")
 
 			reconcileCluster(resourceName)
@@ -1185,11 +1185,11 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			// cluster has, which is what makes it worth watching during a scale.
 			fake.setInstances([]memgraph.Instance{
 				{
-					Name: "coordinator_1", BoltServer: coordinatorAddress(0),
+					Name: "coordinator_0", BoltServer: coordinatorAddress(0),
 					Health: memgraph.HealthUp, Role: memgraph.RoleLeader,
 				},
 				{
-					Name: "coordinator_2", BoltServer: coordinatorAddress(1),
+					Name: "coordinator_1", BoltServer: coordinatorAddress(1),
 					Health: memgraph.HealthUp, Role: memgraph.RoleFollower,
 				},
 				{Name: "instance_0", Health: memgraph.HealthUp, Role: memgraph.RoleMain},
@@ -1197,7 +1197,7 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			reconcileCluster(resourceName)
 
 			s := status()
-			Expect(s.Coordinators).To(Equal(int32(2)), "coordinator_3 is no longer a member")
+			Expect(s.Coordinators).To(Equal(int32(2)), "coordinator_2 is no longer a member")
 			Expect(s.DataInstances).To(Equal(int32(1)))
 		})
 	})
@@ -1209,7 +1209,7 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			return memgraph.Instance{
 				Name: fmt.Sprintf("coordinator_%d", id),
 				BoltServer: fmt.Sprintf("%s-coordinator-%d.%s-coordinator.%s.svc.cluster.local:%d",
-					resourceName, id-1, resourceName, resourceNamespace, memgraphcomv1alpha1.BoltPort),
+					resourceName, id, resourceName, resourceNamespace, memgraphcomv1alpha1.BoltPort),
 				Health: "up",
 				Role:   role,
 			}
@@ -1219,9 +1219,9 @@ var _ = Describe("MemgraphCluster Controller", func() {
 		}
 		convergedCluster := func() []memgraph.Instance {
 			return []memgraph.Instance{
-				observedCoordinator(1, memgraph.RoleLeader),
+				observedCoordinator(0, memgraph.RoleLeader),
+				observedCoordinator(1, memgraph.RoleFollower),
 				observedCoordinator(2, memgraph.RoleFollower),
-				observedCoordinator(3, memgraph.RoleFollower),
 				observedDataInstance(0, memgraph.RoleMain),
 				observedDataInstance(1, memgraph.RoleReplica),
 			}
@@ -1288,9 +1288,9 @@ var _ = Describe("MemgraphCluster Controller", func() {
 		// they get their own reason.
 		It("should report a missing quorum apart from unreachable coordinators", func() {
 			fake.setInstances([]memgraph.Instance{
+				observedCoordinator(0, memgraph.RoleFollower),
 				observedCoordinator(1, memgraph.RoleFollower),
 				observedCoordinator(2, memgraph.RoleFollower),
-				observedCoordinator(3, memgraph.RoleFollower),
 				observedDataInstance(0, memgraph.RoleMain),
 			})
 			reconcileCluster(resourceName)
@@ -1362,9 +1362,9 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			// A replica loses its registration and the leader refuses to take it
 			// back, which is the shape of a plan no retry can converge.
 			fake.setInstances([]memgraph.Instance{
-				observedCoordinator(1, memgraph.RoleLeader),
+				observedCoordinator(0, memgraph.RoleLeader),
+				observedCoordinator(1, memgraph.RoleFollower),
 				observedCoordinator(2, memgraph.RoleFollower),
-				observedCoordinator(3, memgraph.RoleFollower),
 				observedDataInstance(0, memgraph.RoleMain),
 			})
 			fake.rejectCommand("REGISTER INSTANCE instance_1", errors.New("replication port already in use"))
@@ -1416,9 +1416,9 @@ var _ = Describe("MemgraphCluster Controller", func() {
 
 			// A replica loses its registration; the MAIN keeps serving.
 			fake.setInstances([]memgraph.Instance{
-				observedCoordinator(1, memgraph.RoleLeader),
+				observedCoordinator(0, memgraph.RoleLeader),
+				observedCoordinator(1, memgraph.RoleFollower),
 				observedCoordinator(2, memgraph.RoleFollower),
-				observedCoordinator(3, memgraph.RoleFollower),
 				observedDataInstance(0, memgraph.RoleMain),
 			})
 			reconcileCluster(resourceName)
@@ -1443,9 +1443,9 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			// The Raft coordinators fail over to instance_1; the operator only
 			// observes the new MAIN, it never promotes one.
 			fake.setInstances([]memgraph.Instance{
-				observedCoordinator(1, memgraph.RoleLeader),
+				observedCoordinator(0, memgraph.RoleLeader),
+				observedCoordinator(1, memgraph.RoleFollower),
 				observedCoordinator(2, memgraph.RoleFollower),
-				observedCoordinator(3, memgraph.RoleFollower),
 				observedDataInstance(0, memgraph.RoleReplica),
 				observedDataInstance(1, memgraph.RoleMain),
 			})
@@ -1482,9 +1482,9 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			Expect(status().Main).To(Equal("instance_0"))
 
 			fake.setInstances([]memgraph.Instance{
-				observedCoordinator(1, memgraph.RoleLeader),
+				observedCoordinator(0, memgraph.RoleLeader),
+				observedCoordinator(1, memgraph.RoleFollower),
 				observedCoordinator(2, memgraph.RoleFollower),
-				observedCoordinator(3, memgraph.RoleFollower),
 				func() memgraph.Instance {
 					main := observedDataInstance(0, memgraph.RoleMain)
 					main.Health = "down"
@@ -1512,7 +1512,7 @@ var _ = Describe("MemgraphCluster Controller", func() {
 
 		observedCoordinator := func(id int, role string) memgraph.Instance {
 			host := fmt.Sprintf("%s-coordinator-%d.%s-coordinator.%s.svc.cluster.local",
-				resourceName, id-1, resourceName, resourceNamespace)
+				resourceName, id, resourceName, resourceNamespace)
 			return memgraph.Instance{
 				Name:       fmt.Sprintf("coordinator_%d", id),
 				BoltServer: fmt.Sprintf("%s:%d", host, memgraphcomv1alpha1.BoltPort),
@@ -1528,9 +1528,9 @@ var _ = Describe("MemgraphCluster Controller", func() {
 		}
 		convergedCluster := func() []memgraph.Instance {
 			return []memgraph.Instance{
-				observedCoordinator(1, memgraph.RoleLeader),
+				observedCoordinator(0, memgraph.RoleLeader),
+				observedCoordinator(1, memgraph.RoleFollower),
 				observedCoordinator(2, memgraph.RoleFollower),
-				observedCoordinator(3, memgraph.RoleFollower),
 				observedDataInstance(0, memgraph.RoleMain),
 				observedDataInstance(1, memgraph.RoleReplica),
 			}
@@ -1667,15 +1667,15 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			// The coordinators fail over to instance_1, and the old MAIN returns as a
 			// replica — which is what the operator observes rather than arranges.
 			fake.setInstances([]memgraph.Instance{
-				observedCoordinator(1, memgraph.RoleLeader),
+				observedCoordinator(0, memgraph.RoleLeader),
+				observedCoordinator(1, memgraph.RoleFollower),
 				observedCoordinator(2, memgraph.RoleFollower),
-				observedCoordinator(3, memgraph.RoleFollower),
 				observedDataInstance(0, memgraph.RoleReplica),
 				observedDataInstance(1, memgraph.RoleMain),
 			})
 			putPod(dataSuffix, "data", 0, newRevision)
 
-			// Data done: coordinator_1 leads on ordinal 0, so ordinal 2 goes first.
+			// Data done: coordinator_0 leads on ordinal 0, so ordinal 2 goes first.
 			reconcileCluster(resourceName)
 			Expect(podExists(coordinatorSuffix, 2)).To(BeFalse())
 			Expect(podExists(coordinatorSuffix, 0)).To(BeTrue(), "the Raft leader's pod is last")
@@ -1716,9 +1716,9 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			putPods(oldRevision)
 			declareRevision(newRevision)
 			fake.setInstances([]memgraph.Instance{
-				observedCoordinator(1, memgraph.RoleLeader),
+				observedCoordinator(0, memgraph.RoleLeader),
+				observedCoordinator(1, memgraph.RoleFollower),
 				observedCoordinator(2, memgraph.RoleFollower),
-				observedCoordinator(3, memgraph.RoleFollower),
 				observedDataInstance(0, memgraph.RoleMain),
 			})
 

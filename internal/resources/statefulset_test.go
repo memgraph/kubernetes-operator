@@ -57,7 +57,7 @@ const (
 
 	tmpVolume       = "tmp"
 	shell           = "/bin/sh"
-	defaultImageRef = "docker.io/memgraph/memgraph:3.12.0-relwithdebinfo"
+	defaultImageRef = "docker.io/memgraph/memgraph:3.13.0-relwithdebinfo"
 	coreDumpsVolume = "core-dumps"
 	coreDumpsPath   = "/var/core/memgraph"
 	dataPath        = "/var/lib/memgraph/mg_data"
@@ -358,7 +358,7 @@ func expectedSelectorLabels(component string) map[string]string {
 
 var expectedCoordinatorScript = fmt.Sprintf(`ordinal="${POD_NAME##*-}"
 exec /usr/lib/memgraph/memgraph \
-  --coordinator-id="$((ordinal + 1))" \
+  --coordinator-id="$ordinal" \
   --coordinator-hostname="${POD_NAME}.example-coordinator.memgraph-test.svc.cluster.local" \
   --coordinator-port=%d \
   "$@"`, memgraphcomv1alpha1.CoordinatorPort)
@@ -978,12 +978,12 @@ func TestStatefulSetRetentionPolicy(t *testing.T) {
 	}
 }
 
-// The coordinator start script derives per-pod identity at runtime, so the
-// fixed coordinator port and configured cluster domain have to be baked into
-// it — this is the same identity the operator registers with the cluster.
+// The coordinator start script derives the zero-based ID and advertised
+// hostname at runtime, so the fixed coordinator port and configured cluster
+// domain have to be baked into it.
 var expectedTunedCoordinatorScript = fmt.Sprintf(`ordinal="${POD_NAME##*-}"
 exec /usr/lib/memgraph/memgraph \
-  --coordinator-id="$((ordinal + 1))" \
+  --coordinator-id="$ordinal" \
   --coordinator-hostname="${POD_NAME}.example-coordinator.memgraph-test.svc.k8s.example.com" \
   --coordinator-port=%d \
   "$@"`, memgraphcomv1alpha1.CoordinatorPort)

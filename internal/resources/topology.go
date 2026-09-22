@@ -37,10 +37,10 @@ func DeclaredDataInstances(cluster *memgraphcomv1alpha1.MemgraphCluster) int32 {
 	return normalize(cluster.Spec).dataInstances
 }
 
-// CoordinatorID is the Raft coordinator ID of the coordinator running on the pod
-// with the given ordinal. IDs are 1-based because Memgraph treats ID 0 as unset.
+// CoordinatorID is the zero-based Raft coordinator ID of the coordinator
+// running on the pod with the given ordinal.
 func CoordinatorID(ordinal int32) int32 {
-	return ordinal + 1
+	return ordinal
 }
 
 // CoordinatorInstanceName and DataInstanceName are the names the members running
@@ -72,7 +72,7 @@ func CoordinatorOrdinal(name string) (int32, error) {
 	if err != nil {
 		return 0, err
 	}
-	return id - 1, nil
+	return id, nil
 }
 
 // DataInstanceOrdinal is the ordinal of the pod running the named data instance.
@@ -86,9 +86,8 @@ func DataInstanceOrdinal(name string) (int32, error) {
 
 // DeclaredTopology derives the registration topology the planner drives the
 // cluster toward. Identity follows the pod ordinal exactly as the workload
-// pods advertise it: coordinator ordinal N is Raft coordinator N+1 (Memgraph
-// treats coordinator ID 0 as unset, so IDs stay 1-based), data ordinal N
-// registers as instance_N, and every address is the pod's stable DNS name
+// pods advertise it: coordinator ordinal N is Raft coordinator N, data ordinal
+// N registers as instance_N, and every address is the pod's stable DNS name
 // within its headless Service.
 func DeclaredTopology(cluster *memgraphcomv1alpha1.MemgraphCluster) planner.Topology {
 	spec := normalize(cluster.Spec)

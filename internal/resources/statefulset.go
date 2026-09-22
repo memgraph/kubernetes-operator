@@ -70,8 +70,8 @@ const (
 
 // CoordinatorStatefulSet builds the single StatefulSet running all
 // coordinator instances. Per-pod identity (coordinator ID, advertised FQDN)
-// is derived from the pod ordinal at startup, so the pod template stays
-// uniform across replicas.
+// is derived from the zero-based pod ordinal at startup, so the pod template
+// stays uniform across replicas.
 //
 // The replica count is an argument rather than read off the spec because the
 // count to apply is a decision about the live cluster, not about the spec: it
@@ -140,10 +140,9 @@ func DataStatefulSet(cluster *memgraphcomv1alpha1.MemgraphCluster, replicas int3
 
 // coordinatorStartScript derives the coordinator's identity from its pod
 // ordinal (the numeric suffix of the pod name): ordinal N becomes coordinator
-// ID N+1 (Memgraph treats coordinator ID 0 as unset and refuses to start, so
-// IDs stay 1-based) advertised at the pod's stable DNS name within the
-// headless Service. Every other flag arrives as a container argument and is
-// forwarded by "$@" — only the derived ones are written into the script.
+// ID N and is advertised at the pod's stable DNS name within the headless
+// Service. Every other flag arrives as a container argument and is forwarded
+// by "$@" — only the derived ones are written into the script.
 func coordinatorStartScript(
 	cluster *memgraphcomv1alpha1.MemgraphCluster,
 	spec normalizedSpec,
@@ -151,7 +150,7 @@ func coordinatorStartScript(
 	fqdnSuffix := podFQDNSuffix(cluster, CoordinatorName(cluster), spec)
 	return fmt.Sprintf(`ordinal="${POD_NAME##*-}"
 exec %s \
-  --coordinator-id="$((ordinal + 1))" \
+  --coordinator-id="$ordinal" \
   --coordinator-hostname="${POD_NAME}.%s" \
   --coordinator-port=%d \
   "$@"`, memgraphBinary, fqdnSuffix, memgraphcomv1alpha1.CoordinatorPort)

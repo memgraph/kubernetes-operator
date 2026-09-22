@@ -42,7 +42,7 @@ const (
 // fourthCoordinator is the lowest-numbered coordinator a shrink from five to
 // three retires, and the one the cases below park Raft leadership on: a
 // StatefulSet sheds its highest ordinals, so the leader may well sit on one.
-const fourthCoordinator = "coordinator_4"
+const fourthCoordinator = "coordinator_3"
 
 // declaredTopology is the canonical 3-coordinator, 2-data-instance fixture
 // the cases below diff observed cluster states against.
@@ -78,10 +78,10 @@ func mixedTopology() planner.Topology {
 // shrunkCoordinators is a cluster whose coordinators count was lowered from five
 // to three — the smallest coordinator shrink the schema floors allow, and an even
 // number of members either way — while its StatefulSet still runs all five pods:
-// coordinator_4 and coordinator_5 are Raft members on their way out.
+// coordinator_3 and coordinator_4 are Raft members on their way out.
 func shrunkCoordinators() planner.Topology {
 	topology := topologyOf(3, 2)
-	for id := int32(4); id <= 5; id++ {
+	for id := int32(3); id < 5; id++ {
 		topology.RetiringCoordinators = append(topology.RetiringCoordinators, coordinatorSpec(id))
 	}
 	return topology
@@ -97,7 +97,7 @@ func retiringBothRoles() planner.Topology {
 
 func topologyOf(coordinators int32, dataInstances int) planner.Topology {
 	topology := planner.Topology{}
-	for id := int32(1); id <= coordinators; id++ {
+	for id := range coordinators {
 		topology.Coordinators = append(topology.Coordinators, coordinatorSpec(id))
 	}
 	for i := range dataInstances {
@@ -106,10 +106,10 @@ func topologyOf(coordinators int32, dataInstances int) planner.Topology {
 	return topology
 }
 
-// coordinatorSpec builds the declared coordinator with the given 1-based Raft
-// ID (Memgraph treats ID 0 as unset), hosted on the pod with ordinal ID-1.
+// coordinatorSpec builds the declared coordinator with the given zero-based
+// Raft ID, hosted on the pod with the same ordinal.
 func coordinatorSpec(id int32) memgraph.CoordinatorSpec {
-	host := fmt.Sprintf("example-coordinator-%d.example-coordinator.default.svc.cluster.local", id-1)
+	host := fmt.Sprintf("example-coordinator-%d.example-coordinator.default.svc.cluster.local", id)
 	return memgraph.CoordinatorSpec{
 		ID:                id,
 		BoltServer:        fmt.Sprintf("%s:%d", host, memgraphcomv1alpha1.BoltPort),
@@ -258,9 +258,9 @@ func TestPlan(t *testing.T) {
 			name:     "fresh cluster bootstraps everything and promotes one MAIN",
 			observed: nil,
 			want: []planner.Command{
+				planner.AddCoordinator{Coordinator: coordinatorSpec(0)},
 				planner.AddCoordinator{Coordinator: coordinatorSpec(1)},
 				planner.AddCoordinator{Coordinator: coordinatorSpec(2)},
-				planner.AddCoordinator{Coordinator: coordinatorSpec(3)},
 				planner.RegisterInstance{Instance: dataInstanceSpec(0)},
 				planner.RegisterInstance{Instance: dataInstanceSpec(1)},
 				promote(firstInstance),
@@ -269,12 +269,12 @@ func TestPlan(t *testing.T) {
 		{
 			name: "partially registered cluster gets only the missing registrations",
 			observed: []memgraph.Instance{
-				observedCoordinator(1, memgraph.RoleLeader),
-				observedCoordinator(3, memgraph.RoleFollower),
+				observedCoordinator(0, memgraph.RoleLeader),
+				observedCoordinator(2, memgraph.RoleFollower),
 				observedDataInstance(0, memgraph.RoleMain),
 			},
 			want: []planner.Command{
-				planner.AddCoordinator{Coordinator: coordinatorSpec(2)},
+				planner.AddCoordinator{Coordinator: coordinatorSpec(1)},
 				planner.RegisterInstance{Instance: dataInstanceSpec(1)},
 			},
 		},
@@ -285,25 +285,25 @@ func TestPlan(t *testing.T) {
 				// SHOW INSTANCES with an empty bolt_server until explicitly
 				// added.
 				func() memgraph.Instance {
-					instance := observedCoordinator(2, memgraph.RoleLeader)
+					instance := observedCoordinator(1, memgraph.RoleLeader)
 					instance.BoltServer = ""
 					return instance
 				}(),
-				observedCoordinator(1, memgraph.RoleFollower),
-				observedCoordinator(3, memgraph.RoleFollower),
+				observedCoordinator(0, memgraph.RoleFollower),
+				observedCoordinator(2, memgraph.RoleFollower),
 				observedDataInstance(0, memgraph.RoleMain),
 				observedDataInstance(1, memgraph.RoleReplica),
 			},
 			want: []planner.Command{
-				planner.AddCoordinator{Coordinator: coordinatorSpec(2)},
+				planner.AddCoordinator{Coordinator: coordinatorSpec(1)},
 			},
 		},
 		{
 			name: "fully converged cluster is a no-op",
 			observed: []memgraph.Instance{
-				observedCoordinator(1, memgraph.RoleLeader),
+				observedCoordinator(0, memgraph.RoleLeader),
+				observedCoordinator(1, memgraph.RoleFollower),
 				observedCoordinator(2, memgraph.RoleFollower),
-				observedCoordinator(3, memgraph.RoleFollower),
 				observedDataInstance(0, memgraph.RoleMain),
 				observedDataInstance(1, memgraph.RoleReplica),
 			},
@@ -312,9 +312,9 @@ func TestPlan(t *testing.T) {
 		{
 			name: "an existing MAIN is never overridden, even on another instance",
 			observed: []memgraph.Instance{
-				observedCoordinator(1, memgraph.RoleLeader),
+				observedCoordinator(0, memgraph.RoleLeader),
+				observedCoordinator(1, memgraph.RoleFollower),
 				observedCoordinator(2, memgraph.RoleFollower),
-				observedCoordinator(3, memgraph.RoleFollower),
 				observedDataInstance(0, memgraph.RoleReplica),
 				observedDataInstance(1, memgraph.RoleMain),
 			},
@@ -323,9 +323,9 @@ func TestPlan(t *testing.T) {
 		{
 			name: "registered but leaderless data plane still gets the one MAIN promotion",
 			observed: []memgraph.Instance{
-				observedCoordinator(1, memgraph.RoleLeader),
+				observedCoordinator(0, memgraph.RoleLeader),
+				observedCoordinator(1, memgraph.RoleFollower),
 				observedCoordinator(2, memgraph.RoleFollower),
-				observedCoordinator(3, memgraph.RoleFollower),
 				observedDataInstance(0, memgraph.RoleReplica),
 				observedDataInstance(1, memgraph.RoleReplica),
 			},
@@ -336,9 +336,9 @@ func TestPlan(t *testing.T) {
 		{
 			name: "missing instance registers without MAIN promotion when a MAIN exists",
 			observed: []memgraph.Instance{
-				observedCoordinator(1, memgraph.RoleLeader),
+				observedCoordinator(0, memgraph.RoleLeader),
+				observedCoordinator(1, memgraph.RoleFollower),
 				observedCoordinator(2, memgraph.RoleFollower),
-				observedCoordinator(3, memgraph.RoleFollower),
 				observedDataInstance(1, memgraph.RoleMain),
 			},
 			want: []planner.Command{
@@ -351,12 +351,12 @@ func TestPlan(t *testing.T) {
 			// while instance_1 remained MAIN: every missing registration is
 			// re-issued, and no promotion is planned because a MAIN exists.
 			observed: []memgraph.Instance{
-				observedCoordinator(1, memgraph.RoleLeader),
-				observedCoordinator(3, memgraph.RoleFollower),
+				observedCoordinator(0, memgraph.RoleLeader),
+				observedCoordinator(2, memgraph.RoleFollower),
 				observedDataInstance(1, memgraph.RoleMain),
 			},
 			want: []planner.Command{
-				planner.AddCoordinator{Coordinator: coordinatorSpec(2)},
+				planner.AddCoordinator{Coordinator: coordinatorSpec(1)},
 				planner.RegisterInstance{Instance: dataInstanceSpec(0)},
 			},
 		},
@@ -366,9 +366,9 @@ func TestPlan(t *testing.T) {
 		{
 			name: "a down instance_0 is skipped in favor of the lowest reachable instance",
 			observed: []memgraph.Instance{
-				observedCoordinator(1, memgraph.RoleLeader),
+				observedCoordinator(0, memgraph.RoleLeader),
+				observedCoordinator(1, memgraph.RoleFollower),
 				observedCoordinator(2, memgraph.RoleFollower),
-				observedCoordinator(3, memgraph.RoleFollower),
 				downDataInstance(0),
 				observedDataInstance(1, memgraph.RoleReplica),
 			},
@@ -379,9 +379,9 @@ func TestPlan(t *testing.T) {
 		{
 			name: "a reachable instance_0 is promoted ahead of its higher-ordinal peers",
 			observed: []memgraph.Instance{
-				observedCoordinator(1, memgraph.RoleLeader),
+				observedCoordinator(0, memgraph.RoleLeader),
+				observedCoordinator(1, memgraph.RoleFollower),
 				observedCoordinator(2, memgraph.RoleFollower),
-				observedCoordinator(3, memgraph.RoleFollower),
 				observedDataInstance(0, memgraph.RoleReplica),
 				observedDataInstance(1, memgraph.RoleReplica),
 			},
@@ -395,9 +395,9 @@ func TestPlan(t *testing.T) {
 		{
 			name: "the first instance is promoted when none is reachable",
 			observed: []memgraph.Instance{
-				observedCoordinator(1, memgraph.RoleLeader),
+				observedCoordinator(0, memgraph.RoleLeader),
+				observedCoordinator(1, memgraph.RoleFollower),
 				observedCoordinator(2, memgraph.RoleFollower),
-				observedCoordinator(3, memgraph.RoleFollower),
 				downDataInstance(0),
 				downDataInstance(1),
 			},
@@ -411,26 +411,26 @@ func TestPlan(t *testing.T) {
 		{
 			name: "a grown topology registers only the added members",
 			observed: []memgraph.Instance{
-				observedCoordinator(1, memgraph.RoleLeader),
+				observedCoordinator(0, memgraph.RoleLeader),
+				observedCoordinator(1, memgraph.RoleFollower),
 				observedCoordinator(2, memgraph.RoleFollower),
-				observedCoordinator(3, memgraph.RoleFollower),
 				observedDataInstance(0, memgraph.RoleMain),
 				observedDataInstance(1, memgraph.RoleReplica),
 			},
 			declared: ptr.To(grownTopology()),
 			want: []planner.Command{
+				planner.AddCoordinator{Coordinator: coordinatorSpec(3)},
 				planner.AddCoordinator{Coordinator: coordinatorSpec(4)},
-				planner.AddCoordinator{Coordinator: coordinatorSpec(5)},
 				planner.RegisterInstance{Instance: dataInstanceSpec(2)},
 			},
 		},
 		{
 			name: "instances the topology does not declare are left untouched",
 			observed: []memgraph.Instance{
-				observedCoordinator(1, memgraph.RoleLeader),
+				observedCoordinator(0, memgraph.RoleLeader),
+				observedCoordinator(1, memgraph.RoleFollower),
 				observedCoordinator(2, memgraph.RoleFollower),
 				observedCoordinator(3, memgraph.RoleFollower),
-				observedCoordinator(4, memgraph.RoleFollower),
 				observedDataInstance(0, memgraph.RoleMain),
 				observedDataInstance(1, memgraph.RoleReplica),
 				observedDataInstance(2, memgraph.RoleReplica),
@@ -442,9 +442,9 @@ func TestPlan(t *testing.T) {
 		{
 			name: "a retiring instance is unregistered with the surviving MAIN untouched",
 			observed: []memgraph.Instance{
-				observedCoordinator(1, memgraph.RoleLeader),
+				observedCoordinator(0, memgraph.RoleLeader),
+				observedCoordinator(1, memgraph.RoleFollower),
 				observedCoordinator(2, memgraph.RoleFollower),
-				observedCoordinator(3, memgraph.RoleFollower),
 				observedDataInstance(0, memgraph.RoleMain),
 				observedDataInstance(1, memgraph.RoleReplica),
 				observedDataInstance(2, memgraph.RoleReplica),
@@ -460,9 +460,9 @@ func TestPlan(t *testing.T) {
 		{
 			name: "a retiring MAIN is demoted, a survivor promoted, and only then unregistered",
 			observed: []memgraph.Instance{
-				observedCoordinator(1, memgraph.RoleLeader),
+				observedCoordinator(0, memgraph.RoleLeader),
+				observedCoordinator(1, memgraph.RoleFollower),
 				observedCoordinator(2, memgraph.RoleFollower),
-				observedCoordinator(3, memgraph.RoleFollower),
 				observedDataInstance(0, memgraph.RoleReplica),
 				observedDataInstance(1, memgraph.RoleReplica),
 				observedDataInstance(2, memgraph.RoleMain),
@@ -481,9 +481,9 @@ func TestPlan(t *testing.T) {
 		{
 			name: "a retiring MAIN hands MAIN to the lowest reachable survivor",
 			observed: []memgraph.Instance{
-				observedCoordinator(1, memgraph.RoleLeader),
+				observedCoordinator(0, memgraph.RoleLeader),
+				observedCoordinator(1, memgraph.RoleFollower),
 				observedCoordinator(2, memgraph.RoleFollower),
-				observedCoordinator(3, memgraph.RoleFollower),
 				downDataInstance(0),
 				observedDataInstance(1, memgraph.RoleReplica),
 				observedDataInstance(2, memgraph.RoleMain),
@@ -501,9 +501,9 @@ func TestPlan(t *testing.T) {
 		{
 			name: "a retiring MAIN hands MAIN to the lowest caught-up survivor",
 			observed: []memgraph.Instance{
-				observedCoordinator(1, memgraph.RoleLeader),
+				observedCoordinator(0, memgraph.RoleLeader),
+				observedCoordinator(1, memgraph.RoleFollower),
 				observedCoordinator(2, memgraph.RoleFollower),
-				observedCoordinator(3, memgraph.RoleFollower),
 				observedDataInstance(0, memgraph.RoleReplica),
 				observedDataInstance(1, memgraph.RoleReplica),
 				observedDataInstance(2, memgraph.RoleMain),
@@ -523,9 +523,9 @@ func TestPlan(t *testing.T) {
 		{
 			name: "a retiring MAIN is left alone while every survivor is behind",
 			observed: []memgraph.Instance{
-				observedCoordinator(1, memgraph.RoleLeader),
+				observedCoordinator(0, memgraph.RoleLeader),
+				observedCoordinator(1, memgraph.RoleFollower),
 				observedCoordinator(2, memgraph.RoleFollower),
-				observedCoordinator(3, memgraph.RoleFollower),
 				observedDataInstance(0, memgraph.RoleReplica),
 				observedDataInstance(1, memgraph.RoleReplica),
 				observedDataInstance(2, memgraph.RoleMain),
@@ -540,9 +540,9 @@ func TestPlan(t *testing.T) {
 		{
 			name: "a retiring MAIN is left alone when no survivor is both up and caught up",
 			observed: []memgraph.Instance{
-				observedCoordinator(1, memgraph.RoleLeader),
+				observedCoordinator(0, memgraph.RoleLeader),
+				observedCoordinator(1, memgraph.RoleFollower),
 				observedCoordinator(2, memgraph.RoleFollower),
-				observedCoordinator(3, memgraph.RoleFollower),
 				downDataInstance(0),
 				observedDataInstance(1, memgraph.RoleReplica),
 				observedDataInstance(2, memgraph.RoleMain),
@@ -557,9 +557,9 @@ func TestPlan(t *testing.T) {
 		{
 			name: "a retiring MAIN is left alone when the lag view is empty",
 			observed: []memgraph.Instance{
-				observedCoordinator(1, memgraph.RoleLeader),
+				observedCoordinator(0, memgraph.RoleLeader),
+				observedCoordinator(1, memgraph.RoleFollower),
 				observedCoordinator(2, memgraph.RoleFollower),
-				observedCoordinator(3, memgraph.RoleFollower),
 				observedDataInstance(0, memgraph.RoleReplica),
 				observedDataInstance(1, memgraph.RoleReplica),
 				observedDataInstance(2, memgraph.RoleMain),
@@ -573,9 +573,9 @@ func TestPlan(t *testing.T) {
 		{
 			name: "a survivor missing from the lag view does not get MAIN",
 			observed: []memgraph.Instance{
-				observedCoordinator(1, memgraph.RoleLeader),
+				observedCoordinator(0, memgraph.RoleLeader),
+				observedCoordinator(1, memgraph.RoleFollower),
 				observedCoordinator(2, memgraph.RoleFollower),
-				observedCoordinator(3, memgraph.RoleFollower),
 				observedDataInstance(0, memgraph.RoleReplica),
 				observedDataInstance(1, memgraph.RoleReplica),
 				observedDataInstance(2, memgraph.RoleMain),
@@ -594,9 +594,9 @@ func TestPlan(t *testing.T) {
 		{
 			name: "a survivor ahead of the MAIN is still promotable",
 			observed: []memgraph.Instance{
-				observedCoordinator(1, memgraph.RoleLeader),
+				observedCoordinator(0, memgraph.RoleLeader),
+				observedCoordinator(1, memgraph.RoleFollower),
 				observedCoordinator(2, memgraph.RoleFollower),
-				observedCoordinator(3, memgraph.RoleFollower),
 				observedDataInstance(0, memgraph.RoleReplica),
 				observedDataInstance(1, memgraph.RoleReplica),
 				observedDataInstance(2, memgraph.RoleMain),
@@ -615,9 +615,9 @@ func TestPlan(t *testing.T) {
 		{
 			name: "a survivor behind in one of several databases does not get MAIN",
 			observed: []memgraph.Instance{
-				observedCoordinator(1, memgraph.RoleLeader),
+				observedCoordinator(0, memgraph.RoleLeader),
+				observedCoordinator(1, memgraph.RoleFollower),
 				observedCoordinator(2, memgraph.RoleFollower),
-				observedCoordinator(3, memgraph.RoleFollower),
 				observedDataInstance(0, memgraph.RoleReplica),
 				observedDataInstance(1, memgraph.RoleReplica),
 				observedDataInstance(2, memgraph.RoleMain),
@@ -634,9 +634,9 @@ func TestPlan(t *testing.T) {
 		{
 			name: "several retiring instances are removed down to a single survivor",
 			observed: []memgraph.Instance{
-				observedCoordinator(1, memgraph.RoleLeader),
+				observedCoordinator(0, memgraph.RoleLeader),
+				observedCoordinator(1, memgraph.RoleFollower),
 				observedCoordinator(2, memgraph.RoleFollower),
-				observedCoordinator(3, memgraph.RoleFollower),
 				observedDataInstance(0, memgraph.RoleReplica),
 				observedDataInstance(1, memgraph.RoleMain),
 				observedDataInstance(2, memgraph.RoleReplica),
@@ -656,9 +656,9 @@ func TestPlan(t *testing.T) {
 		{
 			name: "a blocked handover still unregisters the retiring instances that are not MAIN",
 			observed: []memgraph.Instance{
-				observedCoordinator(1, memgraph.RoleLeader),
+				observedCoordinator(0, memgraph.RoleLeader),
+				observedCoordinator(1, memgraph.RoleFollower),
 				observedCoordinator(2, memgraph.RoleFollower),
-				observedCoordinator(3, memgraph.RoleFollower),
 				observedDataInstance(0, memgraph.RoleReplica),
 				observedDataInstance(1, memgraph.RoleMain),
 				observedDataInstance(2, memgraph.RoleReplica),
@@ -679,9 +679,9 @@ func TestPlan(t *testing.T) {
 		{
 			name: "an already-demoted retiring MAIN leaves a promotion by reachability",
 			observed: []memgraph.Instance{
-				observedCoordinator(1, memgraph.RoleLeader),
+				observedCoordinator(0, memgraph.RoleLeader),
+				observedCoordinator(1, memgraph.RoleFollower),
 				observedCoordinator(2, memgraph.RoleFollower),
-				observedCoordinator(3, memgraph.RoleFollower),
 				observedDataInstance(0, memgraph.RoleReplica),
 				observedDataInstance(1, memgraph.RoleReplica),
 				observedDataInstance(2, memgraph.RoleReplica),
@@ -699,9 +699,9 @@ func TestPlan(t *testing.T) {
 		{
 			name: "an already-unregistered retiring instance is not unregistered again",
 			observed: []memgraph.Instance{
-				observedCoordinator(1, memgraph.RoleLeader),
+				observedCoordinator(0, memgraph.RoleLeader),
+				observedCoordinator(1, memgraph.RoleFollower),
 				observedCoordinator(2, memgraph.RoleFollower),
-				observedCoordinator(3, memgraph.RoleFollower),
 				observedDataInstance(0, memgraph.RoleMain),
 				observedDataInstance(1, memgraph.RoleReplica),
 				observedDataInstance(2, memgraph.RoleReplica),
@@ -717,9 +717,9 @@ func TestPlan(t *testing.T) {
 		{
 			name: "a mixed grow-and-shrink adds coordinators and retires a data instance",
 			observed: []memgraph.Instance{
-				observedCoordinator(1, memgraph.RoleLeader),
+				observedCoordinator(0, memgraph.RoleLeader),
+				observedCoordinator(1, memgraph.RoleFollower),
 				observedCoordinator(2, memgraph.RoleFollower),
-				observedCoordinator(3, memgraph.RoleFollower),
 				observedDataInstance(0, memgraph.RoleReplica),
 				observedDataInstance(1, memgraph.RoleReplica),
 				observedDataInstance(2, memgraph.RoleMain),
@@ -727,8 +727,8 @@ func TestPlan(t *testing.T) {
 			declared: ptr.To(mixedTopology()),
 			lag:      caughtUp(0, 1, 2),
 			want: []planner.Command{
+				planner.AddCoordinator{Coordinator: coordinatorSpec(3)},
 				planner.AddCoordinator{Coordinator: coordinatorSpec(4)},
-				planner.AddCoordinator{Coordinator: coordinatorSpec(5)},
 				planner.DemoteInstance{Name: thirdInstance},
 				handover(thirdInstance, firstInstance, secondInstance),
 				planner.UnregisterInstance{Name: thirdInstance},
@@ -739,14 +739,14 @@ func TestPlan(t *testing.T) {
 		// removing a follower needs no leadership dance.
 		{
 			name: "retiring coordinators are removed from Raft under a surviving leader",
-			observed: append(observedCoordinators(1, 1, 2, 3, 4, 5),
+			observed: append(observedCoordinators(0, 0, 1, 2, 3, 4),
 				observedDataInstance(0, memgraph.RoleMain),
 				observedDataInstance(1, memgraph.RoleReplica),
 			),
 			declared: ptr.To(shrunkCoordinators()),
 			want: []planner.Command{
+				planner.RemoveCoordinator{Coordinator: coordinatorSpec(3)},
 				planner.RemoveCoordinator{Coordinator: coordinatorSpec(4)},
-				planner.RemoveCoordinator{Coordinator: coordinatorSpec(5)},
 			},
 		},
 		// Raft refuses to remove its own leader, so a leader on a retiring ordinal
@@ -756,13 +756,13 @@ func TestPlan(t *testing.T) {
 		// follower is safe and predictable.
 		{
 			name: "a retiring leader yields last, after every removal it can still order",
-			observed: append(observedCoordinators(4, 1, 2, 3, 4, 5),
+			observed: append(observedCoordinators(3, 0, 1, 2, 3, 4),
 				observedDataInstance(0, memgraph.RoleMain),
 				observedDataInstance(1, memgraph.RoleReplica),
 			),
 			declared: ptr.To(shrunkCoordinators()),
 			want: []planner.Command{
-				planner.RemoveCoordinator{Coordinator: coordinatorSpec(5)},
+				planner.RemoveCoordinator{Coordinator: coordinatorSpec(4)},
 				planner.YieldLeadership{Leader: fourthCoordinator},
 			},
 		},
@@ -771,20 +771,20 @@ func TestPlan(t *testing.T) {
 		// the rest of the work.
 		{
 			name: "an already-removed retiring coordinator is not removed again",
-			observed: append(observedCoordinators(1, 1, 2, 3, 4),
+			observed: append(observedCoordinators(0, 0, 1, 2, 3),
 				observedDataInstance(0, memgraph.RoleMain),
 				observedDataInstance(1, memgraph.RoleReplica),
 			),
 			declared: ptr.To(shrunkCoordinators()),
 			want: []planner.Command{
-				planner.RemoveCoordinator{Coordinator: coordinatorSpec(4)},
+				planner.RemoveCoordinator{Coordinator: coordinatorSpec(3)},
 			},
 		},
 		// Nothing is left to order ahead of the yield: the plan is the yield alone,
 		// and the removal of the leader itself waits for the next pass.
 		{
 			name: "a retiring leader with nothing else to remove plans only the yield",
-			observed: append(observedCoordinators(4, 1, 2, 3, 4),
+			observed: append(observedCoordinators(3, 0, 1, 2, 3),
 				observedDataInstance(0, memgraph.RoleMain),
 				observedDataInstance(1, memgraph.RoleReplica),
 			),
@@ -797,21 +797,21 @@ func TestPlan(t *testing.T) {
 		// a human added — is left where it is: it is not in the way of any removal.
 		{
 			name: "a leader outside the retiring set is not asked to yield",
-			observed: append(observedCoordinators(6, 1, 2, 3, 4, 5, 6),
+			observed: append(observedCoordinators(5, 0, 1, 2, 3, 4, 5),
 				observedDataInstance(0, memgraph.RoleMain),
 				observedDataInstance(1, memgraph.RoleReplica),
 			),
 			declared: ptr.To(shrunkCoordinators()),
 			want: []planner.Command{
+				planner.RemoveCoordinator{Coordinator: coordinatorSpec(3)},
 				planner.RemoveCoordinator{Coordinator: coordinatorSpec(4)},
-				planner.RemoveCoordinator{Coordinator: coordinatorSpec(5)},
 			},
 		},
 		// Both roles shrinking in one edit: the data instances are retired first
 		// (MAIN moved off the one going away), then the Raft members are removed.
 		{
 			name: "both roles retire in one pass under a surviving leader",
-			observed: append(observedCoordinators(1, 1, 2, 3, 4, 5),
+			observed: append(observedCoordinators(0, 0, 1, 2, 3, 4),
 				observedDataInstance(0, memgraph.RoleReplica),
 				observedDataInstance(1, memgraph.RoleReplica),
 				observedDataInstance(2, memgraph.RoleMain),
@@ -822,15 +822,15 @@ func TestPlan(t *testing.T) {
 				planner.DemoteInstance{Name: thirdInstance},
 				handover(thirdInstance, firstInstance, secondInstance),
 				planner.UnregisterInstance{Name: thirdInstance},
+				planner.RemoveCoordinator{Coordinator: coordinatorSpec(3)},
 				planner.RemoveCoordinator{Coordinator: coordinatorSpec(4)},
-				planner.RemoveCoordinator{Coordinator: coordinatorSpec(5)},
 			},
 		},
 		// The coordinator side of the same edit is independent of where MAIN sits, so
 		// a handover the survivors cannot take does not hold up the Raft removals.
 		{
 			name: "a blocked handover does not hold up the coordinator removals",
-			observed: append(observedCoordinators(1, 1, 2, 3, 4, 5),
+			observed: append(observedCoordinators(0, 0, 1, 2, 3, 4),
 				observedDataInstance(0, memgraph.RoleReplica),
 				observedDataInstance(1, memgraph.RoleReplica),
 				observedDataInstance(2, memgraph.RoleMain),
@@ -838,8 +838,8 @@ func TestPlan(t *testing.T) {
 			declared: ptr.To(retiringBothRoles()),
 			lag:      append(behindBy(5, 0, 1), caughtUp(2)...),
 			want: []planner.Command{
+				planner.RemoveCoordinator{Coordinator: coordinatorSpec(3)},
 				planner.RemoveCoordinator{Coordinator: coordinatorSpec(4)},
-				planner.RemoveCoordinator{Coordinator: coordinatorSpec(5)},
 			},
 		},
 		// The same edit with leadership in the way: the data-instance retirement is
@@ -847,7 +847,7 @@ func TestPlan(t *testing.T) {
 		// leader itself has to wait behind the yield.
 		{
 			name: "a retiring leader does not hold up the data-instance retirement",
-			observed: append(observedCoordinators(4, 1, 2, 3, 4, 5),
+			observed: append(observedCoordinators(3, 0, 1, 2, 3, 4),
 				observedDataInstance(0, memgraph.RoleReplica),
 				observedDataInstance(1, memgraph.RoleReplica),
 				observedDataInstance(2, memgraph.RoleMain),
@@ -858,7 +858,7 @@ func TestPlan(t *testing.T) {
 				planner.DemoteInstance{Name: thirdInstance},
 				handover(thirdInstance, firstInstance, secondInstance),
 				planner.UnregisterInstance{Name: thirdInstance},
-				planner.RemoveCoordinator{Coordinator: coordinatorSpec(5)},
+				planner.RemoveCoordinator{Coordinator: coordinatorSpec(4)},
 				planner.YieldLeadership{Leader: fourthCoordinator},
 			},
 		},
@@ -868,9 +868,9 @@ func TestPlan(t *testing.T) {
 		{
 			name: "an undeclared instance outside the retiring range is left registered",
 			observed: []memgraph.Instance{
-				observedCoordinator(1, memgraph.RoleLeader),
+				observedCoordinator(0, memgraph.RoleLeader),
+				observedCoordinator(1, memgraph.RoleFollower),
 				observedCoordinator(2, memgraph.RoleFollower),
-				observedCoordinator(3, memgraph.RoleFollower),
 				observedDataInstance(0, memgraph.RoleMain),
 				observedDataInstance(1, memgraph.RoleReplica),
 				observedDataInstance(2, memgraph.RoleReplica),
@@ -894,9 +894,9 @@ func TestPlan(t *testing.T) {
 		{
 			name: "an unreachable MAIN is left to the coordinators, not promoted around",
 			observed: []memgraph.Instance{
-				observedCoordinator(1, memgraph.RoleLeader),
+				observedCoordinator(0, memgraph.RoleLeader),
+				observedCoordinator(1, memgraph.RoleFollower),
 				observedCoordinator(2, memgraph.RoleFollower),
-				observedCoordinator(3, memgraph.RoleFollower),
 				mainDownDataInstance(0),
 				observedDataInstance(1, memgraph.RoleReplica),
 			},
@@ -934,7 +934,7 @@ func TestRetired(t *testing.T) {
 			name:     "nothing retiring is retired",
 			declared: declaredTopology(),
 			observed: []memgraph.Instance{
-				observedCoordinator(1, memgraph.RoleLeader),
+				observedCoordinator(0, memgraph.RoleLeader),
 				observedDataInstance(0, memgraph.RoleMain),
 			},
 			want: true,
@@ -943,7 +943,7 @@ func TestRetired(t *testing.T) {
 			name:     "a retiring instance the cluster has forgotten is retired",
 			declared: shrunkTopology(2, 3),
 			observed: []memgraph.Instance{
-				observedCoordinator(1, memgraph.RoleLeader),
+				observedCoordinator(0, memgraph.RoleLeader),
 				observedDataInstance(0, memgraph.RoleMain),
 				observedDataInstance(1, memgraph.RoleReplica),
 			},
@@ -953,7 +953,7 @@ func TestRetired(t *testing.T) {
 			name:     "a retiring instance still registered is not retired",
 			declared: shrunkTopology(2, 3),
 			observed: []memgraph.Instance{
-				observedCoordinator(1, memgraph.RoleLeader),
+				observedCoordinator(0, memgraph.RoleLeader),
 				observedDataInstance(0, memgraph.RoleMain),
 				observedDataInstance(1, memgraph.RoleReplica),
 				observedDataInstance(2, memgraph.RoleReplica),
@@ -966,7 +966,7 @@ func TestRetired(t *testing.T) {
 			name:     "a retiring MAIN whose handover is blocked is not retired",
 			declared: shrunkTopology(2, 3),
 			observed: []memgraph.Instance{
-				observedCoordinator(1, memgraph.RoleLeader),
+				observedCoordinator(0, memgraph.RoleLeader),
 				observedDataInstance(0, memgraph.RoleReplica),
 				observedDataInstance(1, memgraph.RoleReplica),
 				observedDataInstance(2, memgraph.RoleMain),
@@ -976,7 +976,7 @@ func TestRetired(t *testing.T) {
 		{
 			name:     "a retiring coordinator still in Raft is not retired",
 			declared: shrunkCoordinators(),
-			observed: append(observedCoordinators(1, 1, 2, 3, 4),
+			observed: append(observedCoordinators(0, 0, 1, 2, 3),
 				observedDataInstance(0, memgraph.RoleMain),
 				observedDataInstance(1, memgraph.RoleReplica),
 			),
@@ -985,7 +985,7 @@ func TestRetired(t *testing.T) {
 		{
 			name:     "retiring coordinators all out of Raft are retired",
 			declared: shrunkCoordinators(),
-			observed: append(observedCoordinators(1, 1, 2, 3),
+			observed: append(observedCoordinators(0, 0, 1, 2),
 				observedDataInstance(0, memgraph.RoleMain),
 				observedDataInstance(1, memgraph.RoleReplica),
 			),
@@ -1007,7 +1007,7 @@ func TestRetired(t *testing.T) {
 // registered, so the counts reach the declared ones exactly when Plan falls
 // silent.
 func TestRegistered(t *testing.T) {
-	selfReporting := observedCoordinator(2, memgraph.RoleLeader)
+	selfReporting := observedCoordinator(1, memgraph.RoleLeader)
 	// The coordinator the client is connected to lists itself with an empty
 	// bolt_server until ADD COORDINATOR is issued for its ID.
 	selfReporting.BoltServer = ""
@@ -1027,9 +1027,9 @@ func TestRegistered(t *testing.T) {
 			name:     "a converged cluster reports the declared counts",
 			declared: declaredTopology(),
 			observed: []memgraph.Instance{
-				observedCoordinator(1, memgraph.RoleLeader),
+				observedCoordinator(0, memgraph.RoleLeader),
+				observedCoordinator(1, memgraph.RoleFollower),
 				observedCoordinator(2, memgraph.RoleFollower),
-				observedCoordinator(3, memgraph.RoleFollower),
 				observedDataInstance(0, memgraph.RoleMain),
 				observedDataInstance(1, memgraph.RoleReplica),
 			},
@@ -1040,7 +1040,7 @@ func TestRegistered(t *testing.T) {
 			name:     "a coordinator that is present but not added does not count",
 			declared: declaredTopology(),
 			observed: []memgraph.Instance{
-				observedCoordinator(1, memgraph.RoleFollower),
+				observedCoordinator(0, memgraph.RoleFollower),
 				selfReporting,
 				observedDataInstance(0, memgraph.RoleMain),
 			},
@@ -1051,10 +1051,10 @@ func TestRegistered(t *testing.T) {
 			name:     "a grown topology reports the members registered so far",
 			declared: grownTopology(),
 			observed: []memgraph.Instance{
-				observedCoordinator(1, memgraph.RoleLeader),
+				observedCoordinator(0, memgraph.RoleLeader),
+				observedCoordinator(1, memgraph.RoleFollower),
 				observedCoordinator(2, memgraph.RoleFollower),
 				observedCoordinator(3, memgraph.RoleFollower),
-				observedCoordinator(4, memgraph.RoleFollower),
 				observedDataInstance(0, memgraph.RoleMain),
 				observedDataInstance(1, memgraph.RoleReplica),
 			},
@@ -1067,10 +1067,10 @@ func TestRegistered(t *testing.T) {
 			name:     "members the topology does not declare are not counted",
 			declared: declaredTopology(),
 			observed: []memgraph.Instance{
-				observedCoordinator(1, memgraph.RoleLeader),
+				observedCoordinator(0, memgraph.RoleLeader),
+				observedCoordinator(1, memgraph.RoleFollower),
 				observedCoordinator(2, memgraph.RoleFollower),
 				observedCoordinator(3, memgraph.RoleFollower),
-				observedCoordinator(4, memgraph.RoleFollower),
 				observedDataInstance(0, memgraph.RoleMain),
 				observedDataInstance(1, memgraph.RoleReplica),
 				observedDataInstance(2, memgraph.RoleReplica),
@@ -1084,9 +1084,9 @@ func TestRegistered(t *testing.T) {
 			name:     "a down instance still counts as registered",
 			declared: declaredTopology(),
 			observed: []memgraph.Instance{
-				observedCoordinator(1, memgraph.RoleLeader),
+				observedCoordinator(0, memgraph.RoleLeader),
+				observedCoordinator(1, memgraph.RoleFollower),
 				observedCoordinator(2, memgraph.RoleFollower),
-				observedCoordinator(3, memgraph.RoleFollower),
 				downDataInstance(0),
 				observedDataInstance(1, memgraph.RoleMain),
 			},
@@ -1123,7 +1123,7 @@ func TestPlanUsesFixedPortsAndConfiguredClusterDomain(t *testing.T) {
 	dataHost := "example-data-0.example-data.memgraph-test.svc.k8s.example.com"
 	want := []planner.Command{
 		planner.AddCoordinator{Coordinator: memgraph.CoordinatorSpec{
-			ID:                1,
+			ID:                0,
 			BoltServer:        fmt.Sprintf("%s:%d", coordinatorHost, memgraphcomv1alpha1.BoltPort),
 			CoordinatorServer: fmt.Sprintf("%s:%d", coordinatorHost, memgraphcomv1alpha1.CoordinatorPort),
 			ManagementServer:  fmt.Sprintf("%s:%d", coordinatorHost, memgraphcomv1alpha1.ManagementPort),

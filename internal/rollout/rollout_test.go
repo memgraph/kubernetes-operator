@@ -57,14 +57,14 @@ func dataRole(revisions ...string) Role {
 }
 
 // coordinatorRole is dataRole for the coordinator StatefulSet, whose instances
-// are named from a 1-based Raft ID.
+// use the same zero-based Raft ID as their pod ordinal.
 func coordinatorRole(revisions ...string) Role {
 	role := Role{Replicas: int32(len(revisions)), UpdateRevision: newRevision}
 	for ordinal, revision := range revisions {
 		role.Pods = append(role.Pods, Pod{
 			Name:         fmt.Sprintf("cluster-coordinator-%d", ordinal),
 			UID:          fmt.Sprintf("uid-coordinator-%d", ordinal),
-			Instance:     fmt.Sprintf("coordinator_%d", ordinal+1),
+			Instance:     fmt.Sprintf("coordinator_%d", ordinal),
 			Ordinal:      int32(ordinal),
 			RevisionHash: revision,
 			Ready:        true,
@@ -99,7 +99,7 @@ func cluster(dataInstances, coordinators int, main string) []memgraph.Instance {
 			role = memgraph.RoleLeader
 		}
 		view = append(view, memgraph.Instance{
-			Name:       fmt.Sprintf("coordinator_%d", ordinal+1),
+			Name:       fmt.Sprintf("coordinator_%d", ordinal),
 			BoltServer: fmt.Sprintf("coordinator:%d", memgraphcomv1alpha1.BoltPort),
 			Health:     memgraph.HealthUp,
 			Role:       role,
@@ -401,7 +401,7 @@ func TestCoordinatorLeaderIsRestartedLast(t *testing.T) {
 	view := cluster(2, 3, "instance_0")
 	lag := caughtUp("instance_0", "instance_1")
 
-	// coordinator_1, on ordinal 0, is the leader.
+	// coordinator_0, on ordinal 0, is the leader.
 	coordinators.Pods[2].RevisionHash = newRevision
 	decision := Next(data, coordinators, view, lag)
 	if decision.Action != Delete || decision.Pod.Name != coordinatorPod1 {
@@ -420,7 +420,7 @@ func TestCoordinatorLeaderIsRestartedLast(t *testing.T) {
 func TestRestartedCoordinatorMustBeReachable(t *testing.T) {
 	data := converged(dataRole(newRevision, newRevision))
 	coordinators := coordinatorRole(oldRevision, oldRevision, newRevision)
-	view := down(cluster(2, 3, "instance_0"), "coordinator_3")
+	view := down(cluster(2, 3, "instance_0"), "coordinator_2")
 
 	decision := Next(data, coordinators, view, caughtUp("instance_0", "instance_1"))
 
@@ -435,7 +435,7 @@ func TestNoCoordinatorLeaderStopsTheCoordinatorRoll(t *testing.T) {
 	view := cluster(2, 0, "instance_0")
 	for ordinal := range 3 {
 		view = append(view, memgraph.Instance{
-			Name:       fmt.Sprintf("coordinator_%d", ordinal+1),
+			Name:       fmt.Sprintf("coordinator_%d", ordinal),
 			BoltServer: fmt.Sprintf("coordinator:%d", memgraphcomv1alpha1.BoltPort),
 			Health:     memgraph.HealthUp,
 			Role:       memgraph.RoleFollower,

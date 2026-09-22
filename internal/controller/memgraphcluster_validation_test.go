@@ -111,7 +111,7 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 				DataInstances: ptr.To(int32(2)),
 				Image: memgraphcomv1alpha1.ImageSpec{
 					Repository: "docker.io/memgraph/memgraph",
-					Tag:        "3.12.0-relwithdebinfo",
+					Tag:        "3.13.0-relwithdebinfo",
 				},
 				Secrets: memgraphcomv1alpha1.SecretsSpec{Name: customSecretName},
 			})
@@ -354,7 +354,7 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 				"should be greater than or equal to 1"),
 			Entry("a tag smuggled into the repository", "invalid-image-repository-tagged",
 				memgraphcomv1alpha1.MemgraphClusterSpec{
-					Image: memgraphcomv1alpha1.ImageSpec{Repository: "memgraph/memgraph:3.12.0"},
+					Image: memgraphcomv1alpha1.ImageSpec{Repository: "memgraph/memgraph:3.13.0"},
 				},
 				"repository must not contain a tag; set image.tag instead"),
 			Entry("a digest smuggled into the repository", "invalid-image-repository-digest",
@@ -366,7 +366,7 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 				"repository must not contain a digest"),
 			Entry("an image tag that is not a valid OCI tag", "invalid-image-tag-chars",
 				memgraphcomv1alpha1.MemgraphClusterSpec{
-					Image: memgraphcomv1alpha1.ImageSpec{Tag: "3.12.0 relwithdebinfo"},
+					Image: memgraphcomv1alpha1.ImageSpec{Tag: "3.13.0 relwithdebinfo"},
 				},
 				"in body should match"),
 			Entry("a secret name that is not a DNS subdomain", "invalid-secret-name",

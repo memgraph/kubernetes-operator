@@ -48,19 +48,19 @@ func TestDeclaredTopologyDefaults(t *testing.T) {
 	want := planner.Topology{
 		Coordinators: []memgraph.CoordinatorSpec{
 			{
-				ID:                1,
+				ID:                0,
 				BoltServer:        endpoint(coordinatorFQDN(0), memgraphcomv1alpha1.BoltPort),
 				CoordinatorServer: endpoint(coordinatorFQDN(0), memgraphcomv1alpha1.CoordinatorPort),
 				ManagementServer:  endpoint(coordinatorFQDN(0), memgraphcomv1alpha1.ManagementPort),
 			},
 			{
-				ID:                2,
+				ID:                1,
 				BoltServer:        endpoint(coordinatorFQDN(1), memgraphcomv1alpha1.BoltPort),
 				CoordinatorServer: endpoint(coordinatorFQDN(1), memgraphcomv1alpha1.CoordinatorPort),
 				ManagementServer:  endpoint(coordinatorFQDN(1), memgraphcomv1alpha1.ManagementPort),
 			},
 			{
-				ID:                3,
+				ID:                2,
 				BoltServer:        endpoint(coordinatorFQDN(2), memgraphcomv1alpha1.BoltPort),
 				CoordinatorServer: endpoint(coordinatorFQDN(2), memgraphcomv1alpha1.CoordinatorPort),
 				ManagementServer:  endpoint(coordinatorFQDN(2), memgraphcomv1alpha1.ManagementPort),
@@ -173,13 +173,13 @@ func TestRetiringCoordinators(t *testing.T) {
 			name:    "both ordinals above the declared count retire at once",
 			cluster: coordinatorsCluster(3),
 			applied: 5,
-			want:    []string{"coordinator_4", "coordinator_5"},
+			want:    []string{"coordinator_3", "coordinator_4"},
 		},
 		{
 			name:    "a larger shrink retires every ordinal above the declared count",
 			cluster: coordinatorsCluster(3),
 			applied: 7,
-			want:    []string{"coordinator_4", "coordinator_5", "coordinator_6", "coordinator_7"},
+			want:    []string{"coordinator_3", "coordinator_4", "coordinator_5", "coordinator_6"},
 		},
 	}
 
@@ -291,19 +291,19 @@ func TestDeclaredTopologyFixedPortsAndClusterDomain(t *testing.T) {
 	want := planner.Topology{
 		Coordinators: []memgraph.CoordinatorSpec{
 			{
-				ID:                1,
+				ID:                0,
 				BoltServer:        endpoint(coordinatorFQDN(0), memgraphcomv1alpha1.BoltPort),
 				CoordinatorServer: endpoint(coordinatorFQDN(0), memgraphcomv1alpha1.CoordinatorPort),
 				ManagementServer:  endpoint(coordinatorFQDN(0), memgraphcomv1alpha1.ManagementPort),
 			},
 			{
-				ID:                2,
+				ID:                1,
 				BoltServer:        endpoint(coordinatorFQDN(1), memgraphcomv1alpha1.BoltPort),
 				CoordinatorServer: endpoint(coordinatorFQDN(1), memgraphcomv1alpha1.CoordinatorPort),
 				ManagementServer:  endpoint(coordinatorFQDN(1), memgraphcomv1alpha1.ManagementPort),
 			},
 			{
-				ID:                3,
+				ID:                2,
 				BoltServer:        endpoint(coordinatorFQDN(2), memgraphcomv1alpha1.BoltPort),
 				CoordinatorServer: endpoint(coordinatorFQDN(2), memgraphcomv1alpha1.CoordinatorPort),
 				ManagementServer:  endpoint(coordinatorFQDN(2), memgraphcomv1alpha1.ManagementPort),

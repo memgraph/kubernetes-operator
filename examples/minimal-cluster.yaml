@@ -21,7 +21,7 @@ spec:
   dataInstances: 2
   image:
     repository: docker.io/memgraph/memgraph
-    tag: "3.12.0"
+    tag: "3.13.0"
   # The Secret holding the enterprise license, which HA requires. Point name at
   # your own Secret; the two key names are the defaults, spelled out here
   # because they are what you change when your Secret stores them under

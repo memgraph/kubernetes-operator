@@ -144,7 +144,7 @@ func loadExample() *memgraphcomv1alpha1.MemgraphCluster {
 
 // declaredInstances returns the instance names every coordinator and data
 // instance must appear under in SHOW INSTANCES once the operator has converged
-// registration: coordinator ordinal N registers as coordinator_N+1, data
+// registration: coordinator ordinal N registers as coordinator_N, and data
 // ordinal N as instance_N.
 func (c clusterUnderTest) declaredInstances() []string {
 	names := make([]string, 0, c.coordinators+c.dataInstances)
@@ -658,7 +658,7 @@ spec:
 		// and the surviving Raft cluster keeps an odd membership throughout.
 		running := grown.withTopology(5, 2)
 		shrunk := grown.withTopology(3, 2)
-		retiring := []string{"coordinator_4", "coordinator_5"}
+		retiring := []string{"coordinator_3", "coordinator_4"}
 
 		By("forcing Raft leadership onto a coordinator the shrink retires")
 		// Retried as a whole: YIELD LEADERSHIP names no successor, so each attempt
@@ -724,7 +724,7 @@ spec:
 		Expect(coordinators).To(Equal("3"))
 		view, err := shrunk.leaderView()
 		Expect(err).NotTo(HaveOccurred())
-		Expect(coordinatorLeaderOf(view)).To(BeElementOf("coordinator_1", "coordinator_2", "coordinator_3"))
+		Expect(coordinatorLeaderOf(view)).To(BeElementOf("coordinator_0", "coordinator_1", "coordinator_2"))
 
 		By("confirming the retired coordinators' claims are kept by the default retention policy")
 		claims, err := listPVCs(scalingNamespace)
@@ -1030,7 +1030,7 @@ func removeCoordinatorRegistration() (string, error) {
 	}
 	name := resources.CoordinatorInstanceName(ordinal)
 	cmd := exec.Command("kubectl", "exec", pod, "-n", clusterNamespace, "-c", "memgraph", "--",
-		"bash", "-c", fmt.Sprintf("echo 'REMOVE COORDINATOR %d;' | mgconsole", ordinal+1))
+		"bash", "-c", fmt.Sprintf("echo 'REMOVE COORDINATOR %d;' | mgconsole", ordinal))
 	if _, err := utils.Run(cmd); err != nil {
 		return "", fmt.Errorf("removing %s on %s: %w", name, pod, err)
 	}

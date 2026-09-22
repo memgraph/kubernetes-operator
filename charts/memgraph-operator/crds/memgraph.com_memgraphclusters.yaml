@@ -653,7 +653,7 @@ spec:
                     - message: repository must not contain a tag; set image.tag instead
                       rule: '!self.substring(self.lastIndexOf(''/'') + 1).contains('':'')'
                   tag:
-                    default: 3.12.0-relwithdebinfo
+                    default: 3.13.0-relwithdebinfo
                     description: |-
                       tag is the Memgraph container image tag. Prefer pinning a specific
                       Memgraph version over mutable tags such as "latest".
