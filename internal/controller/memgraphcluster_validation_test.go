@@ -110,8 +110,8 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 				Coordinators:  ptr.To(int32(3)),
 				DataInstances: ptr.To(int32(2)),
 				Image: memgraphcomv1alpha1.ImageSpec{
-					Repository: "docker.io/memgraph/memgraph",
-					Tag:        "3.13.0-relwithdebinfo",
+					Repository: memgraphcomv1alpha1.DefaultImageRepository,
+					Tag:        memgraphcomv1alpha1.DefaultImageTag,
 				},
 				Secrets: memgraphcomv1alpha1.SecretsSpec{Name: customSecretName},
 			})

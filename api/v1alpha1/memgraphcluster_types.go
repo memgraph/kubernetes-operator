@@ -35,6 +35,7 @@ const (
 
 	DefaultImageRepository = "docker.io/memgraph/memgraph"
 	DefaultImageTag        = "3.13.0-relwithdebinfo"
+	DefaultImageReference  = DefaultImageRepository + ":" + DefaultImageTag
 	DefaultImagePullPolicy = corev1.PullIfNotPresent
 
 	DefaultSecretName            = "memgraph-secrets"

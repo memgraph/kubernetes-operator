@@ -194,7 +194,7 @@ var _ = Describe("MemgraphCluster Controller", func() {
 				podSpec := sts.Spec.Template.Spec
 				Expect(podSpec.Containers).To(HaveLen(1))
 				container := podSpec.Containers[0]
-				Expect(container.Image).To(Equal("docker.io/memgraph/memgraph:3.13.0-relwithdebinfo"))
+				Expect(container.Image).To(Equal(memgraphcomv1alpha1.DefaultImageReference))
 				Expect(podSpec.SecurityContext.RunAsUser).To(HaveValue(Equal(int64(101))))
 				Expect(podSpec.SecurityContext.RunAsGroup).To(HaveValue(Equal(int64(103))))
 

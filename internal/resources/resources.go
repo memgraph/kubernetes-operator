@@ -368,6 +368,10 @@ func normalizeCoreDumps(
 }
 
 func imageRef(image memgraphcomv1alpha1.ImageSpec) string {
+	if image.Repository == "" && image.Tag == "" {
+		return memgraphcomv1alpha1.DefaultImageReference
+	}
+
 	repository := image.Repository
 	if repository == "" {
 		repository = memgraphcomv1alpha1.DefaultImageRepository

@@ -57,7 +57,7 @@ const (
 
 	tmpVolume       = "tmp"
 	shell           = "/bin/sh"
-	defaultImageRef = "docker.io/memgraph/memgraph:3.13.0-relwithdebinfo"
+	defaultImageRef = memgraphcomv1alpha1.DefaultImageReference
 	coreDumpsVolume = "core-dumps"
 	coreDumpsPath   = "/var/core/memgraph"
 	dataPath        = "/var/lib/memgraph/mg_data"
