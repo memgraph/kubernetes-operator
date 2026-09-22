@@ -652,6 +652,48 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 			})).To(Succeed())
 		})
 
+		// Whether a role collects core dumps decides its StatefulSet's volume
+		// claim templates, which Kubernetes forbids changing in place, so the
+		// flip is refused at admission with the procedure that works instead of
+		// being accepted and rejected forever by the apply.
+		DescribeTable("should reject switching a role's core dumps on or off",
+			func(name string, enabledAtCreation bool, mutate func(*memgraphcomv1alpha1.MemgraphCluster)) {
+				createAccepted(name, memgraphcomv1alpha1.MemgraphClusterSpec{
+					CoreDumps: memgraphcomv1alpha1.CoreDumpsSpec{
+						Coordinators: memgraphcomv1alpha1.RoleCoreDumpsSpec{Enabled: enabledAtCreation},
+						Data:         memgraphcomv1alpha1.RoleCoreDumpsSpec{Enabled: enabledAtCreation},
+					},
+				})
+
+				expectRejectedUpdate(name, mutate, "coreDumps enabled cannot be changed on a live cluster")
+			},
+			Entry("enabling coordinator dumps", "core-dumps-on-coordinators", false,
+				func(c *memgraphcomv1alpha1.MemgraphCluster) { c.Spec.CoreDumps.Coordinators.Enabled = true }),
+			Entry("enabling data instance dumps", "core-dumps-on-data", false,
+				func(c *memgraphcomv1alpha1.MemgraphCluster) { c.Spec.CoreDumps.Data.Enabled = true }),
+			Entry("disabling coordinator dumps", "core-dumps-off-coordinators", true,
+				func(c *memgraphcomv1alpha1.MemgraphCluster) { c.Spec.CoreDumps.Coordinators.Enabled = false }),
+			Entry("disabling data instance dumps", "core-dumps-off-data", true,
+				func(c *memgraphcomv1alpha1.MemgraphCluster) { c.Spec.CoreDumps.Data.Enabled = false }),
+		)
+
+		// The rule pins the switch, nothing around it: the rest of the block
+		// stays editable, and an update that does not touch core dumps at all
+		// must not trip over the defaulted empty block.
+		It("should accept an update that leaves core dumps as they are", func() {
+			createAccepted("core-dumps-unchanged", memgraphcomv1alpha1.MemgraphClusterSpec{
+				CoreDumps: memgraphcomv1alpha1.CoreDumpsSpec{
+					Data: memgraphcomv1alpha1.RoleCoreDumpsSpec{Enabled: true},
+				},
+			})
+
+			Expect(update("core-dumps-unchanged", func(c *memgraphcomv1alpha1.MemgraphCluster) {
+				c.Spec.Image.Tag = customImageTag
+				c.Spec.CoreDumps.Data.Size = ptr.To(resource.MustParse("20Gi"))
+				c.Spec.CoreDumps.ConfigureCorePattern = ptr.To(false)
+			})).To(Succeed())
+		})
+
 		// The floors and the odd rule are creation-time validation that keeps
 		// applying on every update: a live cluster cannot be edited into a
 		// topology it could not have been created with.

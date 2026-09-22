@@ -79,16 +79,21 @@ spec:
   # that crashes there, and the privileged init container is rejected in a
   # namespace running PodSecurity "restricted". Set configureCorePattern: false
   # there and have the platform point core_pattern at that directory itself.
+  # Whether a role collects dumps is decided when the cluster is created: the
+  # claim is a StatefulSet volumeClaimTemplate, which Kubernetes forbids adding
+  # or removing in place, so flipping enabled on a live cluster is rejected. To
+  # change it, delete the MemgraphCluster (the default retention policy keeps
+  # every claim) and recreate it with the new setting.
   coreDumps:
     # Per role, because only these two answers differ between them: whether the
     # role collects dumps at all, and how much room one needs — a dump is about
     # as large as the crashing process' memory, and a data instance holds the
     # graph while a coordinator holds Raft state.
     coordinators:
-      enabled: false
+      enabled: true
       size: 10Gi
     data:
-      enabled: false
+      enabled: true
       size: 10Gi
     # The rest is one decision for the cluster, so it is stated once.
     # storageClassName: standard

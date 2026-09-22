@@ -129,6 +129,11 @@ spec:
                           mounts it at /var/core/memgraph. It is off by default: a crashing Memgraph
                           is not the normal case, and the volume costs a third
                           PersistentVolumeClaim per pod.
+
+                          It is a create-time choice: once the cluster exists it cannot be switched
+                          on or off, and an edit that tries is rejected at admission with the
+                          procedure that works — delete the MemgraphCluster, whose claims the
+                          default Retain policy keeps, and recreate it.
                         type: boolean
                       size:
                         anyOf:
@@ -143,6 +148,14 @@ spec:
                         pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                         x-kubernetes-int-or-string: true
                     type: object
+                    x-kubernetes-validations:
+                    - message: 'coreDumps enabled cannot be changed on a live cluster:
+                        the core dumps volume is a StatefulSet volumeClaimTemplate,
+                        which Kubernetes forbids adding or removing in place. Delete
+                        the MemgraphCluster (its claims are retained under the default
+                        retention policy) and recreate it with the new setting'
+                      rule: (has(self.enabled) && self.enabled) == (has(oldSelf.enabled)
+                        && oldSelf.enabled)
                   data:
                     default: {}
                     description: |-
@@ -156,6 +169,11 @@ spec:
                           mounts it at /var/core/memgraph. It is off by default: a crashing Memgraph
                           is not the normal case, and the volume costs a third
                           PersistentVolumeClaim per pod.
+
+                          It is a create-time choice: once the cluster exists it cannot be switched
+                          on or off, and an edit that tries is rejected at admission with the
+                          procedure that works — delete the MemgraphCluster, whose claims the
+                          default Retain policy keeps, and recreate it.
                         type: boolean
                       size:
                         anyOf:
@@ -170,6 +188,14 @@ spec:
                         pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                         x-kubernetes-int-or-string: true
                     type: object
+                    x-kubernetes-validations:
+                    - message: 'coreDumps enabled cannot be changed on a live cluster:
+                        the core dumps volume is a StatefulSet volumeClaimTemplate,
+                        which Kubernetes forbids adding or removing in place. Delete
+                        the MemgraphCluster (its claims are retained under the default
+                        retention policy) and recreate it with the new setting'
+                      rule: (has(self.enabled) && self.enabled) == (has(oldSelf.enabled)
+                        && oldSelf.enabled)
                   storageClassName:
                     description: |-
                       storageClassName is the StorageClass backing every core dumps claim of

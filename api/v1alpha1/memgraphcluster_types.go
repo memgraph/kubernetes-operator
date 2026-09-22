@@ -408,11 +408,30 @@ type StorageSpec struct {
 // between the roles: whether they collect at all, and how much room a dump
 // needs. Everything else — the storage class, the kernel setup, the uploader —
 // is the same decision for both and lives on CoreDumpsSpec.
+//
+// enabled is pinned by a transition rule because the volume it provisions is a
+// StatefulSet volumeClaimTemplate, which Kubernetes forbids adding to or
+// removing from a live StatefulSet. Without the rule the flip is accepted and
+// then rejected on every reconcile as ApplyFailed, so the resource says yes and
+// the cluster never changes. Rebuilding the StatefulSet around its pods is not an
+// answer either: the StatefulSet controller cannot reconcile adopted pods whose
+// volumes no longer match its templates and only recovers when pods are
+// deleted in ascending ordinal order, MAIN and the Raft leader first — the
+// reverse of the order a Memgraph cluster survives (kubernetes/kubernetes#141876).
+// The has() guards keep the rule evaluable against the block's empty object
+// default, which the API server checks before the field default applies.
+//
+// +kubebuilder:validation:XValidation:rule="(has(self.enabled) && self.enabled) == (has(oldSelf.enabled) && oldSelf.enabled)",message="coreDumps enabled cannot be changed on a live cluster: the core dumps volume is a StatefulSet volumeClaimTemplate, which Kubernetes forbids adding or removing in place. Delete the MemgraphCluster (its claims are retained under the default retention policy) and recreate it with the new setting"
 type RoleCoreDumpsSpec struct {
 	// enabled provisions a core dumps volume for every pod of the role and
 	// mounts it at /var/core/memgraph. It is off by default: a crashing Memgraph
 	// is not the normal case, and the volume costs a third
 	// PersistentVolumeClaim per pod.
+	//
+	// It is a create-time choice: once the cluster exists it cannot be switched
+	// on or off, and an edit that tries is rejected at admission with the
+	// procedure that works — delete the MemgraphCluster, whose claims the
+	// default Retain policy keeps, and recreate it.
 	// +kubebuilder:default=false
 	// +optional
 	Enabled bool `json:"enabled,omitempty"`
