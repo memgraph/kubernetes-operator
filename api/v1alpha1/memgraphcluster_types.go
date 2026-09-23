@@ -188,6 +188,16 @@ const (
 	// declared topology.
 	ReasonAllInstancesRegistered = "AllInstancesRegistered"
 
+	// ReasonExternalAddressPending is set when every declared member is
+	// registered but an exposed one still announces its in-cluster address,
+	// because the LoadBalancer in front of it has not been given an external
+	// address yet. The message names the Service being waited on. Registration
+	// itself is complete and in-cluster clients are served, so Ready is
+	// unaffected; what is missing is the cloud provisioning the operator cannot
+	// hurry. It persisting means the LoadBalancer is not being provisioned at
+	// all — no cloud controller or no address pool answers the Service.
+	ReasonExternalAddressPending = "ExternalAddressPending"
+
 	// ReasonRetirementInProgress is set while a lowered count of either role is
 	// being carried out: the members beyond the declared count are still part of
 	// the cluster, or their pods are still being shed. The message names them, so
@@ -790,6 +800,89 @@ type ExtraArgsSpec struct {
 	Data []string `json:"data,omitempty"`
 }
 
+// ExternalAccessType is how the cluster is reached from outside Kubernetes.
+// +kubebuilder:validation:Enum=LoadBalancer
+type ExternalAccessType string
+
+const (
+	// ExternalAccessLoadBalancer exposes the cluster through Services of type
+	// LoadBalancer: one shared by all coordinators, and one per data instance.
+	ExternalAccessLoadBalancer ExternalAccessType = "LoadBalancer"
+)
+
+const (
+	// ExternalDNSHostnameAnnotation is the annotation external-dns reads to
+	// publish a DNS record for a Service. It is the one third-party annotation
+	// the operator knows: when a user sets it, that hostname is what the
+	// operator announces as the exposed instance's bolt address, because
+	// external-dns writes the record at the DNS provider and never back into
+	// the Service status, so nothing else could tell the operator the name
+	// exists.
+	ExternalDNSHostnameAnnotation = "external-dns.alpha.kubernetes.io/hostname"
+
+	// OrdinalPlaceholder is replaced with the pod ordinal in every annotation
+	// value copied onto a per-instance external object, so one annotation map
+	// can name a distinct hostname for every data instance.
+	OrdinalPlaceholder = "{ordinal}"
+)
+
+// ExternalAccessRoleSpec decorates one role's external objects. The role's
+// serviceLabels from the labels block also land on its external Services;
+// these are the labels and annotations that mark only the external objects.
+type ExternalAccessRoleSpec struct {
+	// labels are added to the role's external objects. The operator's own
+	// identity labels win a key collision, as they do everywhere else.
+	// +kubebuilder:validation:MaxProperties=64
+	// +optional
+	Labels map[string]string `json:"labels,omitempty"`
+
+	// annotations are added to the role's external objects: cloud load
+	// balancer tuning, external-dns hostnames, whatever the controllers in
+	// front of the cluster read. On a per-instance object every value has
+	// "{ordinal}" replaced with the pod ordinal.
+	// +kubebuilder:validation:MaxProperties=64
+	// +optional
+	Annotations map[string]string `json:"annotations,omitempty"`
+}
+
+// ExternalAccessSpec exposes the cluster outside Kubernetes. Clients outside
+// the cluster need two things: a way in, and a routing table whose addresses
+// they can reach — the coordinators hand every client the bolt address each
+// instance was registered with. The operator therefore owns both halves. It
+// creates the external objects, and it registers every exposed instance with
+// the external address those objects acquire: the external-dns hostname
+// annotation when one is set, otherwise the hostname or IP the LoadBalancer
+// reports in its status, and the in-cluster pod address until either exists.
+// The registered address follows the external one whenever it changes, and
+// reverts to the in-cluster one when this block is removed.
+//
+// Both roles are exposed together: a routing table pointing at data instances
+// clients cannot reach is a configuration that can only be a mistake.
+//
+// The data instances each get their own external object and therefore each
+// need their own hostname, so a hostname annotation on the data block must
+// carry the "{ordinal}" placeholder; the coordinators share one object and one
+// hostname, so theirs must not.
+//
+// +kubebuilder:validation:XValidation:rule="!has(self.data) || !has(self.data.annotations) || !('external-dns.alpha.kubernetes.io/hostname' in self.data.annotations) || self.data.annotations['external-dns.alpha.kubernetes.io/hostname'].contains('{ordinal}')",message="data.annotations external-dns.alpha.kubernetes.io/hostname must contain {ordinal}: every data instance has its own external address, and one hostname for all of them would register the same routing address for every instance"
+// +kubebuilder:validation:XValidation:rule="!has(self.coordinators) || !has(self.coordinators.annotations) || !('external-dns.alpha.kubernetes.io/hostname' in self.coordinators.annotations) || !self.coordinators.annotations['external-dns.alpha.kubernetes.io/hostname'].contains('{ordinal}')",message="coordinators.annotations external-dns.alpha.kubernetes.io/hostname must not contain {ordinal}: all coordinators share one external address"
+type ExternalAccessSpec struct {
+	// type selects how the cluster is exposed. LoadBalancer creates one
+	// Service of type LoadBalancer shared by all coordinators and one per data
+	// instance, each publishing the bolt port.
+	// +required
+	Type ExternalAccessType `json:"type"`
+
+	// coordinators decorates the coordinators' shared external object.
+	// +optional
+	Coordinators ExternalAccessRoleSpec `json:"coordinators,omitzero"`
+
+	// data decorates every data instance's external object, with "{ordinal}"
+	// in annotation values replaced by the instance's pod ordinal.
+	// +optional
+	Data ExternalAccessRoleSpec `json:"data,omitzero"`
+}
+
 // MemgraphClusterSpec defines the desired state of MemgraphCluster.
 type MemgraphClusterSpec struct {
 	// coordinators is the number of Raft coordinator instances. It must be odd
@@ -875,6 +968,44 @@ type MemgraphClusterSpec struct {
 	// beyond the ones the operator mounts.
 	// +optional
 	ExtraVolumeMounts ExtraVolumeMountsSpec `json:"extraVolumeMounts,omitzero"`
+
+	// externalAccess exposes the cluster outside Kubernetes and registers the
+	// exposed instances with the addresses clients reach them at. Absent, the
+	// cluster is reachable in-cluster only; removing it takes the external
+	// objects away again and reverts the registered addresses.
+	// +optional
+	ExternalAccess *ExternalAccessSpec `json:"externalAccess,omitempty"`
+}
+
+// ExternalAddress is the external address one member, or the coordinators
+// together, are announced at.
+type ExternalAddress struct {
+	// name is the member the address belongs to, as SHOW INSTANCES names it.
+	// +required
+	Name string `json:"name"`
+
+	// address is the "host:port" clients outside the cluster reach the member
+	// at. It is absent while the LoadBalancer in front of the member has not
+	// been given an address yet.
+	// +optional
+	Address string `json:"address,omitempty"`
+}
+
+// ExternalAccessStatus reports the external addresses the operator announces
+// to clients: what a client outside the cluster connects to, and what the
+// coordinators hand back in the routing table.
+type ExternalAccessStatus struct {
+	// coordinators is the one "host:port" every coordinator is announced at. It
+	// is absent while the coordinators' LoadBalancer has no address yet.
+	// +optional
+	Coordinators string `json:"coordinators,omitempty"`
+
+	// data is every declared data instance with the external address it is
+	// announced at, in ordinal order.
+	// +listType=map
+	// +listMapKey=name
+	// +optional
+	Data []ExternalAddress `json:"data,omitempty"`
 }
 
 // MemgraphClusterStatus defines the observed state of MemgraphCluster.
@@ -901,6 +1032,13 @@ type MemgraphClusterStatus struct {
 	// registration has converged.
 	// +optional
 	DataInstances int32 `json:"dataInstances,omitempty"`
+
+	// externalAccess is the external addresses the cluster is announced at,
+	// present only while spec.externalAccess is set. An address listed here is
+	// what the operator drives the registered bolt address toward; the
+	// Converged condition says whether it has landed.
+	// +optional
+	ExternalAccess *ExternalAccessStatus `json:"externalAccess,omitempty"`
 
 	// conditions represent the current state of the MemgraphCluster resource.
 	// Each condition has a unique type and reflects the status of a specific aspect of the resource.

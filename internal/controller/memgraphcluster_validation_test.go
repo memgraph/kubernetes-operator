@@ -32,6 +32,11 @@ import (
 	memgraphcomv1alpha1 "github.com/memgraph/kubernetes-operator/api/v1alpha1"
 )
 
+// externalDNSAnnotation is the one third-party annotation the operator reads a
+// hostname off, spelled out rather than shared with the API package: pinning
+// the key external-dns actually watches is part of what these specs are for.
+const externalDNSAnnotation = "external-dns.alpha.kubernetes.io/hostname"
+
 // These specs exercise the CRD schema itself — defaults, creation-time
 // validation and the CEL transition rules that pin the topology counts. They
 // never reconcile: the API server is the unit under test, which is exactly the
@@ -564,6 +569,67 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 			Entry("an empty secret name", "invalid-raw-secret-name", "secrets", "name"),
 			Entry("an empty license key", "invalid-raw-license-key", "secrets", "licenseKey"),
 			Entry("an empty organization key", "invalid-raw-organization-key", "secrets", "organizationKey"),
+		)
+
+		It("should accept external access with decorations on both roles", func() {
+			stored := createAccepted("valid-external-access", memgraphcomv1alpha1.MemgraphClusterSpec{
+				ExternalAccess: &memgraphcomv1alpha1.ExternalAccessSpec{
+					Type: memgraphcomv1alpha1.ExternalAccessLoadBalancer,
+					Coordinators: memgraphcomv1alpha1.ExternalAccessRoleSpec{
+						Labels:      map[string]string{"tier": "coordinators"},
+						Annotations: map[string]string{externalDNSAnnotation: "memgraph.example.com"},
+					},
+					Data: memgraphcomv1alpha1.ExternalAccessRoleSpec{
+						Annotations: map[string]string{externalDNSAnnotation: "data-{ordinal}.memgraph.example.com"},
+					},
+				},
+			})
+
+			Expect(stored.Spec.ExternalAccess).NotTo(BeNil())
+			Expect(stored.Spec.ExternalAccess.Type).To(Equal(memgraphcomv1alpha1.ExternalAccessLoadBalancer))
+			Expect(stored.Spec.ExternalAccess.Data.Annotations).To(
+				HaveKeyWithValue(externalDNSAnnotation, "data-{ordinal}.memgraph.example.com"))
+		})
+
+		// The external block's guards are about the routing table: every data
+		// instance is announced at its own address, so one hostname for all of
+		// them registers the same address for every instance and breaks client
+		// routing, while the coordinators share one address and a placeholder in
+		// theirs would announce a hostname nothing publishes.
+		DescribeTable("should reject an external access block that would break client routing",
+			func(name string, spec memgraphcomv1alpha1.MemgraphClusterSpec, wantMessage string) {
+				expectRejected(name, spec, wantMessage)
+			},
+			Entry("a data hostname without the ordinal placeholder", "invalid-external-data-hostname",
+				memgraphcomv1alpha1.MemgraphClusterSpec{
+					ExternalAccess: &memgraphcomv1alpha1.ExternalAccessSpec{
+						Type: memgraphcomv1alpha1.ExternalAccessLoadBalancer,
+						Data: memgraphcomv1alpha1.ExternalAccessRoleSpec{
+							Annotations: map[string]string{externalDNSAnnotation: "data.memgraph.example.com"},
+						},
+					},
+				},
+				"must contain {ordinal}"),
+			Entry("a coordinators hostname with the ordinal placeholder", "invalid-external-coordinators-hostname",
+				memgraphcomv1alpha1.MemgraphClusterSpec{
+					ExternalAccess: &memgraphcomv1alpha1.ExternalAccessSpec{
+						Type: memgraphcomv1alpha1.ExternalAccessLoadBalancer,
+						Coordinators: memgraphcomv1alpha1.ExternalAccessRoleSpec{
+							Annotations: map[string]string{externalDNSAnnotation: "coordinator-{ordinal}.memgraph.example.com"},
+						},
+					},
+				},
+				"must not contain {ordinal}"),
+			Entry("an exposure type the operator does not implement", "invalid-external-type",
+				memgraphcomv1alpha1.MemgraphClusterSpec{
+					ExternalAccess: &memgraphcomv1alpha1.ExternalAccessSpec{Type: "NodePort"},
+				},
+				`Unsupported value: "NodePort"`),
+			Entry("an external access block without a type", "invalid-external-no-type",
+				memgraphcomv1alpha1.MemgraphClusterSpec{
+					ExternalAccess: &memgraphcomv1alpha1.ExternalAccessSpec{},
+				},
+				"Unsupported value"),
 		)
 	})
 

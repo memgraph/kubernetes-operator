@@ -36,7 +36,7 @@ import (
 const secondDataInstance = "instance_1"
 
 func TestDeclaredTopologyDefaults(t *testing.T) {
-	got := resources.DeclaredTopology(minimalCluster())
+	got := resources.DeclaredTopology(minimalCluster(), resources.ExternalAddresses{})
 
 	coordinatorFQDN := func(ordinal int) string {
 		return fmt.Sprintf("%s-%d.%s.%s.svc.cluster.local", coordinatorName, ordinal, coordinatorName, testNamespace)
@@ -88,7 +88,7 @@ func TestDeclaredTopologyDefaults(t *testing.T) {
 }
 
 func TestDeclaredTopologyFollowsReplicaCounts(t *testing.T) {
-	got := resources.DeclaredTopology(specifiedCluster())
+	got := resources.DeclaredTopology(specifiedCluster(), resources.ExternalAddresses{})
 
 	if len(got.Coordinators) != 5 {
 		t.Errorf("DeclaredTopology() declared %d coordinators, want 5", len(got.Coordinators))
@@ -206,7 +206,7 @@ func TestRetiringCoordinatorMatchesItsDeclaredForm(t *testing.T) {
 	// form is taken from a five-coordinator variant of the same spec.
 	grown := tunedCluster()
 	grown.Spec.Coordinators = ptr.To(int32(5))
-	declared := resources.DeclaredTopology(grown).Coordinators
+	declared := resources.DeclaredTopology(grown, resources.ExternalAddresses{}).Coordinators
 
 	shrunk := tunedCluster()
 	shrunk.Spec.Coordinators = ptr.To(int32(3))
@@ -241,7 +241,7 @@ func TestRetiringDataInstanceMatchesItsDeclaredForm(t *testing.T) {
 	// The tuned cluster (non-default cluster domain) declares two
 	// instances. Lowering the count to one leaves instance_1 retiring, which must
 	// equal the instance_1 the same spec declared before the edit, verbatim.
-	declared := resources.DeclaredTopology(tunedCluster()).DataInstances
+	declared := resources.DeclaredTopology(tunedCluster(), resources.ExternalAddresses{}).DataInstances
 
 	shrunk := tunedCluster()
 	shrunk.Spec.DataInstances = ptr.To(int32(1))
@@ -257,7 +257,7 @@ func TestRetiringDataInstanceMatchesItsDeclaredForm(t *testing.T) {
 // cluster and the registrations disagree about who is who.
 func TestDeclaredTopologyMatchesCoordinatorStartScript(t *testing.T) {
 	cluster := minimalCluster()
-	topology := resources.DeclaredTopology(cluster)
+	topology := resources.DeclaredTopology(cluster, resources.ExternalAddresses{})
 	sts := coordinatorStatefulSet(cluster)
 	script := strings.Join(sts.Spec.Template.Spec.Containers[0].Command, "\n")
 
@@ -279,7 +279,7 @@ func TestDeclaredTopologyMatchesCoordinatorStartScript(t *testing.T) {
 // configured cluster domain reach every advertised address, since these are
 // exactly the addresses the operator registers with the cluster.
 func TestDeclaredTopologyFixedPortsAndClusterDomain(t *testing.T) {
-	got := resources.DeclaredTopology(tunedCluster())
+	got := resources.DeclaredTopology(tunedCluster(), resources.ExternalAddresses{})
 
 	coordinatorFQDN := func(ordinal int) string {
 		return fmt.Sprintf("%s-%d.%s.%s.svc.k8s.example.com", coordinatorName, ordinal, coordinatorName, testNamespace)
@@ -335,7 +335,7 @@ func TestDeclaredTopologyFixedPortsAndClusterDomain(t *testing.T) {
 // and registrations disagree about who is who.
 func TestDeclaredTopologyMatchesTunedCoordinatorStartScript(t *testing.T) {
 	cluster := tunedCluster()
-	topology := resources.DeclaredTopology(cluster)
+	topology := resources.DeclaredTopology(cluster, resources.ExternalAddresses{})
 	sts := coordinatorStatefulSet(cluster)
 	script := strings.Join(sts.Spec.Template.Spec.Containers[0].Command, "\n")
 
@@ -351,5 +351,55 @@ func TestDeclaredTopologyMatchesTunedCoordinatorStartScript(t *testing.T) {
 		if coordinator.CoordinatorServer != wantHost {
 			t.Errorf("coordinator %d advertises %q, want %q", coordinator.ID, coordinator.CoordinatorServer, wantHost)
 		}
+	}
+}
+
+// TestDeclaredTopologyAnnouncesExternalAddresses pins where an external address
+// lands: on the bolt address of the member it belongs to and nowhere else. The
+// cluster reaches its members over the other addresses, which stay on pod DNS
+// whatever the exposure, and a member whose address is not known yet stays
+// announced at its pod address.
+func TestDeclaredTopologyAnnouncesExternalAddresses(t *testing.T) {
+	const (
+		coordinatorsAddress = "memgraph.example.com:7687"
+		dataAddress         = "203.0.113.10:7687"
+	)
+	inCluster := resources.DeclaredTopology(minimalCluster(), resources.ExternalAddresses{})
+	got := resources.DeclaredTopology(minimalCluster(), resources.ExternalAddresses{
+		Coordinators: coordinatorsAddress,
+		Data:         map[int32]string{1: dataAddress},
+	})
+
+	want := inCluster
+	for i := range want.Coordinators {
+		want.Coordinators[i].BoltServer = coordinatorsAddress
+	}
+	want.DataInstances[1].BoltServer = dataAddress
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("DeclaredTopology() mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestCoordinatorEndpoints pins that the operator's own way to a coordinator is
+// its pod address, covering every coordinator pod it runs, whatever the cluster
+// announces to clients.
+func TestCoordinatorEndpoints(t *testing.T) {
+	cluster := minimalCluster()
+	cluster.Spec.ExternalAccess = &memgraphcomv1alpha1.ExternalAccessSpec{
+		Type: memgraphcomv1alpha1.ExternalAccessLoadBalancer,
+	}
+
+	want := make([]resources.CoordinatorEndpoint, 0, 5)
+	for ordinal := range 5 {
+		want = append(want, resources.CoordinatorEndpoint{
+			Name: fmt.Sprintf("coordinator_%d", ordinal),
+			Address: endpoint(fmt.Sprintf("%s-%d.%s.%s.svc.cluster.local",
+				coordinatorName, ordinal, coordinatorName, testNamespace), memgraphcomv1alpha1.BoltPort),
+		})
+	}
+	// Five pods running while three are declared: the two retiring ones are
+	// reachable too, since one of them may hold Raft leadership.
+	if diff := cmp.Diff(want, resources.CoordinatorEndpoints(cluster, 5)); diff != "" {
+		t.Errorf("CoordinatorEndpoints() mismatch (-want +got):\n%s", diff)
 	}
 }

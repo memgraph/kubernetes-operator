@@ -99,6 +99,9 @@ setup-test-e2e: ## Set up a multi-node Kind cluster for e2e tests if it does not
 			echo "Creating Kind cluster '$(KIND_CLUSTER)'..."; \
 			$(KIND) create cluster --name $(KIND_CLUSTER) --config $(KIND_CONFIG) ;; \
 	esac
+	# Kind has no cloud controller, so the external access scenario's
+	# LoadBalancer Services would stay pending forever without one.
+	KUBECTL=$(KUBECTL) CONTAINER_TOOL=$(CONTAINER_TOOL) hack/kind-metallb.sh
 
 # The generous timeout covers the whole suite end to end: building the manager
 # image, pulling real Memgraph images, and bootstrapping an HA cluster in Kind.
@@ -194,10 +197,12 @@ chart-sync: manifests ## Regenerate the chart's CRDs and RBAC rules from the Go 
 	   echo "# templates/manager-rbac.yaml inlines this file under 'rules:' with .Files.Get"; \
 	   echo "# (Helm cannot read config/rbac/role.yaml from outside the chart directory)."; \
 	   echo "#"; \
-	   echo "# Note what is absent: no 'delete' anywhere, so the operator cannot remove a"; \
-	   echo "# StatefulSet or PVC; no 'secrets', because license and auth material reaches"; \
-	   echo "# the workload Pods via the kubelet, never through the operator; no 'pods',"; \
-	   echo "# because readiness gating reads StatefulSet status instead."; \
+	   echo "# Note what is absent: no 'delete' on StatefulSets or PVCs, so the operator"; \
+	   echo "# cannot remove a workload or its storage -- the only objects it deletes are"; \
+	   echo "# Pods, to restart them one at a time, and the external Services a removed"; \
+	   echo "# externalAccess block or a retired data instance leaves behind; no 'secrets',"; \
+	   echo "# because license and auth material reaches the workload Pods via the kubelet,"; \
+	   echo "# never through the operator."; \
 	   echo "#"; \
 	   echo "# Generated from the +kubebuilder:rbac markers in the controller sources."; \
 	   echo "# Regenerate with 'make chart-sync'; do not edit by hand. To widen or tighten"; \

@@ -369,6 +369,84 @@ spec:
                 format: int32
                 minimum: 1
                 type: integer
+              externalAccess:
+                description: |-
+                  externalAccess exposes the cluster outside Kubernetes and registers the
+                  exposed instances with the addresses clients reach them at. Absent, the
+                  cluster is reachable in-cluster only; removing it takes the external
+                  objects away again and reverts the registered addresses.
+                properties:
+                  coordinators:
+                    description: coordinators decorates the coordinators' shared external
+                      object.
+                    properties:
+                      annotations:
+                        additionalProperties:
+                          type: string
+                        description: |-
+                          annotations are added to the role's external objects: cloud load
+                          balancer tuning, external-dns hostnames, whatever the controllers in
+                          front of the cluster read. On a per-instance object every value has
+                          "{ordinal}" replaced with the pod ordinal.
+                        maxProperties: 64
+                        type: object
+                      labels:
+                        additionalProperties:
+                          type: string
+                        description: |-
+                          labels are added to the role's external objects. The operator's own
+                          identity labels win a key collision, as they do everywhere else.
+                        maxProperties: 64
+                        type: object
+                    type: object
+                  data:
+                    description: |-
+                      data decorates every data instance's external object, with "{ordinal}"
+                      in annotation values replaced by the instance's pod ordinal.
+                    properties:
+                      annotations:
+                        additionalProperties:
+                          type: string
+                        description: |-
+                          annotations are added to the role's external objects: cloud load
+                          balancer tuning, external-dns hostnames, whatever the controllers in
+                          front of the cluster read. On a per-instance object every value has
+                          "{ordinal}" replaced with the pod ordinal.
+                        maxProperties: 64
+                        type: object
+                      labels:
+                        additionalProperties:
+                          type: string
+                        description: |-
+                          labels are added to the role's external objects. The operator's own
+                          identity labels win a key collision, as they do everywhere else.
+                        maxProperties: 64
+                        type: object
+                    type: object
+                  type:
+                    description: |-
+                      type selects how the cluster is exposed. LoadBalancer creates one
+                      Service of type LoadBalancer shared by all coordinators and one per data
+                      instance, each publishing the bolt port.
+                    enum:
+                    - LoadBalancer
+                    type: string
+                required:
+                - type
+                type: object
+                x-kubernetes-validations:
+                - message: 'data.annotations external-dns.alpha.kubernetes.io/hostname
+                    must contain {ordinal}: every data instance has its own external
+                    address, and one hostname for all of them would register the same
+                    routing address for every instance'
+                  rule: '!has(self.data) || !has(self.data.annotations) || !(''external-dns.alpha.kubernetes.io/hostname''
+                    in self.data.annotations) || self.data.annotations[''external-dns.alpha.kubernetes.io/hostname''].contains(''{ordinal}'')'
+                - message: 'coordinators.annotations external-dns.alpha.kubernetes.io/hostname
+                    must not contain {ordinal}: all coordinators share one external
+                    address'
+                  rule: '!has(self.coordinators) || !has(self.coordinators.annotations)
+                    || !(''external-dns.alpha.kubernetes.io/hostname'' in self.coordinators.annotations)
+                    || !self.coordinators.annotations[''external-dns.alpha.kubernetes.io/hostname''].contains(''{ordinal}'')'
               extraArgs:
                 description: extraArgs passes additional Memgraph flags to both roles.
                 properties:
@@ -1350,6 +1428,45 @@ spec:
                   registration has converged.
                 format: int32
                 type: integer
+              externalAccess:
+                description: |-
+                  externalAccess is the external addresses the cluster is announced at,
+                  present only while spec.externalAccess is set. An address listed here is
+                  what the operator drives the registered bolt address toward; the
+                  Converged condition says whether it has landed.
+                properties:
+                  coordinators:
+                    description: |-
+                      coordinators is the one "host:port" every coordinator is announced at. It
+                      is absent while the coordinators' LoadBalancer has no address yet.
+                    type: string
+                  data:
+                    description: |-
+                      data is every declared data instance with the external address it is
+                      announced at, in ordinal order.
+                    items:
+                      description: |-
+                        ExternalAddress is the external address one member, or the coordinators
+                        together, are announced at.
+                      properties:
+                        address:
+                          description: |-
+                            address is the "host:port" clients outside the cluster reach the member
+                            at. It is absent while the LoadBalancer in front of the member has not
+                            been given an address yet.
+                          type: string
+                        name:
+                          description: name is the member the address belongs to,
+                            as SHOW INSTANCES names it.
+                          type: string
+                      required:
+                      - name
+                      type: object
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - name
+                    x-kubernetes-list-type: map
+                type: object
               main:
                 description: |-
                   main is the name of the data instance currently observed as MAIN, as

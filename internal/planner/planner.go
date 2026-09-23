@@ -115,6 +115,41 @@ func (c RegisterInstance) String() string {
 	return "REGISTER INSTANCE " + c.Instance.Name
 }
 
+// UpdateCoordinatorBoltServer and UpdateInstanceBoltServer move a registered
+// member's announced bolt address onto the one the topology declares. The
+// declared address is where clients reach the member — an external
+// LoadBalancer's address when the cluster is exposed, the pod's own address when
+// it is not or while the LoadBalancer has none yet — so it changes over the life
+// of a member, and this is how the routing table follows it. Nothing else about
+// a registration is ever updated: the cluster reaches its members over the
+// other addresses, and those never leave the cluster network.
+type UpdateCoordinatorBoltServer struct {
+	Coordinator memgraph.CoordinatorSpec
+}
+
+// Run implements Command.
+func (c UpdateCoordinatorBoltServer) Run(ctx context.Context, client memgraph.Client) error {
+	return client.UpdateCoordinatorBoltServer(ctx, c.Coordinator.ID, c.Coordinator.BoltServer)
+}
+
+func (c UpdateCoordinatorBoltServer) String() string {
+	return fmt.Sprintf("UPDATE CONFIG FOR COORDINATOR %d (bolt_server %s)", c.Coordinator.ID, c.Coordinator.BoltServer)
+}
+
+// UpdateInstanceBoltServer is UpdateCoordinatorBoltServer for a data instance.
+type UpdateInstanceBoltServer struct {
+	Instance memgraph.DataInstanceSpec
+}
+
+// Run implements Command.
+func (c UpdateInstanceBoltServer) Run(ctx context.Context, client memgraph.Client) error {
+	return client.UpdateInstanceBoltServer(ctx, c.Instance.Name, c.Instance.BoltServer)
+}
+
+func (c UpdateInstanceBoltServer) String() string {
+	return fmt.Sprintf("UPDATE CONFIG FOR INSTANCE %s (bolt_server %s)", c.Instance.Name, c.Instance.BoltServer)
+}
+
 // SetInstanceToMain promotes a data instance to MAIN: at bootstrap, when the
 // cluster has no MAIN yet, and after a retiring MAIN was demoted.
 //
@@ -301,6 +336,13 @@ func (c YieldLeadership) String() string {
 // election picks the next leader, and the caller has to observe the cluster again
 // to learn who won.
 //
+// A registered member whose observed bolt address differs from the declared one
+// gets an UPDATE CONFIG, right after the registrations: the declared address is
+// where clients reach the member, and it moves when the cluster is exposed or
+// unexposed and whenever the LoadBalancer in front of the member reports a
+// different address. Only declared members are followed this way. A retiring
+// member is registered under whatever address it had, and it is on its way out.
+//
 // Instances the cluster knows but the topology neither declares nor retires are
 // left untouched: the retiring set is bounded by the operator's own prior apply,
 // so an instance a human registered is never removed.
@@ -342,6 +384,7 @@ func Plan(declared Topology, observed []memgraph.Instance, lag []memgraph.Replic
 			commands = append(commands, RegisterInstance{Instance: instance})
 		}
 	}
+	commands = append(commands, boltServerUpdates(declared, registered)...)
 	if handover {
 		commands = append(commands, DemoteInstance{Name: retiringMain})
 	}
@@ -387,6 +430,31 @@ func Plan(declared Topology, observed []memgraph.Instance, lag []memgraph.Replic
 	}
 	if yieldFrom != "" {
 		commands = append(commands, YieldLeadership{Leader: yieldFrom})
+	}
+	return commands
+}
+
+// boltServerUpdates are the UPDATE CONFIGs that move every declared member the
+// cluster announces at some other address onto the declared one, coordinators
+// first, in ordinal order.
+//
+// An observed address that is empty is a view that does not report one, not a
+// member registered without one — every registration carries a bolt address —
+// so it is never "different": updating on it would re-announce every member on
+// every pass off a column the view stopped filling.
+func boltServerUpdates(declared Topology, registered map[string]memgraph.Instance) []Command {
+	var commands []Command
+	for _, coordinator := range declared.Coordinators {
+		if observed, ok := registered[coordinator.Name()]; ok &&
+			observed.BoltServer != "" && observed.BoltServer != coordinator.BoltServer {
+			commands = append(commands, UpdateCoordinatorBoltServer{Coordinator: coordinator})
+		}
+	}
+	for _, instance := range declared.DataInstances {
+		if observed, ok := registered[instance.Name]; ok &&
+			observed.BoltServer != "" && observed.BoltServer != instance.BoltServer {
+			commands = append(commands, UpdateInstanceBoltServer{Instance: instance})
+		}
 	}
 	return commands
 }

@@ -87,9 +87,20 @@ func DataInstanceOrdinal(name string) (int32, error) {
 // DeclaredTopology derives the registration topology the planner drives the
 // cluster toward. Identity follows the pod ordinal exactly as the workload
 // pods advertise it: coordinator ordinal N is Raft coordinator N, data ordinal
-// N registers as instance_N, and every address is the pod's stable DNS name
-// within its headless Service.
-func DeclaredTopology(cluster *memgraphcomv1alpha1.MemgraphCluster) planner.Topology {
+// N registers as instance_N, and every address the cluster reaches a member
+// over is the pod's stable DNS name within its headless Service.
+//
+// The bolt address is the exception, because it is not for the cluster: it is
+// what the coordinators hand clients in the routing table, so it has to be
+// where clients are. A member with a known external address is announced at
+// it; every other member is announced at its pod address, which is also what
+// an unexposed cluster announces throughout. The topology is recomputed from
+// the current addresses on every pass, so the announced address follows the
+// external one as it appears, changes or goes away.
+func DeclaredTopology(
+	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	external ExternalAddresses,
+) planner.Topology {
 	spec := normalize(cluster.Spec)
 
 	topology := planner.Topology{
@@ -97,12 +108,44 @@ func DeclaredTopology(cluster *memgraphcomv1alpha1.MemgraphCluster) planner.Topo
 		DataInstances: make([]memgraph.DataInstanceSpec, 0, spec.dataInstances),
 	}
 	for ordinal := range spec.coordinators {
-		topology.Coordinators = append(topology.Coordinators, coordinator(cluster, spec, ordinal))
+		topology.Coordinators = append(topology.Coordinators,
+			coordinator(cluster, spec, ordinal, external.Coordinators))
 	}
 	for ordinal := range spec.dataInstances {
-		topology.DataInstances = append(topology.DataInstances, dataInstance(cluster, spec, ordinal))
+		topology.DataInstances = append(topology.DataInstances,
+			dataInstance(cluster, spec, ordinal, external.Data[ordinal]))
 	}
 	return topology
+}
+
+// CoordinatorEndpoint is where the operator itself reaches one coordinator over
+// Bolt: always the pod's own address, never the announced one. The announced
+// address may be an external LoadBalancer, which the operator has no business
+// going through — it may not be reachable from inside the cluster, and the
+// coordinators' shared one lands on whichever member the balancer picks, when
+// the operator needs to speak to a particular one.
+type CoordinatorEndpoint struct {
+	// Name is the coordinator's SHOW INSTANCES name.
+	Name string
+	// Address is its pod's bolt "host:port".
+	Address string
+}
+
+// CoordinatorEndpoints is every coordinator pod the operator currently runs,
+// in ordinal order: the declared ones and, while a lowered count is being
+// carried out, the retiring ones too, since a retiring coordinator can hold
+// Raft leadership until it yields it. `running` is the replica count the
+// operator's own apply left on the coordinator StatefulSet.
+func CoordinatorEndpoints(cluster *memgraphcomv1alpha1.MemgraphCluster, running int32) []CoordinatorEndpoint {
+	spec := normalize(cluster.Spec)
+	endpoints := make([]CoordinatorEndpoint, 0, running)
+	for ordinal := range running {
+		endpoints = append(endpoints, CoordinatorEndpoint{
+			Name:    CoordinatorInstanceName(ordinal),
+			Address: hostPort(podFQDN(cluster, CoordinatorName(cluster), spec, ordinal), memgraphcomv1alpha1.BoltPort),
+		})
+	}
+	return endpoints
 }
 
 // RetiringCoordinators is the coordinators a lowered coordinators count is
@@ -123,7 +166,7 @@ func RetiringCoordinators(
 
 	retiring := make([]memgraph.CoordinatorSpec, 0, applied-spec.coordinators)
 	for ordinal := spec.coordinators; ordinal < applied; ordinal++ {
-		retiring = append(retiring, coordinator(cluster, spec, ordinal))
+		retiring = append(retiring, coordinator(cluster, spec, ordinal, ""))
 	}
 	return retiring
 }
@@ -147,45 +190,59 @@ func RetiringDataInstances(
 
 	retiring := make([]memgraph.DataInstanceSpec, 0, applied-spec.dataInstances)
 	for ordinal := spec.dataInstances; ordinal < applied; ordinal++ {
-		retiring = append(retiring, dataInstance(cluster, spec, ordinal))
+		retiring = append(retiring, dataInstance(cluster, spec, ordinal, ""))
 	}
 	return retiring
 }
 
 // coordinator describes the coordinator running on the given pod ordinal, as the
-// pod itself advertises it. Retiring coordinators are described the same way as
-// declared ones: they are members of the Raft cluster under the ID and addresses
-// the operator added them with, whether or not the spec still declares them.
+// pod itself advertises it, announced at the given external bolt address when
+// there is one. Retiring coordinators are described the same way as declared
+// ones: they are members of the Raft cluster under the ID and addresses the
+// operator added them with, whether or not the spec still declares them — and
+// with no external address, because the planner never follows the announced
+// address of a member on its way out.
 func coordinator(
 	cluster *memgraphcomv1alpha1.MemgraphCluster,
 	spec normalizedSpec,
 	ordinal int32,
+	externalBolt string,
 ) memgraph.CoordinatorSpec {
 	fqdn := podFQDN(cluster, CoordinatorName(cluster), spec, ordinal)
 	return memgraph.CoordinatorSpec{
 		ID:                CoordinatorID(ordinal),
-		BoltServer:        hostPort(fqdn, memgraphcomv1alpha1.BoltPort),
+		BoltServer:        announcedBolt(fqdn, externalBolt),
 		CoordinatorServer: hostPort(fqdn, memgraphcomv1alpha1.CoordinatorPort),
 		ManagementServer:  hostPort(fqdn, memgraphcomv1alpha1.ManagementPort),
 	}
 }
 
 // dataInstance describes the data instance running on the given pod ordinal, as
-// the pod itself advertises it. Retiring instances are described the same way as
-// declared ones: they are registered under the addresses the operator registered
-// them with, whether or not the spec still declares them.
+// the pod itself advertises it, announced at the given external bolt address
+// when there is one. Retiring instances are described the same way as declared
+// ones, for the reason coordinators are.
 func dataInstance(
 	cluster *memgraphcomv1alpha1.MemgraphCluster,
 	spec normalizedSpec,
 	ordinal int32,
+	externalBolt string,
 ) memgraph.DataInstanceSpec {
 	fqdn := podFQDN(cluster, DataName(cluster), spec, ordinal)
 	return memgraph.DataInstanceSpec{
 		Name:              DataInstanceName(ordinal),
-		BoltServer:        hostPort(fqdn, memgraphcomv1alpha1.BoltPort),
+		BoltServer:        announcedBolt(fqdn, externalBolt),
 		ManagementServer:  hostPort(fqdn, memgraphcomv1alpha1.ManagementPort),
 		ReplicationServer: hostPort(fqdn, memgraphcomv1alpha1.ReplicationPort),
 	}
+}
+
+// announcedBolt is the bolt address a member is announced at: the external one
+// when it is known, the pod's own otherwise.
+func announcedBolt(fqdn, externalBolt string) string {
+	if externalBolt != "" {
+		return externalBolt
+	}
+	return hostPort(fqdn, memgraphcomv1alpha1.BoltPort)
 }
 
 // podFQDNSuffix returns the DNS suffix a pod name is appended to for pods of

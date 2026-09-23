@@ -88,15 +88,19 @@ type MemgraphClusterReconciler struct {
 // clusters running the OwnerReferencesPermissionEnforcement admission plugin
 // only allow with update access to the owner's finalizers.
 //
-// Pods are the one thing the operator deletes. Both StatefulSets use
-// updateStrategy OnDelete, so replacing a pod whose template changed is the
-// operator's job and nobody else's; get/list/watch reads their revision and
-// readiness, and delete is the restart itself.
+// Pods and external Services are the two things the operator deletes. Both
+// StatefulSets use updateStrategy OnDelete, so replacing a pod whose template
+// changed is the operator's job and nobody else's; get/list/watch reads their
+// revision and readiness, and delete is the restart itself. External Services
+// exist only while the spec asks for them: removing the externalAccess block, or
+// retiring the data instance one fronts, has to take the Service away, and
+// server-side apply never removes an object. Headless Services and StatefulSets
+// are never deleted — the same verb covers them, but nothing here issues it.
 // +kubebuilder:rbac:groups=memgraph.com,resources=memgraphclusters,verbs=get;list;watch
 // +kubebuilder:rbac:groups=memgraph.com,resources=memgraphclusters/status,verbs=get;patch
 // +kubebuilder:rbac:groups=memgraph.com,resources=memgraphclusters/finalizers,verbs=update
 // +kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;create;patch
-// +kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;patch
+// +kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;patch;delete
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;delete
 
 // Reconcile drives the cluster toward the declared MemgraphCluster spec in
@@ -135,18 +139,146 @@ func (r *MemgraphClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, err
 	}
 
-	if err := r.applyDesired(ctx, &cluster,
+	// The external Services follow the data pods the operator runs, not the
+	// count it declares: a retiring instance keeps serving clients until its pod
+	// is shed, and the pass that sheds the pod is the one that drops its Service.
+	external := resources.ExternalServices(&cluster, replicas.data.applied)
+	desired := []client.Object{
 		resources.CoordinatorHeadlessService(&cluster),
 		resources.DataHeadlessService(&cluster),
 		resources.CoordinatorStatefulSet(&cluster, replicas.coordinators.applied),
 		resources.DataStatefulSet(&cluster, replicas.data.applied),
-	); err != nil {
+	}
+	for _, service := range external {
+		desired = append(desired, service)
+	}
+	if err := r.applyDesired(ctx, &cluster, desired...); err != nil {
+		return ctrl.Result{}, err
+	}
+	if err := r.pruneExternalServices(ctx, &cluster, external); err != nil {
 		return ctrl.Result{}, err
 	}
 
 	log.Info("Applied desired workload objects for MemgraphCluster", "memgraphcluster", req.NamespacedName)
 
-	return r.reconcileRegistration(ctx, &cluster, replicas)
+	exposure, err := r.observeExternalAccess(ctx, &cluster)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	return r.reconcileRegistration(ctx, &cluster, replicas, exposure)
+}
+
+// pruneExternalServices deletes the external Services of this cluster that the
+// current spec does not describe: all of them once the externalAccess block is
+// removed, and the one in front of a data instance a lowered count has just
+// shed. Apply only ever creates and updates, so this is the one place a Service
+// goes away before its owner does. Only Services this cluster controls are
+// considered, and each delete is conditioned on the UID observed, so a Service
+// recreated in between is left for the next pass to judge.
+func (r *MemgraphClusterReconciler) pruneExternalServices(
+	ctx context.Context,
+	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	desired []*corev1.Service,
+) error {
+	log := logf.FromContext(ctx)
+
+	keep := make(map[string]bool, len(desired))
+	for _, service := range desired {
+		keep[service.Name] = true
+	}
+
+	var services corev1.ServiceList
+	if err := r.List(ctx, &services, client.InNamespace(cluster.Namespace),
+		client.MatchingLabels(resources.ExternalServicesSelector(cluster))); err != nil {
+		return fmt.Errorf("listing external Services: %w", err)
+	}
+	for i := range services.Items {
+		service := &services.Items[i]
+		if keep[service.Name] || !metav1.IsControlledBy(service, cluster) {
+			continue
+		}
+		uid := service.UID
+		err := r.Delete(ctx, service, client.Preconditions{UID: &uid})
+		switch {
+		case err == nil:
+			log.Info("Deleted an external Service the spec no longer describes", "service", service.Name)
+		case apierrors.IsNotFound(err), apierrors.IsConflict(err):
+		default:
+			return fmt.Errorf("deleting external Service %s: %w", service.Name, err)
+		}
+	}
+	return nil
+}
+
+// externalAccess is what a reconcile pass observed about the cluster's exposure:
+// the external address every exposed member is announced at, the Services still
+// waiting for one, and the status block that reports them. It is the zero value
+// for an unexposed cluster.
+type externalAccess struct {
+	addresses resources.ExternalAddresses
+	// pending names the external Services that have no address yet, so the
+	// members behind them are announced at their pod addresses for now.
+	pending []string
+	status  *memgraphcomv1alpha1.ExternalAccessStatus
+}
+
+// observeExternalAccess reads the external Services the spec asks for and
+// derives the address each one exposes. It is pure observation of Kubernetes
+// state, taken before the cluster itself is looked at, so what registration
+// announces this pass is what the Services report this pass. A Service the
+// apply just created and the cache has not caught up with is the same as one
+// with no address yet: pending, and looked at again next pass.
+func (r *MemgraphClusterReconciler) observeExternalAccess(
+	ctx context.Context,
+	cluster *memgraphcomv1alpha1.MemgraphCluster,
+) (externalAccess, error) {
+	if cluster.Spec.ExternalAccess == nil {
+		return externalAccess{}, nil
+	}
+
+	address := func(name string) (string, error) {
+		var service corev1.Service
+		if err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: cluster.Namespace}, &service); err != nil {
+			if apierrors.IsNotFound(err) {
+				return "", nil
+			}
+			return "", fmt.Errorf("getting external Service %s: %w", name, err)
+		}
+		return resources.ExternalBoltAddress(&service), nil
+	}
+
+	exposure := externalAccess{
+		addresses: resources.ExternalAddresses{Data: map[int32]string{}},
+		status:    &memgraphcomv1alpha1.ExternalAccessStatus{},
+	}
+	coordinators := resources.CoordinatorExternalServiceName(cluster)
+	addr, err := address(coordinators)
+	if err != nil {
+		return externalAccess{}, err
+	}
+	if addr == "" {
+		exposure.pending = append(exposure.pending, coordinators)
+	}
+	exposure.addresses.Coordinators = addr
+	exposure.status.Coordinators = addr
+
+	for ordinal := range resources.DeclaredDataInstances(cluster) {
+		name := resources.DataExternalServiceName(cluster, ordinal)
+		addr, err := address(name)
+		if err != nil {
+			return externalAccess{}, err
+		}
+		if addr == "" {
+			exposure.pending = append(exposure.pending, name)
+		} else {
+			exposure.addresses.Data[ordinal] = addr
+		}
+		exposure.status.Data = append(exposure.status.Data, memgraphcomv1alpha1.ExternalAddress{
+			Name: resources.DataInstanceName(ordinal), Address: addr,
+		})
+	}
+	return exposure, nil
 }
 
 // applyDesired server-side-applies the desired workload objects, each owned by
@@ -450,6 +582,7 @@ func (r *MemgraphClusterReconciler) reconcileRegistration(
 	ctx context.Context,
 	cluster *memgraphcomv1alpha1.MemgraphCluster,
 	replicas replicaCounts,
+	exposure externalAccess,
 ) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
@@ -468,7 +601,7 @@ func (r *MemgraphClusterReconciler) reconcileRegistration(
 	if !ready {
 		log.Info("Waited for workload pods to become ready before registration")
 		msg := "Waiting for all workload pods to become ready"
-		if statusErr := r.writeStatus(ctx, cluster, lastObserved(cluster),
+		if statusErr := r.writeStatus(ctx, cluster, lastObserved(cluster).exposedAt(exposure),
 			notReadyCondition(memgraphcomv1alpha1.ReasonWorkloadsNotReady, msg),
 			notConvergedCondition(memgraphcomv1alpha1.ReasonWorkloadsNotReady, msg),
 		); statusErr != nil {
@@ -477,7 +610,7 @@ func (r *MemgraphClusterReconciler) reconcileRegistration(
 		return ctrl.Result{RequeueAfter: requeueWhilePending}, nil
 	}
 
-	topology := resources.DeclaredTopology(cluster)
+	topology := resources.DeclaredTopology(cluster, exposure.addresses)
 	// The members a lowered count is shedding are the ordinals the operator's own
 	// previous apply still runs beyond the declared count, so the range is bounded
 	// by what the operator itself created.
@@ -487,7 +620,10 @@ func (r *MemgraphClusterReconciler) reconcileRegistration(
 	// topology alone: it is what both the condition and the shrink below key off.
 	retiring := retirementMessage(topology)
 
-	leader, observed, err := r.observeCluster(ctx, topology)
+	// The operator speaks to the coordinators over their pod addresses, never
+	// the announced ones: those may be an external LoadBalancer.
+	leader, observed, err := r.observeCluster(ctx,
+		resources.CoordinatorEndpoints(cluster, replicas.coordinators.applied))
 	if err != nil {
 		log.Info("Deferred registration because no coordinator leader was usable", "reason", err.Error())
 		reason, msg := memgraphcomv1alpha1.ReasonCoordinatorUnreachable, "No coordinator answered SHOW INSTANCES"
@@ -497,7 +633,7 @@ func (r *MemgraphClusterReconciler) reconcileRegistration(
 			reason, msg = memgraphcomv1alpha1.ReasonNoCoordinatorLeader,
 				"No coordinator reported a leader, so the cluster has no Raft quorum"
 		}
-		if statusErr := r.writeStatus(ctx, cluster, lastObserved(cluster),
+		if statusErr := r.writeStatus(ctx, cluster, lastObserved(cluster).exposedAt(exposure),
 			notReadyCondition(reason, msg),
 			notConvergedCondition(reason, msg),
 		); statusErr != nil {
@@ -522,7 +658,7 @@ func (r *MemgraphClusterReconciler) reconcileRegistration(
 		lag = nil
 	}
 
-	latest := observe(topology, observed)
+	latest := observe(topology, observed).exposedAt(exposure)
 	commands := planner.Plan(topology, observed, lag)
 	if len(commands) == 0 {
 		if retiring != "" {
@@ -562,6 +698,16 @@ func (r *MemgraphClusterReconciler) reconcileRegistration(
 		converged := trueCondition(memgraphcomv1alpha1.ConditionConverged,
 			memgraphcomv1alpha1.ReasonAllInstancesRegistered,
 			fmt.Sprintf("All %d declared instances are registered", len(topology.Coordinators)+len(topology.DataInstances)))
+		if len(exposure.pending) > 0 {
+			// Every member is registered, but not yet at the address the spec
+			// asks for: the members behind these Services are announced at their
+			// pod addresses until the LoadBalancers get theirs. That is cloud
+			// provisioning the operator can only wait on, and it does not hold up
+			// the restart below — the pods are none of its business.
+			log.Info("Waited for external addresses", "services", exposure.pending)
+			converged = notConvergedCondition(memgraphcomv1alpha1.ReasonExternalAddressPending,
+				"Waiting for an external address on Service(s) "+strings.Join(exposure.pending, ", "))
+		}
 
 		switch decision := rollout.Next(roles.data, roles.coordinators, observed, lag); decision.Action {
 		case rollout.Delete:
@@ -683,13 +829,15 @@ func (r *MemgraphClusterReconciler) shedRetiredPods(
 }
 
 // observation is everything a reconcile pass observed about the cluster that
-// reaches the resource's status: which data instance is MAIN, and how many of
-// each role's declared members are registered. It is observation only — no
-// reconcile decision reads it back off the status.
+// reaches the resource's status: which data instance is MAIN, how many of each
+// role's declared members are registered, and the external addresses the
+// cluster is announced at. It is observation only — no reconcile decision reads
+// it back off the status.
 type observation struct {
 	main                    string
 	registeredCoordinators  int32
 	registeredDataInstances int32
+	externalAccess          *memgraphcomv1alpha1.ExternalAccessStatus
 }
 
 // observe reads the coordinator leader's cluster view into the status fields.
@@ -702,6 +850,14 @@ func observe(topology planner.Topology, observed []memgraph.Instance) observatio
 	}
 }
 
+// exposedAt adds the pass's view of the external addresses. It is read off
+// Kubernetes rather than the cluster, so every pass has it — including the ones
+// that could not reach a coordinator and republish the rest of the observation.
+func (o observation) exposedAt(exposure externalAccess) observation {
+	o.externalAccess = exposure.status
+	return o
+}
+
 // lastObserved is the observation already published on the resource. The paths
 // that could not observe the cluster this pass republish it: an unready pod or
 // an unreachable coordinator says nothing about what the last reachable leader
@@ -711,6 +867,7 @@ func lastObserved(cluster *memgraphcomv1alpha1.MemgraphCluster) observation {
 		main:                    cluster.Status.Main,
 		registeredCoordinators:  cluster.Status.Coordinators,
 		registeredDataInstances: cluster.Status.DataInstances,
+		externalAccess:          cluster.Status.ExternalAccess,
 	}
 }
 
@@ -791,6 +948,7 @@ func (r *MemgraphClusterReconciler) writeStatus(
 	cluster.Status.Main = observed.main
 	cluster.Status.Coordinators = observed.registeredCoordinators
 	cluster.Status.DataInstances = observed.registeredDataInstances
+	cluster.Status.ExternalAccess = observed.externalAccess
 	for _, condition := range conditions {
 		condition.ObservedGeneration = cluster.Generation
 		apimeta.SetStatusCondition(&cluster.Status.Conditions, condition)
@@ -875,12 +1033,12 @@ var errNoCoordinatorLeader = errors.New("no coordinator reported a leader")
 
 // observeCluster connects to the coordinator leader and returns its client
 // together with the SHOW INSTANCES view the planner diffs against.
-// Coordinators are tried in ordinal order: one reporting itself leader is used
-// directly, and one reporting another coordinator as leader hands over the
-// address to connect to. The view is read once either way — a follower forwards
-// SHOW INSTANCES to the leader, so what it answers with is already the leader's
-// view, and only the planner's mutating commands need the leader connection
-// itself.
+// Coordinators are tried in ordinal order over their pod addresses: one
+// reporting itself leader is used directly, and one reporting another
+// coordinator as leader hands over the name to connect to. The view is read
+// once either way — a follower forwards SHOW INSTANCES to the leader, so what it
+// answers with is already the leader's view, and only the planner's mutating
+// commands need the leader connection itself.
 //
 // A coordinator that names no leader is skipped, never used as planning input.
 // Its view is not the fresh-cluster case: a coordinator starts with itself as
@@ -893,12 +1051,12 @@ var errNoCoordinatorLeader = errors.New("no coordinator reported a leader")
 // state that is neither current nor writable.
 func (r *MemgraphClusterReconciler) observeCluster(
 	ctx context.Context,
-	topology planner.Topology,
+	endpoints []resources.CoordinatorEndpoint,
 ) (memgraph.Client, []memgraph.Instance, error) {
 	var errs []error
 	leaderless := false
-	for _, coordinator := range topology.Coordinators {
-		conn, observed, err := r.showInstances(ctx, coordinator.BoltServer)
+	for _, coordinator := range endpoints {
+		conn, observed, err := r.showInstances(ctx, coordinator.Address)
 		if err != nil {
 			errs = append(errs, err)
 			continue
@@ -911,7 +1069,7 @@ func (r *MemgraphClusterReconciler) observeCluster(
 				break
 			}
 		}
-		if leaderName == coordinator.Name() {
+		if leaderName == coordinator.Name {
 			return conn, observed, nil
 		}
 		if err := conn.Close(ctx); err != nil {
@@ -919,17 +1077,17 @@ func (r *MemgraphClusterReconciler) observeCluster(
 		}
 		if leaderName == "" {
 			leaderless = true
-			errs = append(errs, fmt.Errorf("%s reported no leader", coordinator.Name()))
+			errs = append(errs, fmt.Errorf("%s reported no leader", coordinator.Name))
 			continue
 		}
 
 		// This coordinator is a follower, so it answered with the leader's
 		// forwarded view: keep that view and open the connection the mutating
 		// commands need on the leader itself.
-		address, found := leaderAddress(topology, observed, leaderName)
+		address, found := leaderAddress(endpoints, observed, leaderName)
 		if !found {
 			errs = append(errs, fmt.Errorf("%s reported leader %s without a Bolt address",
-				coordinator.Name(), leaderName))
+				coordinator.Name, leaderName))
 			continue
 		}
 		leader, err := r.Memgraph.Connect(ctx, address)
@@ -945,15 +1103,18 @@ func (r *MemgraphClusterReconciler) observeCluster(
 	return nil, nil, fmt.Errorf("no coordinator answered SHOW INSTANCES: %w", errors.Join(errs...))
 }
 
-// leaderAddress resolves the Bolt address of the coordinator reported as
-// leader. The declared topology is preferred — it is the address the operator
-// itself registered — but the reported view is a valid fallback, because the
-// leader need not be one of the declared coordinators: a coordinator on its way
-// out of the cluster can hold leadership while it is still being removed.
-func leaderAddress(topology planner.Topology, observed []memgraph.Instance, name string) (string, bool) {
-	for _, coordinator := range topology.Coordinators {
-		if coordinator.Name() == name {
-			return coordinator.BoltServer, true
+// leaderAddress resolves the Bolt address the operator reaches the coordinator
+// reported as leader at. The pod endpoints are preferred — they cover every
+// coordinator the operator runs, declared or retiring — but the reported view is
+// a valid fallback for a leader the operator did not create, such as a
+// coordinator a human added. That address is the announced one, which on an
+// exposed cluster may be the coordinators' shared LoadBalancer; the connection
+// then lands on whichever coordinator it picks and, if that is not the leader,
+// the mutating commands are forwarded to the leader by the coordinator anyway.
+func leaderAddress(endpoints []resources.CoordinatorEndpoint, observed []memgraph.Instance, name string) (string, bool) {
+	for _, coordinator := range endpoints {
+		if coordinator.Name == name {
+			return coordinator.Address, true
 		}
 	}
 	for _, instance := range observed {

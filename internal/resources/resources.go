@@ -93,12 +93,15 @@ func DataPodSelector(cluster *memgraphcomv1alpha1.MemgraphCluster) map[string]st
 	return selectorLabels(cluster, dataComponent)
 }
 
+// instanceLabel carries the cluster's name on every object of the cluster.
+const instanceLabel = "app.kubernetes.io/instance"
+
 // selectorLabels returns the immutable subset of labels used as StatefulSet
 // and Service selectors.
 func selectorLabels(cluster *memgraphcomv1alpha1.MemgraphCluster, component string) map[string]string {
 	return map[string]string{
 		"app.kubernetes.io/name":      "memgraph",
-		"app.kubernetes.io/instance":  cluster.Name,
+		instanceLabel:                 cluster.Name,
 		"app.kubernetes.io/component": component,
 	}
 }
@@ -119,6 +122,22 @@ type normalizedSpec struct {
 	retentionPolicy memgraphcomv1alpha1.StorageRetentionPolicy
 	coordinatorRole normalizedRole
 	dataRole        normalizedRole
+	external        normalizedExternal
+}
+
+// normalizedExternal is the external access block with its per-role
+// decorations resolved. It is the zero value for an unexposed cluster, which
+// no builder reads: ExternalServices checks the spec's block before building
+// anything.
+type normalizedExternal struct {
+	coordinators normalizedExternalRole
+	data         normalizedExternalRole
+}
+
+// normalizedExternalRole is what decorates one role's external objects.
+type normalizedExternalRole struct {
+	labels      map[string]string
+	annotations map[string]string
 }
 
 // normalizedRole is everything the builders need that is configured per role.
@@ -213,6 +232,18 @@ func normalize(spec memgraphcomv1alpha1.MemgraphClusterSpec) normalizedSpec {
 			// snapshots, and a large restore must not be killed mid-load.
 			startupFailureThreshold: memgraphcomv1alpha1.DefaultDataStartupProbeFailureThreshold,
 		}),
+	}
+	if spec.ExternalAccess != nil {
+		n.external = normalizedExternal{
+			coordinators: normalizedExternalRole{
+				labels:      spec.ExternalAccess.Coordinators.Labels,
+				annotations: spec.ExternalAccess.Coordinators.Annotations,
+			},
+			data: normalizedExternalRole{
+				labels:      spec.ExternalAccess.Data.Labels,
+				annotations: spec.ExternalAccess.Data.Annotations,
+			},
+		}
 	}
 	if spec.Coordinators != nil {
 		n.coordinators = *spec.Coordinators

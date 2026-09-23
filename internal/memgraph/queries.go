@@ -50,6 +50,17 @@ func registerInstanceQuery(instance DataInstanceSpec) string {
 	)
 }
 
+// The UPDATE CONFIG queries take the same config map REGISTER INSTANCE and ADD
+// COORDINATOR do, but Memgraph honours only bolt_server in it: the routing
+// address is the one thing about a registered member that may change.
+func updateCoordinatorBoltServerQuery(id int32, boltServer string) string {
+	return fmt.Sprintf(`UPDATE CONFIG FOR COORDINATOR %d {"bolt_server": %q}`, id, boltServer)
+}
+
+func updateInstanceBoltServerQuery(name, boltServer string) string {
+	return fmt.Sprintf(`UPDATE CONFIG FOR INSTANCE %s {"bolt_server": %q}`, name, boltServer)
+}
+
 func setInstanceToMainQuery(name string) string {
 	return fmt.Sprintf("SET INSTANCE %s TO MAIN", name)
 }

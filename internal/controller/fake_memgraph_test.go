@@ -273,6 +273,34 @@ func (c *fakeClient) RegisterInstance(_ context.Context, instance memgraph.DataI
 	})
 }
 
+// UpdateCoordinatorBoltServer and UpdateInstanceBoltServer move a registered
+// member's announced bolt address, and — like the real thing — refuse a member
+// the cluster does not know, with no precondition on its health.
+func (c *fakeClient) UpdateCoordinatorBoltServer(_ context.Context, id int32, boltServer string) error {
+	name := fmt.Sprintf("coordinator_%d", id)
+	return c.execute(fmt.Sprintf("UPDATE CONFIG FOR COORDINATOR %d bolt_server=%s", id, boltServer), func() error {
+		for i, instance := range c.cluster.instances {
+			if instance.Name == name && instance.BoltServer != "" {
+				c.cluster.instances[i].BoltServer = boltServer
+				return nil
+			}
+		}
+		return fmt.Errorf("fake memgraph: coordinator %s is not a member", name)
+	})
+}
+
+func (c *fakeClient) UpdateInstanceBoltServer(_ context.Context, name, boltServer string) error {
+	return c.execute(fmt.Sprintf("UPDATE CONFIG FOR INSTANCE %s bolt_server=%s", name, boltServer), func() error {
+		for i, instance := range c.cluster.instances {
+			if instance.Name == name {
+				c.cluster.instances[i].BoltServer = boltServer
+				return nil
+			}
+		}
+		return fmt.Errorf("fake memgraph: instance %s is not registered", name)
+	})
+}
+
 func (c *fakeClient) SetInstanceToMain(_ context.Context, name string) error {
 	return c.execute(fmt.Sprintf("SET INSTANCE %s TO MAIN", name), func() error {
 		for _, instance := range c.cluster.instances {
@@ -427,4 +455,12 @@ func (f *fakeMemgraph) hasInstance(name string) bool {
 	return slices.ContainsFunc(f.instances, func(instance memgraph.Instance) bool {
 		return instance.Name == name
 	})
+}
+
+// view is the cluster view as the coordinators currently hold it: what a
+// spec reads back to see where a member is announced.
+func (f *fakeMemgraph) view() []memgraph.Instance {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.instances)
 }

@@ -5,10 +5,12 @@
 # templates/manager-rbac.yaml inlines this file under 'rules:' with .Files.Get
 # (Helm cannot read config/rbac/role.yaml from outside the chart directory).
 #
-# Note what is absent: no 'delete' anywhere, so the operator cannot remove a
-# StatefulSet or PVC; no 'secrets', because license and auth material reaches
-# the workload Pods via the kubelet, never through the operator; no 'pods',
-# because readiness gating reads StatefulSet status instead.
+# Note what is absent: no 'delete' on StatefulSets or PVCs, so the operator
+# cannot remove a workload or its storage -- the only objects it deletes are
+# Pods, to restart them one at a time, and the external Services a removed
+# externalAccess block or a retired data instance leaves behind; no 'secrets',
+# because license and auth material reaches the workload Pods via the kubelet,
+# never through the operator.
 #
 # Generated from the +kubebuilder:rbac markers in the controller sources.
 # Regenerate with 'make chart-sync'; do not edit by hand. To widen or tighten
@@ -28,6 +30,7 @@
   - services
   verbs:
   - create
+  - delete
   - get
   - list
   - patch
