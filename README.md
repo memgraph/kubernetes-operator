@@ -230,6 +230,35 @@ helm install memgraph-operator ./charts/memgraph-operator \
   --namespace memgraph-operator-system --create-namespace --wait
 ```
 
+### Building for a different CPU architecture
+
+`make docker-build` produces an image for the architecture of the machine running Docker. Building on an arm64 workstation (Apple Silicon, or an arm64 Docker VM) for an amd64 cluster such as AKS needs two adjustments, because a plain `docker build --platform linux/amd64` fails with `exec format error` on any daemon without amd64 emulation: the builder stage would pull the amd64 Go image and try to execute it.
+
+The Dockerfile already reads `TARGETARCH`, so the fix is to run the builder stage natively and let Go cross-compile. `make docker-buildx` does exactly that through a generated `Dockerfile.cross`, but it pushes straight from a separate BuildKit container and skips the local image store. To build the same way with the default builder and keep the image locally:
+
+```sh
+sed -e '1 s/\(^FROM\)/FROM --platform=\${BUILDPLATFORM}/; t' -e ' 1,// s//FROM --platform=\${BUILDPLATFORM}/' Dockerfile > Dockerfile.cross
+docker build --platform linux/amd64 -f Dockerfile.cross -t <registry>/kubernetes-operator:<tag> .
+rm Dockerfile.cross
+
+docker image inspect <registry>/kubernetes-operator:<tag> --format '{{.Os}}/{{.Architecture}}'   # expect linux/amd64
+docker push <registry>/kubernetes-operator:<tag>
+```
+
+The final stage is `distroless/static` and runs no commands, so it needs no emulation either.
+
+Deploy the pushed image **by digest**, not by tag. The manager Deployment uses `imagePullPolicy: IfNotPresent`, so a node that has already pulled `<tag>` keeps its cached copy even after the tag is re-pointed at a different image. After an arm64 image has been pushed under a tag once, re-pushing an amd64 image under the same tag will still land the old binary on that node and the pod will crash-loop with `exec /manager: exec format error`. `docker push` prints the manifest digest; use it:
+
+```sh
+make install
+make deploy IMG=<registry>/kubernetes-operator@sha256:<digest>
+kubectl -n kubernetes-operator-system get pod -o jsonpath='{.items[0].status.containerStatuses[0].imageID}{"\n"}'   # must show the same digest
+```
+
+Pushing under a fresh tag each time works too; the point is that a tag which once held a different image can no longer be trusted to pull.
+
+`make deploy` rewrites `config/manager/kustomization.yaml` with the image you pass. Revert that file before committing.
+
 The install chart is maintained in this repository under [`charts/memgraph-operator`](charts/memgraph-operator/README.md), next to the manifests it ships: its CRDs and the manager's RBAC rules are generated from the Go types and the `+kubebuilder:rbac` markers (`make chart-sync`, verified in CI by `make chart-verify`), so the chart can never drift from the controller version it installs. Pushing a version tag cross-publishes the packaged chart into the [`memgraph.github.io/helm-charts`](https://memgraph.github.io/helm-charts) index. The chart version and the operator version move independently — `v0.2.0` releases the operator, `chart-0.4.2` releases the chart alone. See [`docs/releasing.md`](docs/releasing.md).
 
 Development is sliced into PR-gated issues under [`specs/operator-mvp/issues/`](specs/operator-mvp/issues). Run `make help` for all targets, and see the [Kubebuilder documentation](https://book.kubebuilder.io/introduction.html) for the scaffolding conventions this project follows.

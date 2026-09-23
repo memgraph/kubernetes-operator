@@ -34,8 +34,8 @@ import (
 const (
 	// managerImageRepository and managerImageTag make up the manager image that
 	// is built, loaded into Kind, and installed through the chart's image values.
-	managerImageRepository = "example.com/kubernetes-operator"
-	managerImageTag        = "v0.0.1"
+	managerImageRepository = "memgraph/kubernetes-operator"
+	managerImageTag        = "e2e"
 
 	// managerImage is the manager image to be built and loaded for testing.
 	managerImage = managerImageRepository + ":" + managerImageTag
