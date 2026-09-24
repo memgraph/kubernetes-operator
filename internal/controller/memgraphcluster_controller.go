@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -31,11 +32,14 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	memgraphcomv1alpha1 "github.com/memgraph/kubernetes-operator/api/v1alpha1"
 	"github.com/memgraph/kubernetes-operator/internal/memgraph"
@@ -76,6 +80,14 @@ type MemgraphClusterReconciler struct {
 	// fake; everything above the memgraph.Client interface never touches the
 	// Bolt driver.
 	Memgraph memgraph.Connector
+
+	// GatewayAPI reports whether the cluster serves the Gateway API group, as
+	// discovered when the manager started. The Gateway API CRDs belong to
+	// whoever installs a Gateway controller and are never bundled with the
+	// operator, so a cluster without them is normal; what changes is that the
+	// Gateway exposure mode cannot be served on it, and a watch on a kind the
+	// cluster does not have would keep the manager from starting at all.
+	GatewayAPI bool
 }
 
 // The install chart's ClusterRole is generated from these markers, so they are
@@ -102,6 +114,11 @@ type MemgraphClusterReconciler struct {
 // +kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;create;patch
 // +kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;patch;delete
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;delete
+//
+// The Gateway and its TCPRoutes are external objects like the Services above,
+// with the same lifecycle and the same verbs. The rules are granted whether or
+// not the cluster serves the group: RBAC does not require the resource to exist.
+// +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=gateways;tcproutes,verbs=get;list;watch;create;patch;delete
 
 // Reconcile drives the cluster toward the declared MemgraphCluster spec in
 // two stages. First it server-side-applies the builders' desired objects: one
@@ -139,23 +156,22 @@ func (r *MemgraphClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, err
 	}
 
-	// The external Services follow the data pods the operator runs, not the
+	// The external objects follow the data pods the operator runs, not the
 	// count it declares: a retiring instance keeps serving clients until its pod
-	// is shed, and the pass that sheds the pod is the one that drops its Service.
-	external := resources.ExternalServices(&cluster, replicas.data.applied)
-	desired := []client.Object{
+	// is shed, and the pass that sheds the pod is the one that drops its way in.
+	external := r.desiredExternal(&cluster, replicas.data.applied)
+	desired := make([]client.Object, 0, 4+len(external))
+	desired = append(desired,
 		resources.CoordinatorHeadlessService(&cluster),
 		resources.DataHeadlessService(&cluster),
 		resources.CoordinatorStatefulSet(&cluster, replicas.coordinators.applied),
 		resources.DataStatefulSet(&cluster, replicas.data.applied),
-	}
-	for _, service := range external {
-		desired = append(desired, service)
-	}
+	)
+	desired = append(desired, external...)
 	if err := r.applyDesired(ctx, &cluster, desired...); err != nil {
 		return ctrl.Result{}, err
 	}
-	if err := r.pruneExternalServices(ctx, &cluster, external); err != nil {
+	if err := r.pruneExternal(ctx, &cluster, external); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -169,72 +185,134 @@ func (r *MemgraphClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	return r.reconcileRegistration(ctx, &cluster, replicas, exposure)
 }
 
-// pruneExternalServices deletes the external Services of this cluster that the
-// current spec does not describe: all of them once the externalAccess block is
-// removed, and the one in front of a data instance a lowered count has just
-// shed. Apply only ever creates and updates, so this is the one place a Service
-// goes away before its owner does. Only Services this cluster controls are
-// considered, and each delete is conditioned on the UID observed, so a Service
-// recreated in between is left for the next pass to judge.
-func (r *MemgraphClusterReconciler) pruneExternalServices(
+// desiredExternal is every external object the spec asks for: the Services in
+// both exposure modes, plus the Gateway and its TCPRoutes in Gateway mode — but
+// only on a cluster that serves the Gateway API. Without it the Services are
+// still applied as ClusterIPs and the cluster runs in-cluster; the exposure is
+// then reported as failed rather than pending, because no amount of waiting
+// makes the API appear.
+func (r *MemgraphClusterReconciler) desiredExternal(
+	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	dataReplicas int32,
+) []client.Object {
+	var objects []client.Object
+	for _, service := range resources.ExternalServices(cluster, dataReplicas) {
+		objects = append(objects, service)
+	}
+	if resources.UsesGateway(cluster) && r.GatewayAPI {
+		objects = append(objects, resources.Gateway(cluster, dataReplicas))
+		for _, route := range resources.TCPRoutes(cluster, dataReplicas) {
+			objects = append(objects, route)
+		}
+	}
+	return objects
+}
+
+// pruneExternal deletes the external objects of this cluster that the current
+// spec does not describe: all of them once the externalAccess block is removed,
+// the Gateway and routes when the type moves to LoadBalancer, and the objects in
+// front of a data instance a lowered count has just shed. Apply only ever creates
+// and updates, so this is the one place an object goes away before its owner
+// does. Only objects this cluster controls are considered, and each delete is
+// conditioned on the UID observed, so an object recreated in between is left for
+// the next pass to judge.
+func (r *MemgraphClusterReconciler) pruneExternal(
 	ctx context.Context,
 	cluster *memgraphcomv1alpha1.MemgraphCluster,
-	desired []*corev1.Service,
+	desired []client.Object,
+) error {
+	keep := make(map[string]bool, len(desired))
+	for _, obj := range desired {
+		keep[obj.GetObjectKind().GroupVersionKind().Kind+"/"+obj.GetName()] = true
+	}
+
+	lists := []client.ObjectList{&corev1.ServiceList{}}
+	if r.GatewayAPI {
+		// Listing a kind the cluster does not serve fails, so the Gateway
+		// API kinds are only consulted where they exist.
+		lists = append(lists, &gatewayv1.GatewayList{}, &gatewayv1.TCPRouteList{})
+	}
+	for _, list := range lists {
+		if err := r.pruneExternalKind(ctx, cluster, list, keep); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// pruneExternalKind prunes one kind of external object, listed by the marker
+// label every external object of the cluster carries.
+func (r *MemgraphClusterReconciler) pruneExternalKind(
+	ctx context.Context,
+	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	list client.ObjectList,
+	keep map[string]bool,
 ) error {
 	log := logf.FromContext(ctx)
 
-	keep := make(map[string]bool, len(desired))
-	for _, service := range desired {
-		keep[service.Name] = true
-	}
-
-	var services corev1.ServiceList
-	if err := r.List(ctx, &services, client.InNamespace(cluster.Namespace),
+	if err := r.List(ctx, list, client.InNamespace(cluster.Namespace),
 		client.MatchingLabels(resources.ExternalServicesSelector(cluster))); err != nil {
-		return fmt.Errorf("listing external Services: %w", err)
+		return fmt.Errorf("listing external objects: %w", err)
 	}
-	for i := range services.Items {
-		service := &services.Items[i]
-		if keep[service.Name] || !metav1.IsControlledBy(service, cluster) {
+	items, err := apimeta.ExtractList(list)
+	if err != nil {
+		return fmt.Errorf("reading external objects: %w", err)
+	}
+	for _, item := range items {
+		obj, ok := item.(client.Object)
+		if !ok {
 			continue
 		}
-		uid := service.UID
-		err := r.Delete(ctx, service, client.Preconditions{UID: &uid})
+		kind, err := apiutil.GVKForObject(obj, r.Scheme)
+		if err != nil {
+			return fmt.Errorf("resolving kind of external object %s: %w", obj.GetName(), err)
+		}
+		if keep[kind.Kind+"/"+obj.GetName()] || !metav1.IsControlledBy(obj, cluster) {
+			continue
+		}
+		uid := obj.GetUID()
+		err = r.Delete(ctx, obj, client.Preconditions{UID: &uid})
 		switch {
 		case err == nil:
-			log.Info("Deleted an external Service the spec no longer describes", "service", service.Name)
+			log.Info("Deleted an external object the spec no longer describes", "kind", kind.Kind, "name", obj.GetName())
 		case apierrors.IsNotFound(err), apierrors.IsConflict(err):
 		default:
-			return fmt.Errorf("deleting external Service %s: %w", service.Name, err)
+			return fmt.Errorf("deleting external %s %s: %w", kind.Kind, obj.GetName(), err)
 		}
 	}
 	return nil
 }
 
 // externalAccess is what a reconcile pass observed about the cluster's exposure:
-// the external address every exposed member is announced at, the Services still
+// the external address every exposed member is announced at, the objects still
 // waiting for one, and the status block that reports them. It is the zero value
 // for an unexposed cluster.
 type externalAccess struct {
 	addresses resources.ExternalAddresses
-	// pending names the external Services that have no address yet, so the
+	// pending names the external objects that have no address yet, so the
 	// members behind them are announced at their pod addresses for now.
 	pending []string
+	// failure explains why the exposure the spec asks for cannot be served on
+	// this cluster at all, or is empty. Unlike pending, waiting does not clear it.
+	failure string
 	status  *memgraphcomv1alpha1.ExternalAccessStatus
 }
 
-// observeExternalAccess reads the external Services the spec asks for and
-// derives the address each one exposes. It is pure observation of Kubernetes
-// state, taken before the cluster itself is looked at, so what registration
-// announces this pass is what the Services report this pass. A Service the
-// apply just created and the cache has not caught up with is the same as one
-// with no address yet: pending, and looked at again next pass.
+// observeExternalAccess reads the external objects the spec asks for and
+// derives the address each exposed member is reachable at. It is pure
+// observation of Kubernetes state, taken before the cluster itself is looked
+// at, so what registration announces this pass is what the objects report this
+// pass. An object the apply just created and the cache has not caught up with is
+// the same as one with no address yet: pending, and looked at again next pass.
 func (r *MemgraphClusterReconciler) observeExternalAccess(
 	ctx context.Context,
 	cluster *memgraphcomv1alpha1.MemgraphCluster,
 ) (externalAccess, error) {
 	if cluster.Spec.ExternalAccess == nil {
 		return externalAccess{}, nil
+	}
+	if resources.UsesGateway(cluster) {
+		return r.observeGatewayAccess(ctx, cluster)
 	}
 
 	address := func(name string) (string, error) {
@@ -248,20 +326,13 @@ func (r *MemgraphClusterReconciler) observeExternalAccess(
 		return resources.ExternalBoltAddress(&service), nil
 	}
 
-	exposure := externalAccess{
-		addresses: resources.ExternalAddresses{Data: map[int32]string{}},
-		status:    &memgraphcomv1alpha1.ExternalAccessStatus{},
-	}
+	exposure := newExternalAccess()
 	coordinators := resources.CoordinatorExternalServiceName(cluster)
 	addr, err := address(coordinators)
 	if err != nil {
 		return externalAccess{}, err
 	}
-	if addr == "" {
-		exposure.pending = append(exposure.pending, coordinators)
-	}
-	exposure.addresses.Coordinators = addr
-	exposure.status.Coordinators = addr
+	exposure.announceCoordinators(addr, coordinators)
 
 	for ordinal := range resources.DeclaredDataInstances(cluster) {
 		name := resources.DataExternalServiceName(cluster, ordinal)
@@ -269,16 +340,112 @@ func (r *MemgraphClusterReconciler) observeExternalAccess(
 		if err != nil {
 			return externalAccess{}, err
 		}
-		if addr == "" {
-			exposure.pending = append(exposure.pending, name)
-		} else {
-			exposure.addresses.Data[ordinal] = addr
-		}
-		exposure.status.Data = append(exposure.status.Data, memgraphcomv1alpha1.ExternalAddress{
-			Name: resources.DataInstanceName(ordinal), Address: addr,
-		})
+		exposure.announceData(ordinal, addr, name)
 	}
 	return exposure, nil
+}
+
+// observeGatewayAccess is observeExternalAccess for a cluster exposed through
+// a Gateway: one address for the whole cluster, read off the Gateway, with a
+// port per listener — and a hostname per route when external-dns publishes one.
+// On a cluster without the Gateway API nothing can be read, so every member is
+// announced at its pod address and the exposure is reported as failed.
+func (r *MemgraphClusterReconciler) observeGatewayAccess(
+	ctx context.Context,
+	cluster *memgraphcomv1alpha1.MemgraphCluster,
+) (externalAccess, error) {
+	exposure := newExternalAccess()
+	if !r.GatewayAPI {
+		exposure.failure = "The Gateway API (" + gatewayv1.GroupName + ") is not served by this cluster: install " +
+			"the Gateway API CRDs and a Gateway controller, then restart the operator"
+		exposure.announceCoordinators("", resources.GatewayName(cluster))
+		for ordinal := range resources.DeclaredDataInstances(cluster) {
+			exposure.announceData(ordinal, "", resources.GatewayName(cluster))
+		}
+		return exposure, nil
+	}
+
+	var gateway gatewayv1.Gateway
+	gatewayName := resources.GatewayName(cluster)
+	found := true
+	if err := r.Get(ctx, types.NamespacedName{Name: gatewayName, Namespace: cluster.Namespace}, &gateway); err != nil {
+		if !apierrors.IsNotFound(err) {
+			return externalAccess{}, fmt.Errorf("getting Gateway %s: %w", gatewayName, err)
+		}
+		found = false
+	}
+	route := func(name string) (*gatewayv1.TCPRoute, error) {
+		var route gatewayv1.TCPRoute
+		if err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: cluster.Namespace}, &route); err != nil {
+			if apierrors.IsNotFound(err) {
+				return nil, nil
+			}
+			return nil, fmt.Errorf("getting TCPRoute %s: %w", name, err)
+		}
+		return &route, nil
+	}
+	address := func(routeName string, port int32) (string, error) {
+		if !found {
+			return "", nil
+		}
+		tcpRoute, err := route(routeName)
+		if err != nil {
+			return "", err
+		}
+		return resources.GatewayBoltAddress(&gateway, tcpRoute, port), nil
+	}
+
+	addr, err := address(resources.CoordinatorTCPRouteName(cluster), memgraphcomv1alpha1.BoltPort)
+	if err != nil {
+		return externalAccess{}, err
+	}
+	exposure.announceCoordinators(addr, gatewayName)
+	for ordinal := range resources.DeclaredDataInstances(cluster) {
+		addr, err := address(resources.DataTCPRouteName(cluster, ordinal), resources.DataGatewayPort(cluster, ordinal))
+		if err != nil {
+			return externalAccess{}, err
+		}
+		exposure.announceData(ordinal, addr, gatewayName)
+	}
+	return exposure, nil
+}
+
+func newExternalAccess() externalAccess {
+	return externalAccess{
+		addresses: resources.ExternalAddresses{Data: map[int32]string{}},
+		status:    &memgraphcomv1alpha1.ExternalAccessStatus{},
+	}
+}
+
+// announceCoordinators records the coordinators' shared address, or the object
+// still owed one.
+func (e *externalAccess) announceCoordinators(address, waitingOn string) {
+	if address == "" {
+		e.waitOn(waitingOn)
+	}
+	e.addresses.Coordinators = address
+	e.status.Coordinators = address
+}
+
+// announceData records one data instance's address, or the object still owed
+// one.
+func (e *externalAccess) announceData(ordinal int32, address, waitingOn string) {
+	if address == "" {
+		e.waitOn(waitingOn)
+	} else {
+		e.addresses.Data[ordinal] = address
+	}
+	e.status.Data = append(e.status.Data, memgraphcomv1alpha1.ExternalAddress{
+		Name: resources.DataInstanceName(ordinal), Address: address,
+	})
+}
+
+// waitOn names an object once, however many members wait on it: in Gateway mode
+// every member waits on the same Gateway.
+func (e *externalAccess) waitOn(name string) {
+	if !slices.Contains(e.pending, name) {
+		e.pending = append(e.pending, name)
+	}
 }
 
 // applyDesired server-side-applies the desired workload objects, each owned by
@@ -698,15 +865,22 @@ func (r *MemgraphClusterReconciler) reconcileRegistration(
 		converged := trueCondition(memgraphcomv1alpha1.ConditionConverged,
 			memgraphcomv1alpha1.ReasonAllInstancesRegistered,
 			fmt.Sprintf("All %d declared instances are registered", len(topology.Coordinators)+len(topology.DataInstances)))
-		if len(exposure.pending) > 0 {
+		switch {
+		case exposure.failure != "":
+			// The exposure the spec asks for cannot be served on this cluster, and
+			// waiting will not change that: reported the way a rejected apply is,
+			// while the cluster keeps serving in-cluster at pod addresses.
+			log.Info("Could not serve the requested external access", "reason", exposure.failure)
+			converged = notConvergedCondition(memgraphcomv1alpha1.ReasonApplyFailed, exposure.failure)
+		case len(exposure.pending) > 0:
 			// Every member is registered, but not yet at the address the spec
-			// asks for: the members behind these Services are announced at their
-			// pod addresses until the LoadBalancers get theirs. That is cloud
-			// provisioning the operator can only wait on, and it does not hold up
-			// the restart below — the pods are none of its business.
-			log.Info("Waited for external addresses", "services", exposure.pending)
+			// asks for: the members behind these objects are announced at their
+			// pod addresses until the LoadBalancers or the Gateway get theirs. That
+			// is cloud provisioning the operator can only wait on, and it does not
+			// hold up the restart below — the pods are none of its business.
+			log.Info("Waited for external addresses", "objects", exposure.pending)
 			converged = notConvergedCondition(memgraphcomv1alpha1.ReasonExternalAddressPending,
-				"Waiting for an external address on Service(s) "+strings.Join(exposure.pending, ", "))
+				"Waiting for an external address on "+strings.Join(exposure.pending, ", "))
 		}
 
 		switch decision := rollout.Next(roles.data, roles.coordinators, observed, lag); decision.Action {
@@ -1163,12 +1337,33 @@ func (r *MemgraphClusterReconciler) apply(ctx context.Context, obj client.Object
 	return r.Apply(ctx, client.ApplyConfigurationFromUnstructured(u), client.FieldOwner(fieldOwner), client.ForceOwnership)
 }
 
-// SetupWithManager sets up the controller with the Manager.
+// SetupWithManager sets up the controller with the Manager. The Gateway API
+// kinds are watched only where the cluster serves them: an informer on a kind
+// the API server does not know never syncs, and the manager would not start.
 func (r *MemgraphClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).
+	builder := ctrl.NewControllerManagedBy(mgr).
 		For(&memgraphcomv1alpha1.MemgraphCluster{}).
 		Owns(&appsv1.StatefulSet{}).
-		Owns(&corev1.Service{}).
-		Named("memgraphcluster").
-		Complete(r)
+		Owns(&corev1.Service{})
+	if r.GatewayAPI {
+		builder = builder.Owns(&gatewayv1.Gateway{}).Owns(&gatewayv1.TCPRoute{})
+	}
+	return builder.Named("memgraphcluster").Complete(r)
+}
+
+// GatewayAPIServed reports whether the cluster the mapper describes serves the
+// Gateway API kinds the operator builds. It is asked once, when the manager is
+// set up: a cluster that gains the CRDs later is picked up by restarting the
+// operator, which is documented rather than detected.
+func GatewayAPIServed(mapper apimeta.RESTMapper) (bool, error) {
+	for _, kind := range []string{"Gateway", "TCPRoute"} {
+		_, err := mapper.RESTMapping(schema.GroupKind{Group: gatewayv1.GroupName, Kind: kind}, gatewayv1.GroupVersion.Version)
+		if apimeta.IsNoMatchError(err) {
+			return false, nil
+		}
+		if err != nil {
+			return false, fmt.Errorf("discovering %s.%s: %w", kind, gatewayv1.GroupName, err)
+		}
+	}
+	return true, nil
 }

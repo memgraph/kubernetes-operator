@@ -580,7 +580,7 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 						Annotations: map[string]string{externalDNSAnnotation: "memgraph.example.com"},
 					},
 					Data: memgraphcomv1alpha1.ExternalAccessRoleSpec{
-						Annotations: map[string]string{externalDNSAnnotation: "data-{ordinal}.memgraph.example.com"},
+						Annotations: map[string]string{externalDNSAnnotation: dataHostnamePattern},
 					},
 				},
 			})
@@ -630,6 +630,61 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 					ExternalAccess: &memgraphcomv1alpha1.ExternalAccessSpec{},
 				},
 				"Unsupported value"),
+		)
+
+		It("should accept a Gateway exposure and default its port base", func() {
+			stored := createAccepted("valid-external-gateway", memgraphcomv1alpha1.MemgraphClusterSpec{
+				ExternalAccess: &memgraphcomv1alpha1.ExternalAccessSpec{
+					Type:    memgraphcomv1alpha1.ExternalAccessGateway,
+					Gateway: memgraphcomv1alpha1.ExternalAccessGatewaySpec{GatewayClassName: "eg"},
+				},
+			})
+
+			Expect(stored.Spec.ExternalAccess.Gateway.DataPortBase).To(
+				HaveValue(Equal(memgraphcomv1alpha1.DefaultGatewayDataPortBase)))
+		})
+
+		// The Gateway block's guards: the class is what makes a Gateway get
+		// programmed at all, the port base must clear the coordinators' listener,
+		// and the per-instance ports must fit — dataInstances decides how many.
+		DescribeTable("should reject a Gateway exposure that cannot be programmed",
+			func(name string, spec memgraphcomv1alpha1.MemgraphClusterSpec, wantMessage string) {
+				expectRejected(name, spec, wantMessage)
+			},
+			Entry("a Gateway without a class", "invalid-gateway-no-class",
+				memgraphcomv1alpha1.MemgraphClusterSpec{
+					ExternalAccess: &memgraphcomv1alpha1.ExternalAccessSpec{Type: memgraphcomv1alpha1.ExternalAccessGateway},
+				},
+				"gateway.gatewayClassName is required when type is Gateway"),
+			Entry("a Gateway block on a LoadBalancer exposure", "invalid-gateway-block-on-lb",
+				memgraphcomv1alpha1.MemgraphClusterSpec{
+					ExternalAccess: &memgraphcomv1alpha1.ExternalAccessSpec{
+						Type:    memgraphcomv1alpha1.ExternalAccessLoadBalancer,
+						Gateway: memgraphcomv1alpha1.ExternalAccessGatewaySpec{GatewayClassName: "eg"},
+					},
+				},
+				"gateway is only used when type is Gateway"),
+			Entry("a data port base on the coordinators' listener", "invalid-gateway-port-base",
+				memgraphcomv1alpha1.MemgraphClusterSpec{
+					ExternalAccess: &memgraphcomv1alpha1.ExternalAccessSpec{
+						Type: memgraphcomv1alpha1.ExternalAccessGateway,
+						Gateway: memgraphcomv1alpha1.ExternalAccessGatewaySpec{
+							GatewayClassName: "eg", DataPortBase: ptr.To(memgraphcomv1alpha1.BoltPort),
+						},
+					},
+				},
+				"gateway.dataPortBase must be above 7687"),
+			Entry("a data port range past the end of the port space", "invalid-gateway-port-range",
+				memgraphcomv1alpha1.MemgraphClusterSpec{
+					DataInstances: ptr.To(int32(3)),
+					ExternalAccess: &memgraphcomv1alpha1.ExternalAccessSpec{
+						Type: memgraphcomv1alpha1.ExternalAccessGateway,
+						Gateway: memgraphcomv1alpha1.ExternalAccessGatewaySpec{
+							GatewayClassName: "eg", DataPortBase: ptr.To(int32(65534)),
+						},
+					},
+				},
+				"dataPortBase + dataInstances must not exceed 65536"),
 		)
 	})
 

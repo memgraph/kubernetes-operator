@@ -19,7 +19,9 @@ package controller
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -32,6 +34,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	memgraphcomv1alpha1 "github.com/memgraph/kubernetes-operator/api/v1alpha1"
 	// +kubebuilder:scaffold:imports
@@ -62,12 +65,19 @@ var _ = BeforeSuite(func() {
 	var err error
 	err = memgraphcomv1alpha1.AddToScheme(scheme.Scheme)
 	Expect(err).NotTo(HaveOccurred())
+	Expect(gatewayv1.Install(scheme.Scheme)).To(Succeed())
 
 	// +kubebuilder:scaffold:scheme
 
 	By("bootstrapping test environment")
+	// The Gateway API CRDs are loaded from the module the operator builds its
+	// Gateway and TCPRoute objects against, so the schema the API server
+	// validates them with is the one the code was written for.
 	testEnv = &envtest.Environment{
-		CRDDirectoryPaths:     []string{filepath.Join("..", "..", "config", "crd", "bases")},
+		CRDDirectoryPaths: []string{
+			filepath.Join("..", "..", "config", "crd", "bases"),
+			gatewayAPICRDs(),
+		},
 		ErrorIfCRDPathMissing: true,
 	}
 
@@ -115,4 +125,16 @@ func getFirstFoundEnvTestBinaryDir() string {
 		}
 	}
 	return ""
+}
+
+// gatewayAPICRDs is the directory of the Gateway API standard-channel CRDs
+// inside the gateway-api module the operator depends on, resolved through the
+// Go toolchain so it tracks the version in go.mod rather than a vendored copy
+// that could drift from it.
+func gatewayAPICRDs() string {
+	out, err := exec.Command("go", "list", "-m", "-f", "{{.Dir}}", "sigs.k8s.io/gateway-api").Output()
+	if err != nil {
+		panic("locating the gateway-api module: " + err.Error())
+	}
+	return filepath.Join(strings.TrimSpace(string(out)), "config", "crd", "standard")
 }
