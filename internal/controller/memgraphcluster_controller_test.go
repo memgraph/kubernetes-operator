@@ -29,6 +29,7 @@ import (
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -2311,6 +2312,7 @@ var _ = Describe("MemgraphCluster Controller", func() {
 
 		It("should report a Gateway exposure as failed on a cluster without the Gateway API", func() {
 			reconciler.GatewayAPI = false
+			reconciler.GatewayAPIMissing = "TCPRoute is served only as gateway.networking.k8s.io/v1alpha2"
 			bootstrapped()
 
 			Expect(externalNames(&gatewayv1.GatewayList{})).To(BeEmpty(), "nothing is built for an API the cluster lacks")
@@ -2321,21 +2323,46 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			converged := convergedCondition()
 			Expect(converged.Status).To(Equal(metav1.ConditionFalse))
 			Expect(converged.Reason).To(Equal(memgraphcomv1alpha1.ReasonApplyFailed))
-			Expect(converged.Message).To(ContainSubstring("gateway.networking.k8s.io"))
+			Expect(converged.Message).To(ContainSubstring("TCPRoute is served only as gateway.networking.k8s.io/v1alpha2"),
+				"the message names what the cluster lacks, not merely that something does")
+			Expect(converged.Message).To(ContainSubstring("Gateway API v1.6"),
+				"the message names the release that serves what the operator builds")
 		})
 	})
 
 	Context("when discovering the Gateway API", func() {
 		It("should find it on a cluster that serves it", func() {
-			served, err := GatewayAPIServed(k8sClient.RESTMapper())
+			served, missing, err := GatewayAPIServed(k8sClient.RESTMapper())
 			Expect(err).NotTo(HaveOccurred())
 			Expect(served).To(BeTrue())
+			Expect(missing).To(BeEmpty())
 		})
 
 		It("should report it absent on a cluster that does not, without failing", func() {
-			served, err := GatewayAPIServed(apimeta.NewDefaultRESTMapper(nil))
+			served, missing, err := GatewayAPIServed(apimeta.NewDefaultRESTMapper(nil))
 			Expect(err).NotTo(HaveOccurred())
 			Expect(served).To(BeFalse())
+			Expect(missing).To(Equal("Gateway is not served"))
+		})
+
+		// The case a cluster on Gateway API older than v1.6 presents: the CRDs
+		// exist, but TCPRoute is served at v1alpha2 alone. That has to read as
+		// "wrong version", not "no Gateway API", or the remedy is misread.
+		It("should name the version served when it is not the one the operator builds", func() {
+			// The default versions are what a version-less lookup consults, as
+			// the manager's discovery-backed mapper consults the group's served
+			// versions.
+			mapper := apimeta.NewDefaultRESTMapper([]schema.GroupVersion{
+				{Group: gatewayv1.GroupName, Version: "v1"},
+				{Group: gatewayv1.GroupName, Version: "v1alpha2"},
+			})
+			mapper.Add(schema.GroupVersionKind{Group: gatewayv1.GroupName, Version: "v1", Kind: "Gateway"}, apimeta.RESTScopeNamespace)
+			mapper.Add(schema.GroupVersionKind{Group: gatewayv1.GroupName, Version: "v1alpha2", Kind: "TCPRoute"}, apimeta.RESTScopeNamespace)
+
+			served, missing, err := GatewayAPIServed(mapper)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(served).To(BeFalse())
+			Expect(missing).To(Equal("TCPRoute is served only as gateway.networking.k8s.io/v1alpha2"))
 		})
 	})
 })

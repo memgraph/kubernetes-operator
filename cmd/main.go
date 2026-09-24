@@ -208,18 +208,19 @@ func main() {
 	// its kinds are watched; absent, the operator runs without them and reports
 	// a cluster asking for that mode as failed. Installing the CRDs later means
 	// restarting the operator.
-	gatewayAPI, err := controller.GatewayAPIServed(mgr.GetRESTMapper())
+	gatewayAPI, gatewayAPIMissing, err := controller.GatewayAPIServed(mgr.GetRESTMapper())
 	if err != nil {
 		setupLog.Error(err, "Failed to discover whether the Gateway API is served")
 		os.Exit(1)
 	}
-	setupLog.Info("Discovered Gateway API support", "served", gatewayAPI)
+	setupLog.Info("Discovered Gateway API support", "served", gatewayAPI, "missing", gatewayAPIMissing)
 
 	if err := (&controller.MemgraphClusterReconciler{
-		Client:     mgr.GetClient(),
-		Scheme:     mgr.GetScheme(),
-		Memgraph:   memgraph.NewBoltConnector(),
-		GatewayAPI: gatewayAPI,
+		Client:            mgr.GetClient(),
+		Scheme:            mgr.GetScheme(),
+		Memgraph:          memgraph.NewBoltConnector(),
+		GatewayAPI:        gatewayAPI,
+		GatewayAPIMissing: gatewayAPIMissing,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "memgraphcluster")
 		os.Exit(1)

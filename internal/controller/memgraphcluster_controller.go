@@ -81,13 +81,20 @@ type MemgraphClusterReconciler struct {
 	// Bolt driver.
 	Memgraph memgraph.Connector
 
-	// GatewayAPI reports whether the cluster serves the Gateway API group, as
-	// discovered when the manager started. The Gateway API CRDs belong to
-	// whoever installs a Gateway controller and are never bundled with the
-	// operator, so a cluster without them is normal; what changes is that the
-	// Gateway exposure mode cannot be served on it, and a watch on a kind the
-	// cluster does not have would keep the manager from starting at all.
+	// GatewayAPI reports whether the cluster serves the Gateway API kinds the
+	// operator builds, at the version it builds them, as discovered when the
+	// manager started. The Gateway API CRDs belong to whoever installs a
+	// Gateway controller and are never bundled with the operator, so a cluster
+	// without them is normal; what changes is that the Gateway exposure mode
+	// cannot be served on it, and a watch on a kind the cluster does not have
+	// would keep the manager from starting at all.
 	GatewayAPI bool
+
+	// GatewayAPIMissing says what the discovery found lacking when GatewayAPI
+	// is false — a kind not served at all, or served only at an older version —
+	// so a cluster asking for the Gateway mode is told what to install rather
+	// than that "the Gateway API" is absent when its CRDs plainly exist.
+	GatewayAPIMissing string
 }
 
 // The install chart's ClusterRole is generated from these markers, so they are
@@ -356,8 +363,10 @@ func (r *MemgraphClusterReconciler) observeGatewayAccess(
 ) (externalAccess, error) {
 	exposure := newExternalAccess()
 	if !r.GatewayAPI {
-		exposure.failure = "The Gateway API (" + gatewayv1.GroupName + ") is not served by this cluster: install " +
-			"the Gateway API CRDs and a Gateway controller, then restart the operator"
+		exposure.failure = fmt.Sprintf("The Gateway API version the operator needs is not served by this cluster (%s): "+
+			"it builds %s Gateways and TCPRoutes, which %s or newer serves and which a Gateway controller "+
+			"such as Envoy Gateway %s or newer installs. Install it, then restart the operator",
+			r.GatewayAPIMissing, gatewayv1.GroupVersion.String(), minGatewayAPIRelease, minEnvoyGatewayRelease)
 		exposure.announceCoordinators("", resources.GatewayName(cluster))
 		for ordinal := range resources.DeclaredDataInstances(cluster) {
 			exposure.announceData(ordinal, "", resources.GatewayName(cluster))
@@ -1351,19 +1360,38 @@ func (r *MemgraphClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return builder.Named("memgraphcluster").Complete(r)
 }
 
+// The Gateway API release that first serves TCPRoute at v1, and the Envoy
+// Gateway release that first bundles it. Older Gateway API releases serve
+// TCPRoute at v1alpha2 only, and v1.6 stops serving v1alpha2 altogether, so
+// there is no version of the kind that works against both sides of that line;
+// the operator builds v1 and says so when the cluster is on the other side.
+const (
+	minGatewayAPIRelease   = "Gateway API v1.6"
+	minEnvoyGatewayRelease = "v1.9"
+)
+
 // GatewayAPIServed reports whether the cluster the mapper describes serves the
-// Gateway API kinds the operator builds. It is asked once, when the manager is
-// set up: a cluster that gains the CRDs later is picked up by restarting the
-// operator, which is documented rather than detected.
-func GatewayAPIServed(mapper apimeta.RESTMapper) (bool, error) {
+// Gateway API kinds the operator builds, at the version it builds them. When it
+// does not, missing says what was found lacking: the kind not served at all, or
+// served only at some other version — the usual case being a Gateway API
+// release older than v1.6, where TCPRoute exists only as v1alpha2. It is asked
+// once, when the manager is set up: a cluster that gains the CRDs later is
+// picked up by restarting the operator, which is documented rather than
+// detected.
+func GatewayAPIServed(mapper apimeta.RESTMapper) (served bool, missing string, err error) {
 	for _, kind := range []string{"Gateway", "TCPRoute"} {
-		_, err := mapper.RESTMapping(schema.GroupKind{Group: gatewayv1.GroupName, Kind: kind}, gatewayv1.GroupVersion.Version)
-		if apimeta.IsNoMatchError(err) {
-			return false, nil
+		groupKind := schema.GroupKind{Group: gatewayv1.GroupName, Kind: kind}
+		_, err := mapper.RESTMapping(groupKind, gatewayv1.GroupVersion.Version)
+		if err == nil {
+			continue
 		}
-		if err != nil {
-			return false, fmt.Errorf("discovering %s.%s: %w", kind, gatewayv1.GroupName, err)
+		if !apimeta.IsNoMatchError(err) {
+			return false, "", fmt.Errorf("discovering %s.%s: %w", kind, gatewayv1.GroupName, err)
 		}
+		if mapping, anyVersion := mapper.RESTMapping(groupKind); anyVersion == nil {
+			return false, fmt.Sprintf("%s is served only as %s", kind, mapping.GroupVersionKind.GroupVersion()), nil
+		}
+		return false, kind + " is not served", nil
 	}
-	return true, nil
+	return true, "", nil
 }

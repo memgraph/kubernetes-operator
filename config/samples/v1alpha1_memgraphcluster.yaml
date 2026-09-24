@@ -278,9 +278,12 @@ spec:
   # instance on gateway.dataPortBase + ordinal, each fed by a TCPRoute to a
   # ClusterIP Service. One address, one cloud load balancer, a port per
   # instance. The Gateway API CRDs and a Gateway controller (Envoy Gateway,
-  # Cilium, Istio, ...) must already be installed; the operator never bundles
-  # them, discovers them when it starts, and reports Converged=False with
-  # reason ApplyFailed on a cluster without them. In this mode the role
+  # Cilium, Istio, ...) must already be installed, at Gateway API v1.6 or
+  # newer: the operator builds gateway.networking.k8s.io/v1 TCPRoutes, which
+  # older releases serve only as v1alpha2 (Envoy Gateway v1.9 is the first to
+  # bundle v1.6). The operator never bundles the CRDs, discovers them when it
+  # starts, and reports Converged=False with reason ApplyFailed naming what is
+  # missing on a cluster without them. In this mode the role
   # annotations land on the TCPRoutes, which is where external-dns reads a
   # route's hostname from.
   # externalAccess:
