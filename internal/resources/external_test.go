@@ -35,6 +35,12 @@ const (
 
 	externalDNSAnnotation = "external-dns.alpha.kubernetes.io/hostname"
 	lbTypeAnnotation      = "service.beta.kubernetes.io/aws-load-balancer-type"
+
+	// The decorations exposedCluster sets and the golden tests pin.
+	coordinatorsHostname = "memgraph.example.com"
+	dataHostnamePattern  = "data-{ordinal}.memgraph.example.com"
+	coordinatorsExpose   = "coordinators"
+	lbType               = "nlb"
 )
 
 // exposedCluster is the minimal cluster exposed through LoadBalancers, with
@@ -46,14 +52,14 @@ func exposedCluster() *memgraphcomv1alpha1.MemgraphCluster {
 	cluster.Spec.ExternalAccess = &memgraphcomv1alpha1.ExternalAccessSpec{
 		Type: memgraphcomv1alpha1.ExternalAccessLoadBalancer,
 		Coordinators: memgraphcomv1alpha1.ExternalAccessRoleSpec{
-			Labels:      map[string]string{exposeLabel: "coordinators"},
-			Annotations: map[string]string{externalDNSAnnotation: "memgraph.example.com"},
+			Labels:      map[string]string{exposeLabel: coordinatorsExpose},
+			Annotations: map[string]string{externalDNSAnnotation: coordinatorsHostname},
 		},
 		Data: memgraphcomv1alpha1.ExternalAccessRoleSpec{
 			Labels: map[string]string{exposeLabel: dataComponent},
 			Annotations: map[string]string{
-				externalDNSAnnotation: "data-{ordinal}.memgraph.example.com",
-				lbTypeAnnotation:      "nlb",
+				externalDNSAnnotation: dataHostnamePattern,
+				lbTypeAnnotation:      lbType,
 			},
 		},
 	}
@@ -99,8 +105,8 @@ func TestCoordinatorExternalService(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        coordinatorExternalName,
 			Namespace:   testNamespace,
-			Labels:      externalLabels(coordinatorComponent, map[string]string{exposeLabel: "coordinators"}),
-			Annotations: map[string]string{externalDNSAnnotation: "memgraph.example.com"},
+			Labels:      externalLabels(coordinatorComponent, map[string]string{exposeLabel: coordinatorsExpose}),
+			Annotations: map[string]string{externalDNSAnnotation: coordinatorsHostname},
 		},
 		Spec: corev1.ServiceSpec{
 			Type:     corev1.ServiceTypeLoadBalancer,
@@ -129,7 +135,7 @@ func TestDataExternalService(t *testing.T) {
 			Labels:    externalLabels(dataComponent, map[string]string{exposeLabel: dataComponent}),
 			Annotations: map[string]string{
 				externalDNSAnnotation: "data-1.memgraph.example.com",
-				lbTypeAnnotation:      "nlb",
+				lbTypeAnnotation:      lbType,
 			},
 		},
 		Spec: corev1.ServiceSpec{
@@ -176,7 +182,7 @@ func TestExternalBoltAddress(t *testing.T) {
 	const (
 		hostname    = "a1b2c3.elb.example.com"
 		ip          = "203.0.113.10"
-		dnsHostname = "memgraph.example.com"
+		dnsHostname = coordinatorsHostname
 	)
 	withIngress := func(ingress ...corev1.LoadBalancerIngress) corev1.ServiceStatus {
 		return corev1.ServiceStatus{LoadBalancer: corev1.LoadBalancerStatus{Ingress: ingress}}

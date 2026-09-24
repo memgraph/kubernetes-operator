@@ -38,6 +38,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	memgraphcomv1alpha1 "github.com/memgraph/kubernetes-operator/api/v1alpha1"
 	"github.com/memgraph/kubernetes-operator/internal/controller"
@@ -55,6 +56,10 @@ func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 
 	utilruntime.Must(memgraphcomv1alpha1.AddToScheme(scheme))
+	// The Gateway API types are known to the scheme whether or not the
+	// cluster serves them: knowing a type costs nothing, watching it is what
+	// is gated on discovery below.
+	utilruntime.Must(gatewayv1.Install(scheme))
 	// +kubebuilder:scaffold:scheme
 }
 
@@ -197,10 +202,25 @@ func main() {
 		os.Exit(1)
 	}
 
+	// The Gateway API CRDs are never bundled with the operator — they belong to
+	// whoever installs a Gateway controller — so whether the cluster serves them
+	// is discovered here, once. Present, the Gateway exposure mode is served and
+	// its kinds are watched; absent, the operator runs without them and reports
+	// a cluster asking for that mode as failed. Installing the CRDs later means
+	// restarting the operator.
+	gatewayAPI, gatewayAPIMissing, err := controller.GatewayAPIServed(mgr.GetRESTMapper())
+	if err != nil {
+		setupLog.Error(err, "Failed to discover whether the Gateway API is served")
+		os.Exit(1)
+	}
+	setupLog.Info("Discovered Gateway API support", "served", gatewayAPI, "missing", gatewayAPIMissing)
+
 	if err := (&controller.MemgraphClusterReconciler{
-		Client:   mgr.GetClient(),
-		Scheme:   mgr.GetScheme(),
-		Memgraph: memgraph.NewBoltConnector(),
+		Client:            mgr.GetClient(),
+		Scheme:            mgr.GetScheme(),
+		Memgraph:          memgraph.NewBoltConnector(),
+		GatewayAPI:        gatewayAPI,
+		GatewayAPIMissing: gatewayAPIMissing,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "memgraphcluster")
 		os.Exit(1)

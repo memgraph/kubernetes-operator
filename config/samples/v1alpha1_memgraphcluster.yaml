@@ -272,3 +272,30 @@ spec:
   #     labels: {}
   #     annotations:
   #       external-dns.alpha.kubernetes.io/hostname: data-{ordinal}.memgraph.example.com
+  #
+  # With type Gateway the operator creates one Gateway API Gateway instead: a
+  # TCP listener shared by all coordinators on the bolt port and one per data
+  # instance on gateway.dataPortBase + ordinal, each fed by a TCPRoute to a
+  # ClusterIP Service. One address, one cloud load balancer, a port per
+  # instance. The Gateway API CRDs and a Gateway controller (Envoy Gateway,
+  # Cilium, Istio, ...) must already be installed, at Gateway API v1.6 or
+  # newer: the operator builds gateway.networking.k8s.io/v1 TCPRoutes, which
+  # older releases serve only as v1alpha2 (Envoy Gateway v1.9 is the first to
+  # bundle v1.6). The operator never bundles the CRDs, discovers them when it
+  # starts, and reports Converged=False with reason ApplyFailed naming what is
+  # missing on a cluster without them. In this mode the role
+  # annotations land on the TCPRoutes, which is where external-dns reads a
+  # route's hostname from.
+  # externalAccess:
+  #   type: Gateway
+  #   gateway:
+  #     gatewayClassName: eg
+  #     dataPortBase: 9000
+  #     labels: {}
+  #     annotations: {}
+  #   coordinators:
+  #     annotations:
+  #       external-dns.alpha.kubernetes.io/hostname: memgraph.example.com
+  #   data:
+  #     annotations:
+  #       external-dns.alpha.kubernetes.io/hostname: data-{ordinal}.memgraph.example.com

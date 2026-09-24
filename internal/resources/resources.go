@@ -125,13 +125,23 @@ type normalizedSpec struct {
 	external        normalizedExternal
 }
 
-// normalizedExternal is the external access block with its per-role
-// decorations resolved. It is the zero value for an unexposed cluster, which
-// no builder reads: ExternalServices checks the spec's block before building
-// anything.
+// normalizedExternal is the external access block with its type, its per-role
+// decorations and its Gateway settings resolved. It is the zero value for an
+// unexposed cluster, which no builder reads: the external builders check the
+// spec's block before building anything.
 type normalizedExternal struct {
+	typ          memgraphcomv1alpha1.ExternalAccessType
 	coordinators normalizedExternalRole
 	data         normalizedExternalRole
+	gateway      normalizedGateway
+}
+
+// normalizedGateway is the Gateway block with its port base defaulted.
+type normalizedGateway struct {
+	className    string
+	dataPortBase int32
+	labels       map[string]string
+	annotations  map[string]string
 }
 
 // normalizedExternalRole is what decorates one role's external objects.
@@ -235,6 +245,7 @@ func normalize(spec memgraphcomv1alpha1.MemgraphClusterSpec) normalizedSpec {
 	}
 	if spec.ExternalAccess != nil {
 		n.external = normalizedExternal{
+			typ: spec.ExternalAccess.Type,
 			coordinators: normalizedExternalRole{
 				labels:      spec.ExternalAccess.Coordinators.Labels,
 				annotations: spec.ExternalAccess.Coordinators.Annotations,
@@ -243,6 +254,15 @@ func normalize(spec memgraphcomv1alpha1.MemgraphClusterSpec) normalizedSpec {
 				labels:      spec.ExternalAccess.Data.Labels,
 				annotations: spec.ExternalAccess.Data.Annotations,
 			},
+			gateway: normalizedGateway{
+				className:    spec.ExternalAccess.Gateway.GatewayClassName,
+				dataPortBase: intOrDefault(spec.ExternalAccess.Gateway.DataPortBase, memgraphcomv1alpha1.DefaultGatewayDataPortBase),
+				labels:       spec.ExternalAccess.Gateway.Labels,
+				annotations:  spec.ExternalAccess.Gateway.Annotations,
+			},
+		}
+		if n.external.typ == "" {
+			n.external.typ = memgraphcomv1alpha1.ExternalAccessLoadBalancer
 		}
 	}
 	if spec.Coordinators != nil {

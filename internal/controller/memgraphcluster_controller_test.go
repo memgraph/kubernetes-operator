@@ -29,15 +29,21 @@ import (
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	memgraphcomv1alpha1 "github.com/memgraph/kubernetes-operator/api/v1alpha1"
 	"github.com/memgraph/kubernetes-operator/internal/memgraph"
 	"github.com/memgraph/kubernetes-operator/internal/resources"
 )
+
+// dataHostnamePattern is the per-instance external-dns hostname the exposure
+// specs ask for, with the placeholder the operator substitutes.
+const dataHostnamePattern = "data-{ordinal}.memgraph.example.com"
 
 // Name suffixes of the per-role workload objects a reconcile creates.
 const (
@@ -84,9 +90,10 @@ var _ = Describe("MemgraphCluster Controller", func() {
 	BeforeEach(func() {
 		fake = newFakeMemgraph()
 		reconciler = &MemgraphClusterReconciler{
-			Client:   k8sClient,
-			Scheme:   k8sClient.Scheme(),
-			Memgraph: fake,
+			Client:     k8sClient,
+			Scheme:     k8sClient.Scheme(),
+			Memgraph:   fake,
+			GatewayAPI: true,
 		}
 	})
 
@@ -1959,7 +1966,7 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			updateSpec(func(spec *memgraphcomv1alpha1.MemgraphClusterSpec) {
 				spec.ExternalAccess.Coordinators.Annotations = map[string]string{externalDNSAnnotation: "memgraph.example.com"}
 				spec.ExternalAccess.Data.Annotations = map[string]string{
-					externalDNSAnnotation: "data-{ordinal}.memgraph.example.com",
+					externalDNSAnnotation: dataHostnamePattern,
 				}
 			})
 			addressed()
@@ -2032,6 +2039,330 @@ var _ = Describe("MemgraphCluster Controller", func() {
 				Expect(command).To(HavePrefix(podAddress(coordinatorSuffix, 0)+": "),
 					"the operator must never go through the coordinators' LoadBalancer itself")
 			}
+		})
+	})
+
+	Context("when exposing the cluster through a Gateway", func() {
+		const resourceName = "mgc-gateway"
+
+		const (
+			gatewayAddress = "203.0.113.20"
+			gatewayName    = resourceName + "-gateway"
+			portBase       = int32(9100)
+
+			firstInstance  = "instance_0"
+			secondInstance = "instance_1"
+		)
+		coordinatorsService := resourceName + coordinatorSuffix + "-external"
+		coordinatorsRoute := resourceName + coordinatorSuffix + "-bolt"
+		dataService := func(ordinal int) string {
+			return fmt.Sprintf("%s%s-%d-external", resourceName, dataSuffix, ordinal)
+		}
+		dataRoute := func(ordinal int) string {
+			return fmt.Sprintf("%s%s-%d-bolt", resourceName, dataSuffix, ordinal)
+		}
+		// podAddress is the in-cluster bolt address of a role's first pod: the
+		// leader the fake elects, and the instance the specs read back.
+		podAddress := func(suffix string) string {
+			return fmt.Sprintf("%s%s-0.%s%s.%s.svc.cluster.local:%d",
+				resourceName, suffix, resourceName, suffix, resourceNamespace, memgraphcomv1alpha1.BoltPort)
+		}
+		at := func(host string, port int32) string {
+			return fmt.Sprintf("%s:%d", host, port)
+		}
+
+		// giveAddress plays the Gateway controller envtest does not run: it
+		// reports the Gateway as reachable at the given address.
+		giveAddress := func(address gatewayv1.GatewayStatusAddress) {
+			GinkgoHelper()
+			gateway := &gatewayv1.Gateway{}
+			get(gatewayName, gateway)
+			gateway.Status.Addresses = []gatewayv1.GatewayStatusAddress{address}
+			Expect(k8sClient.Status().Update(ctx, gateway)).To(Succeed())
+		}
+		giveIP := func() {
+			GinkgoHelper()
+			giveAddress(gatewayv1.GatewayStatusAddress{Type: ptr.To(gatewayv1.IPAddressType), Value: gatewayAddress})
+		}
+
+		externalSelector := func() client.MatchingLabels {
+			GinkgoHelper()
+			cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+			get(resourceName, cluster)
+			return client.MatchingLabels(resources.ExternalServicesSelector(cluster))
+		}
+		externalNames := func(list client.ObjectList) []string {
+			GinkgoHelper()
+			Expect(k8sClient.List(ctx, list, client.InNamespace(resourceNamespace), externalSelector())).To(Succeed())
+			items, err := apimeta.ExtractList(list)
+			Expect(err).NotTo(HaveOccurred())
+			names := make([]string, 0, len(items))
+			for _, item := range items {
+				names = append(names, item.(client.Object).GetName())
+			}
+			return names
+		}
+		serviceType := func(name string) corev1.ServiceType {
+			GinkgoHelper()
+			svc := &corev1.Service{}
+			get(name, svc)
+			return svc.Spec.Type
+		}
+
+		announced := func(name string) string {
+			GinkgoHelper()
+			for _, instance := range fake.view() {
+				if instance.Name == name {
+					return instance.BoltServer
+				}
+			}
+			Fail("instance " + name + " is not registered")
+			return ""
+		}
+
+		status := func() memgraphcomv1alpha1.MemgraphClusterStatus {
+			GinkgoHelper()
+			cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+			get(resourceName, cluster)
+			return cluster.Status
+		}
+		convergedCondition := func() *metav1.Condition {
+			GinkgoHelper()
+			return apimeta.FindStatusCondition(status().Conditions, memgraphcomv1alpha1.ConditionConverged)
+		}
+
+		updateSpec := func(mutate func(*memgraphcomv1alpha1.MemgraphClusterSpec)) {
+			GinkgoHelper()
+			cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+			get(resourceName, cluster)
+			mutate(&cluster.Spec)
+			Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
+		}
+
+		bootstrapped := func() {
+			GinkgoHelper()
+			reconcileCluster(resourceName)
+			markWorkloadsReady(resourceName)
+			reconcileCluster(resourceName)
+			reconcileCluster(resourceName)
+		}
+
+		// addressed gives the Gateway its address before the cluster is
+		// bootstrapped, the common case.
+		addressed := func() {
+			GinkgoHelper()
+			reconcileCluster(resourceName)
+			giveIP()
+			bootstrapped()
+		}
+
+		// cleanupExternal removes every external object by hand: envtest runs no
+		// garbage collector.
+		cleanupExternal := func() {
+			GinkgoHelper()
+			for _, list := range []client.ObjectList{&corev1.ServiceList{}, &gatewayv1.GatewayList{}, &gatewayv1.TCPRouteList{}} {
+				Expect(k8sClient.List(ctx, list, client.InNamespace(resourceNamespace), externalSelector())).To(Succeed())
+				items, err := apimeta.ExtractList(list)
+				Expect(err).NotTo(HaveOccurred())
+				for _, item := range items {
+					Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, item.(client.Object)))).To(Succeed())
+				}
+			}
+		}
+
+		BeforeEach(func() {
+			resource := &memgraphcomv1alpha1.MemgraphCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: resourceNamespace},
+				Spec: memgraphcomv1alpha1.MemgraphClusterSpec{
+					ExternalAccess: &memgraphcomv1alpha1.ExternalAccessSpec{
+						Type: memgraphcomv1alpha1.ExternalAccessGateway,
+						Gateway: memgraphcomv1alpha1.ExternalAccessGatewaySpec{
+							GatewayClassName: "eg",
+							DataPortBase:     ptr.To(portBase),
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+		})
+
+		AfterEach(func() {
+			cleanupExternal()
+			cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+			get(resourceName, cluster)
+			Expect(k8sClient.Delete(ctx, cluster)).To(Succeed())
+			deleteOwned(resourceName)
+		})
+
+		It("should provision one Gateway, one route per way in and ClusterIP Services behind them", func() {
+			reconcileCluster(resourceName)
+
+			cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+			get(resourceName, cluster)
+			gateway := &gatewayv1.Gateway{}
+			get(gatewayName, gateway)
+			expectControlledBy(gateway, cluster)
+			Expect(gateway.Spec.GatewayClassName).To(BeEquivalentTo("eg"))
+			listeners := make([]string, 0, len(gateway.Spec.Listeners))
+			for _, listener := range gateway.Spec.Listeners {
+				listeners = append(listeners, fmt.Sprintf("%s:%d", listener.Name, listener.Port))
+			}
+			Expect(listeners).To(Equal([]string{
+				fmt.Sprintf("coordinators-bolt:%d", memgraphcomv1alpha1.BoltPort),
+				fmt.Sprintf("data-0-bolt:%d", portBase), fmt.Sprintf("data-1-bolt:%d", portBase+1),
+			}))
+
+			Expect(externalNames(&gatewayv1.TCPRouteList{})).To(ConsistOf(coordinatorsRoute, dataRoute(0), dataRoute(1)))
+			route := &gatewayv1.TCPRoute{}
+			get(dataRoute(1), route)
+			expectControlledBy(route, cluster)
+			Expect(route.Spec.ParentRefs[0].SectionName).To(HaveValue(BeEquivalentTo("data-1-bolt")))
+			Expect(route.Spec.Rules[0].BackendRefs[0].Name).To(BeEquivalentTo(dataService(1)))
+
+			Expect(externalNames(&corev1.ServiceList{})).To(ConsistOf(coordinatorsService, dataService(0), dataService(1)))
+			Expect(serviceType(dataService(0))).To(Equal(corev1.ServiceTypeClusterIP))
+		})
+
+		It("should register at pod addresses while the Gateway has none, naming it once", func() {
+			bootstrapped()
+
+			Expect(announced(firstInstance)).To(Equal(podAddress(dataSuffix)))
+			converged := convergedCondition()
+			Expect(converged.Status).To(Equal(metav1.ConditionFalse))
+			Expect(converged.Reason).To(Equal(memgraphcomv1alpha1.ReasonExternalAddressPending))
+			Expect(converged.Message).To(Equal("Waiting for an external address on "+gatewayName),
+				"every member waits on the same Gateway, which is named once")
+		})
+
+		It("should announce every member at the Gateway's address on its own listener port", func() {
+			bootstrapped()
+			baseline := len(fake.executedCommands())
+
+			giveIP()
+			reconcileCluster(resourceName)
+
+			leader := podAddress(coordinatorSuffix)
+			Expect(fake.executedCommands()[baseline:]).To(Equal([]string{
+				leader + ": UPDATE CONFIG FOR COORDINATOR 0 bolt_server=" + at(gatewayAddress, memgraphcomv1alpha1.BoltPort),
+				leader + ": UPDATE CONFIG FOR COORDINATOR 1 bolt_server=" + at(gatewayAddress, memgraphcomv1alpha1.BoltPort),
+				leader + ": UPDATE CONFIG FOR COORDINATOR 2 bolt_server=" + at(gatewayAddress, memgraphcomv1alpha1.BoltPort),
+				leader + ": UPDATE CONFIG FOR INSTANCE instance_0 bolt_server=" + at(gatewayAddress, portBase),
+				leader + ": UPDATE CONFIG FOR INSTANCE instance_1 bolt_server=" + at(gatewayAddress, portBase+1),
+			}))
+			reconcileCluster(resourceName)
+			Expect(apimeta.IsStatusConditionTrue(status().Conditions, memgraphcomv1alpha1.ConditionConverged)).To(BeTrue())
+			Expect(status().ExternalAccess).To(Equal(&memgraphcomv1alpha1.ExternalAccessStatus{
+				Coordinators: at(gatewayAddress, memgraphcomv1alpha1.BoltPort),
+				Data: []memgraphcomv1alpha1.ExternalAddress{
+					{Name: firstInstance, Address: at(gatewayAddress, portBase)},
+					{Name: secondInstance, Address: at(gatewayAddress, portBase+1)},
+				},
+			}))
+		})
+
+		It("should announce a route's external-dns hostname over the Gateway's address", func() {
+			updateSpec(func(spec *memgraphcomv1alpha1.MemgraphClusterSpec) {
+				spec.ExternalAccess.Data.Annotations = map[string]string{
+					externalDNSAnnotation: dataHostnamePattern,
+				}
+			})
+			addressed()
+
+			route := &gatewayv1.TCPRoute{}
+			get(dataRoute(1), route)
+			Expect(route.Annotations).To(HaveKeyWithValue(externalDNSAnnotation, "data-1.memgraph.example.com"))
+			svc := &corev1.Service{}
+			get(dataService(1), svc)
+			Expect(svc.Annotations).NotTo(HaveKey(externalDNSAnnotation),
+				"behind a Gateway the hostname belongs on the route, not the ClusterIP Service")
+
+			Expect(announced(secondInstance)).To(Equal(at("data-1.memgraph.example.com", portBase+1)))
+			Expect(announced("coordinator_0")).To(Equal(at(gatewayAddress, memgraphcomv1alpha1.BoltPort)),
+				"a role without a hostname is announced at the Gateway's address")
+		})
+
+		It("should switch to LoadBalancers and back, pruning what the other mode owned", func() {
+			addressed()
+			Expect(apimeta.IsStatusConditionTrue(status().Conditions, memgraphcomv1alpha1.ConditionConverged)).To(BeTrue())
+
+			updateSpec(func(spec *memgraphcomv1alpha1.MemgraphClusterSpec) {
+				spec.ExternalAccess.Type = memgraphcomv1alpha1.ExternalAccessLoadBalancer
+				spec.ExternalAccess.Gateway = memgraphcomv1alpha1.ExternalAccessGatewaySpec{}
+			})
+			reconcileCluster(resourceName)
+
+			Expect(externalNames(&gatewayv1.GatewayList{})).To(BeEmpty())
+			Expect(externalNames(&gatewayv1.TCPRouteList{})).To(BeEmpty())
+			Expect(serviceType(dataService(0))).To(Equal(corev1.ServiceTypeLoadBalancer))
+			// The LoadBalancers have no address yet, so every member falls back to
+			// its pod address for now.
+			Expect(announced(firstInstance)).To(Equal(podAddress(dataSuffix)))
+			reconcileCluster(resourceName)
+			Expect(convergedCondition().Reason).To(Equal(memgraphcomv1alpha1.ReasonExternalAddressPending))
+
+			updateSpec(func(spec *memgraphcomv1alpha1.MemgraphClusterSpec) {
+				spec.ExternalAccess.Type = memgraphcomv1alpha1.ExternalAccessGateway
+				spec.ExternalAccess.Gateway = memgraphcomv1alpha1.ExternalAccessGatewaySpec{GatewayClassName: "eg"}
+			})
+			reconcileCluster(resourceName)
+			Expect(externalNames(&gatewayv1.GatewayList{})).To(ConsistOf(gatewayName))
+			Expect(serviceType(dataService(0))).To(Equal(corev1.ServiceTypeClusterIP),
+				"a LoadBalancer becomes a ClusterIP again, its node ports dropped by the API server")
+		})
+
+		It("should report a Gateway exposure as failed on a cluster without the Gateway API", func() {
+			reconciler.GatewayAPI = false
+			reconciler.GatewayAPIMissing = "TCPRoute is served only as gateway.networking.k8s.io/v1alpha2"
+			bootstrapped()
+
+			Expect(externalNames(&gatewayv1.GatewayList{})).To(BeEmpty(), "nothing is built for an API the cluster lacks")
+			Expect(serviceType(dataService(0))).To(Equal(corev1.ServiceTypeClusterIP))
+			Expect(announced(firstInstance)).To(Equal(podAddress(dataSuffix)))
+			Expect(apimeta.IsStatusConditionTrue(status().Conditions, memgraphcomv1alpha1.ConditionReady)).To(BeTrue(),
+				"the cluster still serves in-cluster")
+			converged := convergedCondition()
+			Expect(converged.Status).To(Equal(metav1.ConditionFalse))
+			Expect(converged.Reason).To(Equal(memgraphcomv1alpha1.ReasonApplyFailed))
+			Expect(converged.Message).To(ContainSubstring("TCPRoute is served only as gateway.networking.k8s.io/v1alpha2"),
+				"the message names what the cluster lacks, not merely that something does")
+			Expect(converged.Message).To(ContainSubstring("Gateway API v1.6"),
+				"the message names the release that serves what the operator builds")
+		})
+	})
+
+	Context("when discovering the Gateway API", func() {
+		It("should find it on a cluster that serves it", func() {
+			served, missing, err := GatewayAPIServed(k8sClient.RESTMapper())
+			Expect(err).NotTo(HaveOccurred())
+			Expect(served).To(BeTrue())
+			Expect(missing).To(BeEmpty())
+		})
+
+		It("should report it absent on a cluster that does not, without failing", func() {
+			served, missing, err := GatewayAPIServed(apimeta.NewDefaultRESTMapper(nil))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(served).To(BeFalse())
+			Expect(missing).To(Equal("Gateway is not served"))
+		})
+
+		// The case a cluster on Gateway API older than v1.6 presents: the CRDs
+		// exist, but TCPRoute is served at v1alpha2 alone. That has to read as
+		// "wrong version", not "no Gateway API", or the remedy is misread.
+		It("should name the version served when it is not the one the operator builds", func() {
+			// The default versions are what a version-less lookup consults, as
+			// the manager's discovery-backed mapper consults the group's served
+			// versions.
+			mapper := apimeta.NewDefaultRESTMapper([]schema.GroupVersion{
+				{Group: gatewayv1.GroupName, Version: "v1"},
+				{Group: gatewayv1.GroupName, Version: "v1alpha2"},
+			})
+			mapper.Add(schema.GroupVersionKind{Group: gatewayv1.GroupName, Version: "v1", Kind: "Gateway"}, apimeta.RESTScopeNamespace)
+			mapper.Add(schema.GroupVersionKind{Group: gatewayv1.GroupName, Version: "v1alpha2", Kind: "TCPRoute"}, apimeta.RESTScopeNamespace)
+
+			served, missing, err := GatewayAPIServed(mapper)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(served).To(BeFalse())
+			Expect(missing).To(Equal("TCPRoute is served only as gateway.networking.k8s.io/v1alpha2"))
 		})
 	})
 })

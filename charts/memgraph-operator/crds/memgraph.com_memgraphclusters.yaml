@@ -386,18 +386,21 @@ spec:
                         additionalProperties:
                           type: string
                         description: |-
-                          annotations are added to the role's external objects: cloud load
-                          balancer tuning, external-dns hostnames, whatever the controllers in
-                          front of the cluster read. On a per-instance object every value has
-                          "{ordinal}" replaced with the pod ordinal.
+                          annotations are added to the role's external objects — with type
+                          LoadBalancer the Services, with type Gateway the TCPRoutes, which is
+                          where external-dns reads a route's hostname from. Cloud load balancer
+                          tuning, external-dns hostnames, whatever the controllers in front of the
+                          cluster read. On a per-instance object every value has "{ordinal}"
+                          replaced with the pod ordinal.
                         maxProperties: 64
                         type: object
                       labels:
                         additionalProperties:
                           type: string
                         description: |-
-                          labels are added to the role's external objects. The operator's own
-                          identity labels win a key collision, as they do everywhere else.
+                          labels are added to the role's external objects: its Services, and with
+                          type Gateway its TCPRoutes too. The operator's own identity labels win a
+                          key collision, as they do everywhere else.
                         maxProperties: 64
                         type: object
                     type: object
@@ -410,18 +413,59 @@ spec:
                         additionalProperties:
                           type: string
                         description: |-
-                          annotations are added to the role's external objects: cloud load
-                          balancer tuning, external-dns hostnames, whatever the controllers in
-                          front of the cluster read. On a per-instance object every value has
-                          "{ordinal}" replaced with the pod ordinal.
+                          annotations are added to the role's external objects — with type
+                          LoadBalancer the Services, with type Gateway the TCPRoutes, which is
+                          where external-dns reads a route's hostname from. Cloud load balancer
+                          tuning, external-dns hostnames, whatever the controllers in front of the
+                          cluster read. On a per-instance object every value has "{ordinal}"
+                          replaced with the pod ordinal.
                         maxProperties: 64
                         type: object
                       labels:
                         additionalProperties:
                           type: string
                         description: |-
-                          labels are added to the role's external objects. The operator's own
-                          identity labels win a key collision, as they do everywhere else.
+                          labels are added to the role's external objects: its Services, and with
+                          type Gateway its TCPRoutes too. The operator's own identity labels win a
+                          key collision, as they do everywhere else.
+                        maxProperties: 64
+                        type: object
+                    type: object
+                  gateway:
+                    description: gateway configures the Gateway created when type
+                      is Gateway.
+                    properties:
+                      annotations:
+                        additionalProperties:
+                          type: string
+                        description: annotations are added to the Gateway object.
+                        maxProperties: 64
+                        type: object
+                      dataPortBase:
+                        default: 9000
+                        description: |-
+                          dataPortBase is the listener port of the first data instance; instance
+                          N is exposed on dataPortBase + N. These are the ports clients open on
+                          their firewalls, so they are a knob rather than a constant, but the
+                          default works out of the box. The coordinators share one listener on
+                          the bolt port 7687, so the base must lie above it, and the range must
+                          stay within the valid port space for the declared dataInstances.
+                        format: int32
+                        maximum: 65535
+                        minimum: 1
+                        type: integer
+                      gatewayClassName:
+                        description: |-
+                          gatewayClassName names the GatewayClass the Gateway is created with,
+                          which is what picks the controller (Envoy Gateway, Cilium, Istio, ...)
+                          that programs it. It is required when type is Gateway.
+                        maxLength: 253
+                        minLength: 1
+                        type: string
+                      labels:
+                        additionalProperties:
+                          type: string
+                        description: labels are added to the Gateway object.
                         maxProperties: 64
                         type: object
                     type: object
@@ -429,9 +473,14 @@ spec:
                     description: |-
                       type selects how the cluster is exposed. LoadBalancer creates one
                       Service of type LoadBalancer shared by all coordinators and one per data
-                      instance, each publishing the bolt port.
+                      instance, each publishing the bolt port. Gateway creates one Gateway API
+                      Gateway with a TCP listener shared by all coordinators on the bolt port
+                      and one per data instance on gateway.dataPortBase + ordinal, each fed by
+                      a TCPRoute; the Gateway API CRDs and a Gateway controller must already be
+                      installed on the cluster.
                     enum:
                     - LoadBalancer
+                    - Gateway
                     type: string
                 required:
                 - type
@@ -449,6 +498,17 @@ spec:
                   rule: '!has(self.coordinators) || !has(self.coordinators.annotations)
                     || !(''external-dns.alpha.kubernetes.io/hostname'' in self.coordinators.annotations)
                     || !self.coordinators.annotations[''external-dns.alpha.kubernetes.io/hostname''].contains(''{ordinal}'')'
+                - message: 'gateway.gatewayClassName is required when type is Gateway:
+                    it names the GatewayClass whose controller programs the Gateway'
+                  rule: self.type != 'Gateway' || (has(self.gateway) && has(self.gateway.gatewayClassName))
+                - message: gateway is only used when type is Gateway; remove it or
+                    change the type
+                  rule: self.type == 'Gateway' || !has(self.gateway)
+                - message: gateway.dataPortBase must be above 7687, the port of the
+                    coordinators' shared listener, so no data listener can land on
+                    it
+                  rule: '!has(self.gateway) || !has(self.gateway.dataPortBase) ||
+                    self.gateway.dataPortBase > 7687'
               extraArgs:
                 description: extraArgs passes additional Memgraph flags to both roles.
                 properties:
@@ -1343,6 +1403,13 @@ spec:
                     type: string
                 type: object
             type: object
+            x-kubernetes-validations:
+            - message: 'externalAccess.gateway.dataPortBase + dataInstances must not
+                exceed 65536: every data instance listens on dataPortBase + its ordinal'
+              rule: '!has(self.externalAccess) || !has(self.externalAccess.gateway)
+                || !has(self.externalAccess.gateway.dataPortBase) || !has(self.dataInstances)
+                || self.externalAccess.gateway.dataPortBase + self.dataInstances <=
+                65536'
           status:
             description: status defines the observed state of MemgraphCluster
             properties:

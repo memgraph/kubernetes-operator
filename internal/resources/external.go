@@ -71,6 +71,10 @@ func DataExternalServiceName(cluster *memgraphcomv1alpha1.MemgraphCluster, ordin
 // instance keeps its Service for as long as it keeps its pod — it may still be
 // serving clients as MAIN while its handover waits — and loses it in the pass
 // that sheds the pod, when the applied count drops to the declared one.
+//
+// The Services are the same in both exposure modes and differ only in type:
+// LoadBalancers when they are the way in themselves, ClusterIPs when a Gateway
+// is, with a TCPRoute per Service pointing at it.
 func ExternalServices(cluster *memgraphcomv1alpha1.MemgraphCluster, dataReplicas int32) []*corev1.Service {
 	if cluster.Spec.ExternalAccess == nil {
 		return nil
@@ -83,51 +87,67 @@ func ExternalServices(cluster *memgraphcomv1alpha1.MemgraphCluster, dataReplicas
 	return services
 }
 
-// CoordinatorExternalService builds the one LoadBalancer Service every
-// coordinator sits behind. Any coordinator answers a routing request — a
-// follower forwards it to the leader — so clients need one address for the
-// role, not one per member, and every coordinator is announced at this one.
+// CoordinatorExternalService builds the one Service every coordinator sits
+// behind. Any coordinator answers a routing request — a follower forwards it to
+// the leader — so clients need one address for the role, not one per member,
+// and every coordinator is announced at this one.
 func CoordinatorExternalService(cluster *memgraphcomv1alpha1.MemgraphCluster) *corev1.Service {
 	spec := normalize(cluster.Spec)
 	return externalService(cluster, coordinatorComponent, CoordinatorExternalServiceName(cluster),
-		selectorLabels(cluster, coordinatorComponent), spec.coordinatorRole, spec.external.coordinators, nil)
+		selectorLabels(cluster, coordinatorComponent), spec, spec.coordinatorRole, spec.external.coordinators,
+		serviceAnnotations(spec, spec.external.coordinators.annotations))
 }
 
-// DataExternalService builds the LoadBalancer Service in front of one data
-// instance. Every data instance gets its own: the routing table names each one
-// individually, and a client writes to the MAIN and reads from a replica it is
-// told about by name, so one address per instance is the only shape that works.
-// The Service selects the pod by the name label the StatefulSet controller
-// stamps on it, which is the one label that singles out an ordinal.
+// DataExternalService builds the Service in front of one data instance. Every
+// data instance gets its own: the routing table names each one individually,
+// and a client writes to the MAIN and reads from a replica it is told about by
+// name, so one address per instance is the only shape that works. The Service
+// selects the pod by the name label the StatefulSet controller stamps on it,
+// which is the one label that singles out an ordinal.
 func DataExternalService(cluster *memgraphcomv1alpha1.MemgraphCluster, ordinal int32) *corev1.Service {
 	spec := normalize(cluster.Spec)
 	selector := selectorLabels(cluster, dataComponent)
 	selector[appsv1.StatefulSetPodNameLabel] = fmt.Sprintf("%s-%d", DataName(cluster), ordinal)
 	return externalService(cluster, dataComponent, DataExternalServiceName(cluster, ordinal),
-		selector, spec.dataRole, spec.external.data, &ordinal)
+		selector, spec, spec.dataRole, spec.external.data,
+		serviceAnnotations(spec, perInstanceAnnotations(spec.external.data.annotations, ordinal)))
 }
 
-// externalService is the shape both roles' external Services share: a
-// LoadBalancer publishing the bolt port and nothing else — the management,
-// replication and coordinator ports are the cluster's own business and never
-// leave its network. The role's serviceLabels land on it as on the headless
-// Service, with the external block's labels beside them and the operator's
-// identity labels winning any collision. Annotations are the external block's,
-// with the ordinal substituted on a per-instance Service.
+// serviceAnnotations decides whether the role's annotations belong on its
+// Service: they do when the Service is the way in, and not when a Gateway is,
+// because then the controllers that read them — external-dns above all — read
+// the TCPRoute, and a hostname annotation on a ClusterIP Service nobody
+// publishes would be a lie.
+func serviceAnnotations(spec normalizedSpec, annotations map[string]string) map[string]string {
+	if spec.external.typ == memgraphcomv1alpha1.ExternalAccessGateway {
+		return nil
+	}
+	return annotations
+}
+
+// externalService is the shape both roles' external Services share: the bolt
+// port and nothing else — the management, replication and coordinator ports
+// are the cluster's own business and never leave its network. The role's
+// serviceLabels land on it as on the headless Service, with the external
+// block's labels beside them and the operator's identity labels winning any
+// collision.
 func externalService(
 	cluster *memgraphcomv1alpha1.MemgraphCluster,
 	component, name string,
 	selector map[string]string,
+	spec normalizedSpec,
 	role normalizedRole,
 	external normalizedExternalRole,
-	ordinal *int32,
+	annotations map[string]string,
 ) *corev1.Service {
 	custom := make(map[string]string, len(role.serviceLabels)+len(external.labels))
 	maps.Copy(custom, role.serviceLabels)
 	maps.Copy(custom, external.labels)
-	l := labels(cluster, component, custom)
-	l[ExternalAccessLabel] = ExternalAccessValue
 
+	serviceType := corev1.ServiceTypeLoadBalancer
+	if spec.external.typ == memgraphcomv1alpha1.ExternalAccessGateway {
+		serviceType = corev1.ServiceTypeClusterIP
+	}
 	return &corev1.Service{
 		// TypeMeta is set explicitly because the controller server-side
 		// applies builder output, and apply patches must carry the GVK.
@@ -135,33 +155,44 @@ func externalService(
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        name,
 			Namespace:   cluster.Namespace,
-			Labels:      l,
-			Annotations: externalAnnotations(external.annotations, ordinal),
+			Labels:      externalLabels(cluster, component, custom),
+			Annotations: annotations,
 		},
 		Spec: corev1.ServiceSpec{
-			Type:     corev1.ServiceTypeLoadBalancer,
+			Type:     serviceType,
 			Selector: selector,
 			Ports:    []corev1.ServicePort{{Name: boltPortName, Port: memgraphcomv1alpha1.BoltPort}},
 		},
 	}
 }
 
-// externalAnnotations copies the user's annotations, replacing the ordinal
-// placeholder in every value when the object is a per-instance one. The
-// coordinators' shared Service has no ordinal to substitute, and admission keeps
-// the placeholder off its hostname annotation; any other annotation carrying it
-// there is passed through untouched. A map with no entries comes back nil so a
-// Service that was asked for no annotations claims none in its apply.
-func externalAnnotations(annotations map[string]string, ordinal *int32) map[string]string {
+// externalLabels is the label set of an external object: the role's labels with
+// the custom ones merged underneath, plus the marker the controller prunes by.
+func externalLabels(
+	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	component string,
+	custom map[string]string,
+) map[string]string {
+	l := labels(cluster, component, custom)
+	l[ExternalAccessLabel] = ExternalAccessValue
+	return l
+}
+
+// perInstanceAnnotations copies the role's annotations for one instance's
+// object, replacing the ordinal placeholder in every value. It is what makes
+// one annotation map serve every data instance with a hostname of its own. The
+// coordinators' shared objects get the role's annotations as written: admission
+// keeps the placeholder off their hostname annotation, and any other annotation
+// carrying it there is passed through untouched. A map with no entries comes
+// back nil so an object that was asked for no annotations claims none in its
+// apply.
+func perInstanceAnnotations(annotations map[string]string, ordinal int32) map[string]string {
 	if len(annotations) == 0 {
 		return nil
 	}
 	out := make(map[string]string, len(annotations))
 	for key, value := range annotations {
-		if ordinal != nil {
-			value = strings.ReplaceAll(value, memgraphcomv1alpha1.OrdinalPlaceholder, strconv.Itoa(int(*ordinal)))
-		}
-		out[key] = value
+		out[key] = strings.ReplaceAll(value, memgraphcomv1alpha1.OrdinalPlaceholder, strconv.Itoa(int(ordinal)))
 	}
 	return out
 }
@@ -180,7 +211,8 @@ type ExternalAddresses struct {
 }
 
 // ExternalBoltAddress derives the "host:port" clients outside the cluster reach
-// the Service's bolt port at, or the empty string while nothing does yet.
+// the LoadBalancer Service's bolt port at, or the empty string while nothing
+// does yet.
 //
 // The host is taken in this order. First, the hostname external-dns publishes,
 // read off the Service's own annotation: external-dns writes the record at the
@@ -191,29 +223,38 @@ type ExternalAddresses struct {
 // pass, so an address that appears or changes later is followed rather than
 // missed: nothing here is a one-time discovery.
 func ExternalBoltAddress(service *corev1.Service) string {
-	if host := externalHost(service); host != "" {
-		return hostPort(host, memgraphcomv1alpha1.BoltPort)
+	host := externalDNSHost(service.Annotations)
+	if host == "" {
+		host = loadBalancerHost(service.Status.LoadBalancer.Ingress)
 	}
-	return ""
+	if host == "" {
+		return ""
+	}
+	return hostPort(host, memgraphcomv1alpha1.BoltPort)
 }
 
-func externalHost(service *corev1.Service) string {
-	// external-dns accepts a comma-separated list and publishes every name in
-	// it; the first is the one clients are announced to.
-	if hostnames := service.Annotations[memgraphcomv1alpha1.ExternalDNSHostnameAnnotation]; hostnames != "" {
-		hostname, _, _ := strings.Cut(hostnames, ",")
-		if hostname = strings.TrimSpace(hostname); hostname != "" {
-			return hostname
+// externalDNSHost is the hostname external-dns publishes for an object, read
+// off its annotation, or the empty string when none is set. external-dns
+// accepts a comma-separated list and publishes every name in it; the first is
+// the one clients are announced to.
+func externalDNSHost(annotations map[string]string) string {
+	hostnames := annotations[memgraphcomv1alpha1.ExternalDNSHostnameAnnotation]
+	hostname, _, _ := strings.Cut(hostnames, ",")
+	return strings.TrimSpace(hostname)
+}
+
+// loadBalancerHost is the host a LoadBalancer Service reports, a hostname
+// preferred over an IP whichever entry carries it, or the empty string while it
+// reports none.
+func loadBalancerHost(ingress []corev1.LoadBalancerIngress) string {
+	for _, entry := range ingress {
+		if entry.Hostname != "" {
+			return entry.Hostname
 		}
 	}
-	for _, ingress := range service.Status.LoadBalancer.Ingress {
-		if ingress.Hostname != "" {
-			return ingress.Hostname
-		}
-	}
-	for _, ingress := range service.Status.LoadBalancer.Ingress {
-		if ingress.IP != "" {
-			return ingress.IP
+	for _, entry := range ingress {
+		if entry.IP != "" {
+			return entry.IP
 		}
 	}
 	return ""

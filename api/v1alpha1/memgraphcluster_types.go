@@ -801,14 +801,63 @@ type ExtraArgsSpec struct {
 }
 
 // ExternalAccessType is how the cluster is reached from outside Kubernetes.
-// +kubebuilder:validation:Enum=LoadBalancer
+// +kubebuilder:validation:Enum=LoadBalancer;Gateway
 type ExternalAccessType string
 
 const (
 	// ExternalAccessLoadBalancer exposes the cluster through Services of type
 	// LoadBalancer: one shared by all coordinators, and one per data instance.
 	ExternalAccessLoadBalancer ExternalAccessType = "LoadBalancer"
+
+	// ExternalAccessGateway exposes the cluster through one Gateway API
+	// Gateway the operator owns: a TCP listener shared by all coordinators on
+	// the bolt port, and one listener per data instance on its own port, each
+	// with a TCPRoute to the instance behind it.
+	ExternalAccessGateway ExternalAccessType = "Gateway"
+
+	// DefaultGatewayDataPortBase is the first data instance's Gateway listener
+	// port; instance N listens on DefaultGatewayDataPortBase + N. It mirrors the
+	// memgraph-high-availability Helm chart's gateway.dataPortBase default.
+	DefaultGatewayDataPortBase int32 = 9000
 )
+
+// ExternalAccessGatewaySpec configures the Gateway the operator creates when
+// type is Gateway. TCPRoute has no host matching, so every data instance needs
+// a listener of its own on its own port, and the listener list is a function
+// of dataInstances: raising the count adds a listener, lowering it removes one.
+// That is why the operator owns the Gateway rather than attaching routes to
+// one somebody else runs.
+type ExternalAccessGatewaySpec struct {
+	// gatewayClassName names the GatewayClass the Gateway is created with,
+	// which is what picks the controller (Envoy Gateway, Cilium, Istio, ...)
+	// that programs it. It is required when type is Gateway.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +optional
+	GatewayClassName string `json:"gatewayClassName,omitempty"`
+
+	// dataPortBase is the listener port of the first data instance; instance
+	// N is exposed on dataPortBase + N. These are the ports clients open on
+	// their firewalls, so they are a knob rather than a constant, but the
+	// default works out of the box. The coordinators share one listener on
+	// the bolt port 7687, so the base must lie above it, and the range must
+	// stay within the valid port space for the declared dataInstances.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=65535
+	// +kubebuilder:default=9000
+	// +optional
+	DataPortBase *int32 `json:"dataPortBase,omitempty"`
+
+	// labels are added to the Gateway object.
+	// +kubebuilder:validation:MaxProperties=64
+	// +optional
+	Labels map[string]string `json:"labels,omitempty"`
+
+	// annotations are added to the Gateway object.
+	// +kubebuilder:validation:MaxProperties=64
+	// +optional
+	Annotations map[string]string `json:"annotations,omitempty"`
+}
 
 const (
 	// ExternalDNSHostnameAnnotation is the annotation external-dns reads to
@@ -830,16 +879,19 @@ const (
 // serviceLabels from the labels block also land on its external Services;
 // these are the labels and annotations that mark only the external objects.
 type ExternalAccessRoleSpec struct {
-	// labels are added to the role's external objects. The operator's own
-	// identity labels win a key collision, as they do everywhere else.
+	// labels are added to the role's external objects: its Services, and with
+	// type Gateway its TCPRoutes too. The operator's own identity labels win a
+	// key collision, as they do everywhere else.
 	// +kubebuilder:validation:MaxProperties=64
 	// +optional
 	Labels map[string]string `json:"labels,omitempty"`
 
-	// annotations are added to the role's external objects: cloud load
-	// balancer tuning, external-dns hostnames, whatever the controllers in
-	// front of the cluster read. On a per-instance object every value has
-	// "{ordinal}" replaced with the pod ordinal.
+	// annotations are added to the role's external objects — with type
+	// LoadBalancer the Services, with type Gateway the TCPRoutes, which is
+	// where external-dns reads a route's hostname from. Cloud load balancer
+	// tuning, external-dns hostnames, whatever the controllers in front of the
+	// cluster read. On a per-instance object every value has "{ordinal}"
+	// replaced with the pod ordinal.
 	// +kubebuilder:validation:MaxProperties=64
 	// +optional
 	Annotations map[string]string `json:"annotations,omitempty"`
@@ -866,10 +918,17 @@ type ExternalAccessRoleSpec struct {
 //
 // +kubebuilder:validation:XValidation:rule="!has(self.data) || !has(self.data.annotations) || !('external-dns.alpha.kubernetes.io/hostname' in self.data.annotations) || self.data.annotations['external-dns.alpha.kubernetes.io/hostname'].contains('{ordinal}')",message="data.annotations external-dns.alpha.kubernetes.io/hostname must contain {ordinal}: every data instance has its own external address, and one hostname for all of them would register the same routing address for every instance"
 // +kubebuilder:validation:XValidation:rule="!has(self.coordinators) || !has(self.coordinators.annotations) || !('external-dns.alpha.kubernetes.io/hostname' in self.coordinators.annotations) || !self.coordinators.annotations['external-dns.alpha.kubernetes.io/hostname'].contains('{ordinal}')",message="coordinators.annotations external-dns.alpha.kubernetes.io/hostname must not contain {ordinal}: all coordinators share one external address"
+// +kubebuilder:validation:XValidation:rule="self.type != 'Gateway' || (has(self.gateway) && has(self.gateway.gatewayClassName))",message="gateway.gatewayClassName is required when type is Gateway: it names the GatewayClass whose controller programs the Gateway"
+// +kubebuilder:validation:XValidation:rule="self.type == 'Gateway' || !has(self.gateway)",message="gateway is only used when type is Gateway; remove it or change the type"
+// +kubebuilder:validation:XValidation:rule="!has(self.gateway) || !has(self.gateway.dataPortBase) || self.gateway.dataPortBase > 7687",message="gateway.dataPortBase must be above 7687, the port of the coordinators' shared listener, so no data listener can land on it"
 type ExternalAccessSpec struct {
 	// type selects how the cluster is exposed. LoadBalancer creates one
 	// Service of type LoadBalancer shared by all coordinators and one per data
-	// instance, each publishing the bolt port.
+	// instance, each publishing the bolt port. Gateway creates one Gateway API
+	// Gateway with a TCP listener shared by all coordinators on the bolt port
+	// and one per data instance on gateway.dataPortBase + ordinal, each fed by
+	// a TCPRoute; the Gateway API CRDs and a Gateway controller must already be
+	// installed on the cluster.
 	// +required
 	Type ExternalAccessType `json:"type"`
 
@@ -881,9 +940,20 @@ type ExternalAccessSpec struct {
 	// in annotation values replaced by the instance's pod ordinal.
 	// +optional
 	Data ExternalAccessRoleSpec `json:"data,omitzero"`
+
+	// gateway configures the Gateway created when type is Gateway.
+	// +optional
+	Gateway ExternalAccessGatewaySpec `json:"gateway,omitzero"`
 }
 
 // MemgraphClusterSpec defines the desired state of MemgraphCluster.
+//
+// The one rule here spans two blocks: with type Gateway every data instance
+// gets a listener on gateway.dataPortBase + ordinal, so the declared count
+// decides whether the range fits in the port space. The has() guards keep the
+// rule evaluable before the nested defaults apply.
+//
+// +kubebuilder:validation:XValidation:rule="!has(self.externalAccess) || !has(self.externalAccess.gateway) || !has(self.externalAccess.gateway.dataPortBase) || !has(self.dataInstances) || self.externalAccess.gateway.dataPortBase + self.dataInstances <= 65536",message="externalAccess.gateway.dataPortBase + dataInstances must not exceed 65536: every data instance listens on dataPortBase + its ordinal"
 type MemgraphClusterSpec struct {
 	// coordinators is the number of Raft coordinator instances. It must be odd
 	// so the Raft quorum cannot split, and at least three, which is the
