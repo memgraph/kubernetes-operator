@@ -140,7 +140,7 @@ Applications inside the cluster reach an instance at its stable DNS name in the 
 memgraph-data-0.memgraph-data.memgraph.svc.cluster.local:7687
 ```
 
-v1alpha1 ships no external access (see below), so to point a local client such as [Memgraph Lab](https://memgraph.com/docs/data-visualization) at the cluster while evaluating, forward the port:
+To reach the cluster from outside Kubernetes, expose it with `spec.externalAccess` — see [External access](#external-access) below. To point a local client such as [Memgraph Lab](https://memgraph.com/docs/data-visualization) at the cluster while evaluating, forwarding a port is enough:
 
 ```sh
 kubectl port-forward -n memgraph pod/memgraph-data-0 7687:7687
@@ -163,9 +163,50 @@ Uninstall the operator with `helm uninstall memgraph-operator --namespace memgra
 
 ## Configuration
 
-Beyond the quickstart's four fields, v1alpha1 exposes storage (PVC size, access mode, storage class, whether the log claim is created at all, retention) per role, optional core dump collection with an uploader sidecar of your choice per role, resource requests and limits per role, probe timings per role, custom labels on pods, StatefulSets and Services, the cluster domain used in advertised addresses, and a freeform passthrough per role for environment variables, Memgraph flags, and extra volumes and volume mounts. Internal ports are fixed: Bolt 7687, management 10000, replication 20000, and coordinator 12000.
+Beyond the quickstart's four fields, v1alpha1 exposes storage (PVC size, access mode, storage class, whether the log claim is created at all, retention) per role, optional core dump collection with an uploader sidecar of your choice per role, resource requests and limits per role, probe timings per role, custom labels on pods, StatefulSets and Services, the cluster domain used in advertised addresses, [external access](#external-access) through LoadBalancers or a Gateway API Gateway, and a freeform passthrough per role for environment variables, Memgraph flags, and extra volumes and volume mounts. Internal ports are fixed: Bolt 7687, management 10000, replication 20000, and coordinator 12000.
 
 [`config/samples/v1alpha1_memgraphcluster.yaml`](config/samples/v1alpha1_memgraphcluster.yaml) spells the full surface out with every default and the reasoning behind it. `kubectl explain mgc.spec --recursive` documents the same fields from the installed CRD.
+
+## External access
+
+A Memgraph HA client connects to a coordinator, asks for the routing table, and follows the addresses in it — the MAIN for writes, a replica for reads. Those addresses are the ones each member was registered with, so exposing the cluster means two things: a way in, and a routing table clients outside can follow. `spec.externalAccess` does both. The operator creates the external objects, registers every exposed member at the address they acquire, and moves it with `UPDATE CONFIG` as that address appears, changes or goes away. Nothing about the address is declared; it is discovered from the cloud, or from an [external-dns](https://github.com/kubernetes-sigs/external-dns) hostname annotation when you set one.
+
+**LoadBalancer**: one Service of type `LoadBalancer` shared by all coordinators, and one per data instance. Three coordinators and two data instances cost three cloud load balancers.
+
+```yaml
+spec:
+  externalAccess:
+    type: LoadBalancer
+```
+
+**Gateway**: one [Gateway API](https://gateway-api.sigs.k8s.io/) Gateway the operator creates, with a TCP listener shared by all coordinators on port 7687 and one per data instance on `dataPortBase + ordinal`, each fed by a TCPRoute. One address, one cloud load balancer, a port per instance. It needs Gateway API **v1.6 or newer** and a running Gateway controller — Envoy Gateway v1.9 is the first release bundling v1.6 — installed before the operator starts; the operator never bundles the CRDs.
+
+```yaml
+spec:
+  externalAccess:
+    type: Gateway
+    gateway:
+      gatewayClassName: eg
+```
+
+Either way, wait for `Converged` and read the addresses off the status:
+
+```sh
+kubectl wait --namespace memgraph --for=condition=Converged memgraphcluster/memgraph --timeout=10m
+kubectl get mgc memgraph -n memgraph -o jsonpath='{.status.externalAccess}'
+```
+
+```json
+{"coordinators":"203.0.113.10:7687","data":[{"name":"instance_0","address":"203.0.113.11:7687"},{"name":"instance_1","address":"203.0.113.12:7687"}]}
+```
+
+Then connect with the routing scheme to the coordinators' address alone; the driver fetches the routing table from there and follows it:
+
+```
+neo4j://203.0.113.10:7687
+```
+
+While a LoadBalancer or the Gateway has no address yet, the members behind it are announced at their pod addresses and the resource reports `Converged=False` with reason `ExternalAddressPending`, naming what it is waiting on; `Ready` is unaffected, the cluster serves in-cluster throughout. Removing the block deletes the external objects and moves every member back to its pod address. For the address rules, per-instance hostnames with `{ordinal}`, the Gateway API version requirement and how to upgrade the CRDs past Helm, and the lifecycle on scale and type switch, see [`docs/external-access.md`](docs/external-access.md).
 
 ## What v1alpha1 does and does not do
 
@@ -176,7 +217,8 @@ The MVP is deliberately "provision, bootstrap, observe". It does:
 - re-register continuously: every reconcile compares `SHOW INSTANCES` on the coordinator leader against the declared topology and issues only the missing registrations, so an instance that loses its registration state (say, after being rescheduled onto a fresh node) rejoins without human action;
 - **grow a live cluster**: raise `coordinators` or `dataInstances` (both in one edit if you like, in any step size) and the added pods are provisioned and registered by the same diff that restores a lost registration — no manual `ADD COORDINATOR` or `REGISTER INSTANCE`;
 - **shrink a live cluster**: lower `dataInstances` or `coordinators` and the members above the new count are retired before their pods are shed — a data instance has MAIN moved off it if it holds it and is then `UNREGISTER INSTANCE`d, a coordinator is `REMOVE COORDINATOR`ed out of the Raft cluster — so the coordinators never expect an instance whose pod is gone, and no removed member's pod outlives its vote;
-- report the observed MAIN, the registered member counts, and the readiness and convergence conditions on the resource's status.
+- **expose the cluster outside Kubernetes**, through LoadBalancers or a Gateway API Gateway, and keep the routing table pointing at the addresses clients reach it through (see [External access](#external-access));
+- report the observed MAIN, the registered member counts, the external addresses, and the readiness and convergence conditions on the resource's status.
 
 Scaling is one edit, and `Converged` tells you when it is finished:
 
@@ -196,8 +238,8 @@ What it does not do yet:
 - **Failover.** The operator promotes a MAIN only when the cluster has none: once at bootstrap, and once more when it demotes an instance that is retiring. It never overrides a MAIN that is staying — leadership belongs to the Raft coordinators, so two control systems never fight over which instance is MAIN.
 - **Other day-2 operations**: orchestrated or rolling version upgrades, backup and restore, storage-mode changes.
 - **Deleting storage**: the operator owns no finalizer and runs no cleanup of its own — deleting a volume is left entirely to the StatefulSet's own retention policy.
-- **External access** of any kind — no LoadBalancer, NodePort, ingress or gateway. Access is in-cluster (or `kubectl port-forward`) only; the approach is expected to change, so it was deliberately deferred rather than shipped and broken later.
-- **TLS**, for Bolt or intra-cluster traffic.
+- **NodePort or ingress exposure**, a declared hostname without external-dns, or attaching to a Gateway you already run — see [what external access leaves out](docs/external-access.md#not-in-scope).
+- **TLS**, for Bolt or intra-cluster traffic — the addresses external access announces are plain Bolt.
 - **Bolt authentication** — the operator connects to the coordinators unauthenticated, so clusters must not enable auth yet.
 - **Monitoring** of the Memgraph cluster: no exporter, ServiceMonitor or dashboards. (The operator itself serves controller-runtime metrics; see the [chart README](charts/memgraph-operator/README.md).)
 - **Standalone (non-HA) topology.** The API is shaped to grow one without a breaking change, but v1alpha1 provisions HA clusters only.
@@ -221,7 +263,7 @@ make run           # run the controller locally against the current kubeconfig
 make test-e2e      # KinD end-to-end suite; creates and deletes its own Kind cluster
 ```
 
-Every pull request runs lint, unit, envtest, chart and end-to-end suites. The e2e job boots a licensed Memgraph cluster on a multi-node Kind cluster, with the license coming from repository secrets; set `MEMGRAPH_ENTERPRISE_LICENSE` and `MEMGRAPH_ORGANIZATION_NAME` to run it locally.
+Every pull request runs lint, unit, envtest, chart and end-to-end suites. The e2e job boots a licensed Memgraph cluster on a multi-node Kind cluster, with the license coming from repository secrets; set `MEMGRAPH_ENTERPRISE_LICENSE` and `MEMGRAPH_ORGANIZATION_NAME` to run it locally. Kind has no cloud controller and no Gateway controller, so `make setup-test-e2e` also installs MetalLB, which hands LoadBalancer addresses out of the Kind Docker network, and Envoy Gateway with a `GatewayClass` named `eg` (`hack/kind-metallb.sh`, `hack/kind-envoy-gateway.sh`); the external access scenarios connect to those addresses from the test process, a genuine client outside the cluster. The envtest suite loads the Gateway API CRDs from the `sigs.k8s.io/gateway-api` module in `go.mod`.
 
 Run a development build against a cluster with `make docker-build docker-push IMG=<registry>/kubernetes-operator:tag` followed by `make install` (CRDs) and `make deploy IMG=<registry>/kubernetes-operator:tag`, or install the local chart:
 
