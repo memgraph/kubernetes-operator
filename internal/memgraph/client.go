@@ -168,6 +168,16 @@ type Client interface {
 	RegisterInstance(ctx context.Context, instance DataInstanceSpec) error
 	SetInstanceToMain(ctx context.Context, name string) error
 
+	// UpdateCoordinatorBoltServer and UpdateInstanceBoltServer change the bolt
+	// address a registered member is announced at — the one address in the
+	// routing table clients follow, and the only one UPDATE CONFIG can change.
+	// The other addresses stay what registration set: the cluster reaches its
+	// members over them, and they never leave the cluster network. Both are
+	// Raft-replicated writes with no precondition on the member's health, so
+	// they are as safe on a down instance as on a serving one.
+	UpdateCoordinatorBoltServer(ctx context.Context, id int32, boltServer string) error
+	UpdateInstanceBoltServer(ctx context.Context, name, boltServer string) error
+
 	// DemoteInstance turns the named MAIN back into a replica, which is what
 	// makes a MAIN on its way out of the cluster unregisterable: Memgraph
 	// refuses to unregister the MAIN. It deliberately leaves the cluster

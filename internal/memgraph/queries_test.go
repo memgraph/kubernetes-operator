@@ -88,6 +88,24 @@ func TestSetInstanceToMainQuery(t *testing.T) {
 	}
 }
 
+// The UPDATE CONFIG queries carry only bolt_server: it is the one address of a
+// registered member that may change, and the one Memgraph honours in the map. A
+// query that grew another key would announce an address the cluster never acts
+// on, so the shape is pinned.
+func TestUpdateCoordinatorBoltServerQuery(t *testing.T) {
+	got := updateCoordinatorBoltServerQuery(2, "memgraph.example.com:7687")
+	if want := `UPDATE CONFIG FOR COORDINATOR 2 {"bolt_server": "memgraph.example.com:7687"}`; got != want {
+		t.Errorf("updateCoordinatorBoltServerQuery() = %q, want %q", got, want)
+	}
+}
+
+func TestUpdateInstanceBoltServerQuery(t *testing.T) {
+	got := updateInstanceBoltServerQuery(testInstanceName, "203.0.113.10:7687")
+	if want := `UPDATE CONFIG FOR INSTANCE instance_1 {"bolt_server": "203.0.113.10:7687"}`; got != want {
+		t.Errorf("updateInstanceBoltServerQuery() = %q, want %q", got, want)
+	}
+}
+
 func TestDemoteInstanceQuery(t *testing.T) {
 	got := demoteInstanceQuery(testInstanceName)
 	if want := "DEMOTE INSTANCE instance_1"; got != want {

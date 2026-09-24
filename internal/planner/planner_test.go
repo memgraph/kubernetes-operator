@@ -1137,7 +1137,7 @@ func TestPlanUsesFixedPortsAndConfiguredClusterDomain(t *testing.T) {
 		promote(firstInstance),
 	}
 
-	got := planner.Plan(resources.DeclaredTopology(cluster), nil, nil)
+	got := planner.Plan(resources.DeclaredTopology(cluster, resources.ExternalAddresses{}), nil, nil)
 	if diff := cmp.Diff(want, got); diff != "" {
 		t.Errorf("Plan() mismatch (-want +got):\n%s", diff)
 	}
@@ -1154,7 +1154,7 @@ func TestPlanConvergedOnFixedPorts(t *testing.T) {
 			ClusterDomain: "k8s.example.com",
 		},
 	}
-	declared := resources.DeclaredTopology(cluster)
+	declared := resources.DeclaredTopology(cluster, resources.ExternalAddresses{})
 
 	coordinator := declared.Coordinators[0]
 	instance := declared.DataInstances[0]
@@ -1178,5 +1178,138 @@ func TestPlanConvergedOnFixedPorts(t *testing.T) {
 
 	if got := planner.Plan(declared, observed, nil); got != nil {
 		t.Errorf("Plan() = %v, want no commands", got)
+	}
+}
+
+// TestPlanFollowsAnnouncedBoltAddress covers the one thing about a registration
+// that may change: the bolt address a member is announced at. An exposed member
+// is declared at its external address once that is known, so a member the
+// cluster still announces at its pod address gets an UPDATE CONFIG — and only
+// that member; a matching address plans nothing, an absent one is a view that
+// does not report addresses rather than a member to re-announce, and a retiring
+// member is left at whatever it had.
+func TestPlanFollowsAnnouncedBoltAddress(t *testing.T) {
+	const (
+		coordinatorsAddress = "memgraph.example.com:7687"
+		dataAddress         = "203.0.113.10:7687"
+	)
+	exposedCoordinator := func(id int32) memgraph.CoordinatorSpec {
+		spec := coordinatorSpec(id)
+		spec.BoltServer = coordinatorsAddress
+		return spec
+	}
+	exposedDataInstance := func(i int) memgraph.DataInstanceSpec {
+		spec := dataInstanceSpec(i)
+		spec.BoltServer = dataAddress
+		return spec
+	}
+	// exposed declares the canonical topology with the coordinators announced at
+	// their shared external address and the first data instance at its own; the
+	// second data instance's LoadBalancer has no address yet.
+	exposed := func() planner.Topology {
+		topology := declaredTopology()
+		for i := range topology.Coordinators {
+			topology.Coordinators[i] = exposedCoordinator(int32(i))
+		}
+		topology.DataInstances[0] = exposedDataInstance(0)
+		return topology
+	}
+	converged := func() []memgraph.Instance {
+		return []memgraph.Instance{
+			observedCoordinator(0, memgraph.RoleLeader),
+			observedCoordinator(1, memgraph.RoleFollower),
+			observedCoordinator(2, memgraph.RoleFollower),
+			observedDataInstance(0, memgraph.RoleMain),
+			observedDataInstance(1, memgraph.RoleReplica),
+		}
+	}
+	announcedExternally := func() []memgraph.Instance {
+		view := converged()
+		for i := range 3 {
+			view[i].BoltServer = coordinatorsAddress
+		}
+		view[3].BoltServer = dataAddress
+		return view
+	}
+
+	cases := []struct {
+		name     string
+		declared planner.Topology
+		observed []memgraph.Instance
+		want     []planner.Command
+	}{
+		{
+			name:     "members announced at their pod addresses are moved to the external ones that are known",
+			declared: exposed(),
+			observed: converged(),
+			want: []planner.Command{
+				planner.UpdateCoordinatorBoltServer{Coordinator: exposedCoordinator(0)},
+				planner.UpdateCoordinatorBoltServer{Coordinator: exposedCoordinator(1)},
+				planner.UpdateCoordinatorBoltServer{Coordinator: exposedCoordinator(2)},
+				planner.UpdateInstanceBoltServer{Instance: exposedDataInstance(0)},
+			},
+		},
+		{
+			name:     "members already announced at the declared addresses are left alone",
+			declared: exposed(),
+			observed: announcedExternally(),
+			want:     nil,
+		},
+		{
+			name:     "an unexposed cluster moves externally announced members back to their pod addresses",
+			declared: declaredTopology(),
+			observed: announcedExternally(),
+			want: []planner.Command{
+				planner.UpdateCoordinatorBoltServer{Coordinator: coordinatorSpec(0)},
+				planner.UpdateCoordinatorBoltServer{Coordinator: coordinatorSpec(1)},
+				planner.UpdateCoordinatorBoltServer{Coordinator: coordinatorSpec(2)},
+				planner.UpdateInstanceBoltServer{Instance: dataInstanceSpec(0)},
+			},
+		},
+		{
+			name:     "a missing registration is issued at the declared address, with no update behind it",
+			declared: exposed(),
+			observed: announcedExternally()[:4],
+			want: []planner.Command{
+				planner.RegisterInstance{Instance: dataInstanceSpec(1)},
+			},
+		},
+		{
+			name:     "a view that reports no bolt addresses re-announces nothing",
+			declared: exposed(),
+			observed: func() []memgraph.Instance {
+				view := announcedExternally()
+				// Coordinators with an empty bolt_server read as unregistered and
+				// are added instead; only the data instances exercise this rule.
+				view[3].BoltServer, view[4].BoltServer = "", ""
+				return view
+			}(),
+			want: nil,
+		},
+		{
+			name: "a retiring instance keeps the address it was registered with",
+			declared: func() planner.Topology {
+				topology := shrunkTopology(1, 2)
+				topology.DataInstances[0] = exposedDataInstance(0)
+				return topology
+			}(),
+			observed: func() []memgraph.Instance {
+				view := converged()
+				view[3].BoltServer = dataAddress
+				return view
+			}(),
+			want: []planner.Command{
+				planner.UnregisterInstance{Name: secondInstance},
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := planner.Plan(tc.declared, tc.observed, nil)
+			if diff := cmp.Diff(tc.want, got); diff != "" {
+				t.Errorf("Plan() mismatch (-want +got):\n%s", diff)
+			}
+		})
 	}
 }

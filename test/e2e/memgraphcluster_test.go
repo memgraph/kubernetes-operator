@@ -1143,9 +1143,10 @@ func applyMemgraphCluster() {
 
 // instanceRow is one parsed row of SHOW INSTANCES.
 type instanceRow struct {
-	name   string
-	health string
-	role   string
+	name       string
+	boltServer string
+	health     string
+	role       string
 }
 
 // leaderView returns the coordinator leader's SHOW INSTANCES view, the
@@ -1318,7 +1319,7 @@ func parseInstances(output string) ([]instanceRow, error) {
 	for i, column := range records[0] {
 		columns[strings.TrimSpace(column)] = i
 	}
-	for _, column := range []string{"name", "health", "role"} {
+	for _, column := range []string{"name", "bolt_server", "health", "role"} {
 		if _, ok := columns[column]; !ok {
 			return nil, fmt.Errorf("SHOW INSTANCES output has no %q column: %q", column, records[0])
 		}
@@ -1327,9 +1328,10 @@ func parseInstances(output string) ([]instanceRow, error) {
 	instances := make([]instanceRow, 0, len(records)-1)
 	for _, record := range records[1:] {
 		instances = append(instances, instanceRow{
-			name:   unquoteCell(record[columns["name"]]),
-			health: unquoteCell(record[columns["health"]]),
-			role:   unquoteCell(record[columns["role"]]),
+			name:       unquoteCell(record[columns["name"]]),
+			boltServer: unquoteCell(record[columns["bolt_server"]]),
+			health:     unquoteCell(record[columns["health"]]),
+			role:       unquoteCell(record[columns["role"]]),
 		})
 	}
 	return instances, nil

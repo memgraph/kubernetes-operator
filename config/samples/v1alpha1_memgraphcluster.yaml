@@ -245,3 +245,30 @@ spec:
       # - name: bolt-certs
       #   mountPath: /etc/memgraph/ssl
       #   readOnly: true
+  # Reach the cluster from outside Kubernetes. Clients outside need two things:
+  # a way in, and a routing table whose addresses they can reach — the
+  # coordinators hand every client the bolt address each instance was registered
+  # with. The operator owns both: with type LoadBalancer it creates one Service
+  # of type LoadBalancer shared by all coordinators and one per data instance,
+  # and registers every instance at the address its LoadBalancer acquires — the
+  # external-dns hostname annotation when one is set, otherwise the hostname or
+  # IP the cloud reports — moving it with UPDATE CONFIG as that address appears
+  # or changes. Until an address exists the instance is announced at its pod
+  # address and Converged reports ExternalAddressPending. Removing the block
+  # deletes the Services and reverts every registered address to the pod's.
+  #
+  # Every data instance has its own LoadBalancer, so a data hostname must carry
+  # {ordinal}, which becomes the pod ordinal on each Service; the coordinators
+  # share one LoadBalancer and one hostname. status.externalAccess reports what
+  # the cluster is announced at. Commented out because a LoadBalancer costs
+  # money on every cloud.
+  # externalAccess:
+  #   type: LoadBalancer
+  #   coordinators:
+  #     labels: {}
+  #     annotations:
+  #       external-dns.alpha.kubernetes.io/hostname: memgraph.example.com
+  #   data:
+  #     labels: {}
+  #     annotations:
+  #       external-dns.alpha.kubernetes.io/hostname: data-{ordinal}.memgraph.example.com

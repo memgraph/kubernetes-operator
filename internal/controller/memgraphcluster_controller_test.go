@@ -36,6 +36,7 @@ import (
 
 	memgraphcomv1alpha1 "github.com/memgraph/kubernetes-operator/api/v1alpha1"
 	"github.com/memgraph/kubernetes-operator/internal/memgraph"
+	"github.com/memgraph/kubernetes-operator/internal/resources"
 )
 
 // Name suffixes of the per-role workload objects a reconcile creates.
@@ -1727,6 +1728,310 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			Expect(podExists(dataSuffix, 1)).To(BeTrue())
 			Expect(podExists(coordinatorSuffix, 2)).To(BeTrue())
 			Expect(fake.executedCommands()).To(ContainElement(ContainSubstring("REGISTER INSTANCE instance_1")))
+		})
+	})
+
+	Context("when exposing the cluster outside Kubernetes", func() {
+		const resourceName = "mgc-external"
+
+		const (
+			coordinatorsAddress = "203.0.113.10"
+			firstDataAddress    = "203.0.113.11"
+			secondDataAddress   = "203.0.113.12"
+			thirdDataAddress    = "203.0.113.13"
+			coordinatorsService = resourceName + coordinatorSuffix + "-external"
+
+			firstInstance  = "instance_0"
+			secondInstance = "instance_1"
+		)
+		dataService := func(ordinal int) string {
+			return fmt.Sprintf("%s%s-%d-external", resourceName, dataSuffix, ordinal)
+		}
+		podAddress := func(suffix string, ordinal int) string {
+			return fmt.Sprintf("%s%s-%d.%s%s.%s.svc.cluster.local:%d",
+				resourceName, suffix, ordinal, resourceName, suffix, resourceNamespace, memgraphcomv1alpha1.BoltPort)
+		}
+		bolt := func(host string) string {
+			return fmt.Sprintf("%s:%d", host, memgraphcomv1alpha1.BoltPort)
+		}
+
+		// giveAddress plays the cloud controller envtest does not run: it reports
+		// the named LoadBalancer Service as reachable at the given address.
+		giveAddress := func(service string, ingress corev1.LoadBalancerIngress) {
+			GinkgoHelper()
+			svc := &corev1.Service{}
+			get(service, svc)
+			svc.Status.LoadBalancer.Ingress = []corev1.LoadBalancerIngress{ingress}
+			Expect(k8sClient.Status().Update(ctx, svc)).To(Succeed())
+		}
+		giveIP := func(service, ip string) {
+			GinkgoHelper()
+			giveAddress(service, corev1.LoadBalancerIngress{IP: ip})
+		}
+
+		externalServices := func() []corev1.Service {
+			GinkgoHelper()
+			cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+			get(resourceName, cluster)
+			var services corev1.ServiceList
+			Expect(k8sClient.List(ctx, &services, client.InNamespace(resourceNamespace),
+				client.MatchingLabels(resources.ExternalServicesSelector(cluster)))).To(Succeed())
+			return services.Items
+		}
+		externalServiceNames := func() []string {
+			GinkgoHelper()
+			services := externalServices()
+			names := make([]string, 0, len(services))
+			for _, service := range services {
+				names = append(names, service.Name)
+			}
+			return names
+		}
+
+		// announced is the bolt address the fake cluster currently has the named
+		// member registered at.
+		announced := func(name string) string {
+			GinkgoHelper()
+			for _, instance := range fake.view() {
+				if instance.Name == name {
+					return instance.BoltServer
+				}
+			}
+			Fail("instance " + name + " is not registered")
+			return ""
+		}
+
+		status := func() memgraphcomv1alpha1.MemgraphClusterStatus {
+			GinkgoHelper()
+			cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+			get(resourceName, cluster)
+			return cluster.Status
+		}
+		convergedCondition := func() *metav1.Condition {
+			GinkgoHelper()
+			return apimeta.FindStatusCondition(status().Conditions, memgraphcomv1alpha1.ConditionConverged)
+		}
+
+		updateSpec := func(mutate func(*memgraphcomv1alpha1.MemgraphClusterSpec)) {
+			GinkgoHelper()
+			cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+			get(resourceName, cluster)
+			mutate(&cluster.Spec)
+			Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
+		}
+
+		// bootstrapped drives the exposed cluster to fully registered: one pass
+		// provisions, one registers once the pods are ready, one observes the
+		// result. What the members are announced at depends on whether the
+		// LoadBalancers had addresses by the registration pass.
+		bootstrapped := func() {
+			GinkgoHelper()
+			reconcileCluster(resourceName)
+			markWorkloadsReady(resourceName)
+			reconcileCluster(resourceName)
+			reconcileCluster(resourceName)
+		}
+
+		// addressed gives every LoadBalancer its address before the cluster is
+		// bootstrapped, which is the common case: a LoadBalancer is provisioned in
+		// seconds, a Memgraph pod takes longer to become ready.
+		addressed := func() {
+			GinkgoHelper()
+			reconcileCluster(resourceName)
+			giveIP(coordinatorsService, coordinatorsAddress)
+			giveIP(dataService(0), firstDataAddress)
+			giveIP(dataService(1), secondDataAddress)
+			bootstrapped()
+		}
+
+		BeforeEach(func() {
+			resource := &memgraphcomv1alpha1.MemgraphCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: resourceNamespace},
+				Spec: memgraphcomv1alpha1.MemgraphClusterSpec{
+					ExternalAccess: &memgraphcomv1alpha1.ExternalAccessSpec{
+						Type: memgraphcomv1alpha1.ExternalAccessLoadBalancer,
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+		})
+
+		AfterEach(func() {
+			// envtest runs no garbage collector, so the external Services the
+			// cluster owns are removed by hand along with the workloads.
+			for _, service := range externalServices() {
+				Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, &service))).To(Succeed())
+			}
+			cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+			get(resourceName, cluster)
+			Expect(k8sClient.Delete(ctx, cluster)).To(Succeed())
+			deleteOwned(resourceName)
+		})
+
+		It("should provision one shared coordinators LoadBalancer and one per data instance", func() {
+			reconcileCluster(resourceName)
+
+			Expect(externalServiceNames()).To(ConsistOf(coordinatorsService, dataService(0), dataService(1)))
+			cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+			get(resourceName, cluster)
+			for _, service := range externalServices() {
+				Expect(service.Spec.Type).To(Equal(corev1.ServiceTypeLoadBalancer))
+				Expect(service.Spec.Ports).To(HaveLen(1), "only the bolt port leaves the cluster")
+				Expect(service.Spec.Ports[0].Port).To(Equal(memgraphcomv1alpha1.BoltPort))
+				expectControlledBy(&service, cluster)
+			}
+
+			data := &corev1.Service{}
+			get(dataService(1), data)
+			Expect(data.Spec.Selector).To(HaveKeyWithValue(appsv1.StatefulSetPodNameLabel, resourceName+dataSuffix+"-1"),
+				"a data LoadBalancer fronts exactly one pod")
+			coordinators := &corev1.Service{}
+			get(coordinatorsService, coordinators)
+			Expect(coordinators.Spec.Selector).NotTo(HaveKey(appsv1.StatefulSetPodNameLabel),
+				"the coordinators' LoadBalancer fronts every coordinator")
+		})
+
+		It("should register at pod addresses while the LoadBalancers have none, and report the wait", func() {
+			bootstrapped()
+
+			for _, name := range []string{"coordinator_0", "coordinator_1", "coordinator_2"} {
+				Expect(announced(name)).To(HavePrefix(resourceName + coordinatorSuffix + "-"))
+			}
+			Expect(announced(firstInstance)).To(Equal(podAddress(dataSuffix, 0)))
+			Expect(announced(secondInstance)).To(Equal(podAddress(dataSuffix, 1)))
+
+			s := status()
+			Expect(apimeta.IsStatusConditionTrue(s.Conditions, memgraphcomv1alpha1.ConditionReady)).To(BeTrue(),
+				"in-cluster clients are served while the LoadBalancers are provisioned")
+			converged := convergedCondition()
+			Expect(converged).NotTo(BeNil())
+			Expect(converged.Status).To(Equal(metav1.ConditionFalse))
+			Expect(converged.Reason).To(Equal(memgraphcomv1alpha1.ReasonExternalAddressPending))
+			for _, service := range []string{coordinatorsService, dataService(0), dataService(1)} {
+				Expect(converged.Message).To(ContainSubstring(service))
+			}
+			Expect(s.ExternalAccess).NotTo(BeNil())
+			Expect(s.ExternalAccess.Coordinators).To(BeEmpty())
+			Expect(s.ExternalAccess.Data).To(Equal([]memgraphcomv1alpha1.ExternalAddress{
+				{Name: firstInstance}, {Name: secondInstance},
+			}))
+		})
+
+		It("should move the announced addresses onto the LoadBalancers' as they get them", func() {
+			bootstrapped()
+			baseline := len(fake.executedCommands())
+
+			giveIP(coordinatorsService, coordinatorsAddress)
+			giveIP(dataService(0), firstDataAddress)
+			reconcileCluster(resourceName)
+
+			leader := podAddress(coordinatorSuffix, 0)
+			Expect(fake.executedCommands()[baseline:]).To(Equal([]string{
+				leader + ": UPDATE CONFIG FOR COORDINATOR 0 bolt_server=" + bolt(coordinatorsAddress),
+				leader + ": UPDATE CONFIG FOR COORDINATOR 1 bolt_server=" + bolt(coordinatorsAddress),
+				leader + ": UPDATE CONFIG FOR COORDINATOR 2 bolt_server=" + bolt(coordinatorsAddress),
+				leader + ": UPDATE CONFIG FOR INSTANCE instance_0 bolt_server=" + bolt(firstDataAddress),
+			}))
+			reconcileCluster(resourceName)
+			converged := convergedCondition()
+			Expect(converged.Status).To(Equal(metav1.ConditionFalse))
+			Expect(converged.Reason).To(Equal(memgraphcomv1alpha1.ReasonExternalAddressPending))
+			Expect(converged.Message).To(ContainSubstring(dataService(1)))
+			Expect(converged.Message).NotTo(ContainSubstring(dataService(0)))
+
+			giveAddress(dataService(1), corev1.LoadBalancerIngress{IP: secondDataAddress, Hostname: "b.elb.example.com"})
+			reconcileCluster(resourceName)
+			reconcileCluster(resourceName)
+
+			Expect(announced(secondInstance)).To(Equal(bolt("b.elb.example.com")),
+				"a reported hostname is announced over a reported IP")
+			Expect(apimeta.IsStatusConditionTrue(status().Conditions, memgraphcomv1alpha1.ConditionConverged)).To(BeTrue())
+			Expect(status().ExternalAccess).To(Equal(&memgraphcomv1alpha1.ExternalAccessStatus{
+				Coordinators: bolt(coordinatorsAddress),
+				Data: []memgraphcomv1alpha1.ExternalAddress{
+					{Name: firstInstance, Address: bolt(firstDataAddress)},
+					{Name: secondInstance, Address: bolt("b.elb.example.com")},
+				},
+			}))
+		})
+
+		It("should announce the external-dns hostname over whatever the LoadBalancer reports", func() {
+			updateSpec(func(spec *memgraphcomv1alpha1.MemgraphClusterSpec) {
+				spec.ExternalAccess.Coordinators.Annotations = map[string]string{externalDNSAnnotation: "memgraph.example.com"}
+				spec.ExternalAccess.Data.Annotations = map[string]string{
+					externalDNSAnnotation: "data-{ordinal}.memgraph.example.com",
+				}
+			})
+			addressed()
+
+			data := &corev1.Service{}
+			get(dataService(1), data)
+			Expect(data.Annotations).To(HaveKeyWithValue(externalDNSAnnotation, "data-1.memgraph.example.com"),
+				"the ordinal is substituted into the per-instance annotation")
+
+			Expect(announced("coordinator_1")).To(Equal(bolt("memgraph.example.com")))
+			Expect(announced(firstInstance)).To(Equal(bolt("data-0.memgraph.example.com")))
+			Expect(announced(secondInstance)).To(Equal(bolt("data-1.memgraph.example.com")))
+			Expect(fake.executedCommands()).NotTo(ContainElement(ContainSubstring("UPDATE CONFIG")),
+				"a member whose address is known when it is registered needs no update")
+			Expect(apimeta.IsStatusConditionTrue(status().Conditions, memgraphcomv1alpha1.ConditionConverged)).To(BeTrue())
+		})
+
+		It("should register a grown data instance at its external address and drop the Service of a retired one", func() {
+			addressed()
+			Expect(apimeta.IsStatusConditionTrue(status().Conditions, memgraphcomv1alpha1.ConditionConverged)).To(BeTrue())
+
+			updateSpec(func(spec *memgraphcomv1alpha1.MemgraphClusterSpec) { spec.DataInstances = ptr.To(int32(3)) })
+			// The widening pass creates the new instance's Service ahead of its pod.
+			reconcileCluster(resourceName)
+			Expect(externalServiceNames()).To(ContainElement(dataService(2)))
+			giveIP(dataService(2), thirdDataAddress)
+			markWorkloadsReady(resourceName)
+			reconcileCluster(resourceName)
+			Expect(announced("instance_2")).To(Equal(bolt(thirdDataAddress)))
+			Expect(fake.executedCommands()).NotTo(ContainElement(ContainSubstring("UPDATE CONFIG")))
+
+			updateSpec(func(spec *memgraphcomv1alpha1.MemgraphClusterSpec) { spec.DataInstances = ptr.To(int32(2)) })
+			// Unregister, then shed the pod, then the pass that sees the shrunk
+			// StatefulSet drops the Service: the instance keeps its LoadBalancer for
+			// as long as it keeps its pod.
+			reconcileCluster(resourceName)
+			Expect(externalServiceNames()).To(ContainElement(dataService(2)))
+			reconcileCluster(resourceName)
+			markWorkloadsReady(resourceName)
+			reconcileCluster(resourceName)
+			Expect(externalServiceNames()).To(ConsistOf(coordinatorsService, dataService(0), dataService(1)))
+			Expect(status().ExternalAccess.Data).To(HaveLen(2))
+		})
+
+		It("should take the LoadBalancers away and re-announce pod addresses when the block is removed", func() {
+			addressed()
+			baseline := len(fake.executedCommands())
+
+			updateSpec(func(spec *memgraphcomv1alpha1.MemgraphClusterSpec) { spec.ExternalAccess = nil })
+			reconcileCluster(resourceName)
+
+			Expect(externalServiceNames()).To(BeEmpty())
+			leader := podAddress(coordinatorSuffix, 0)
+			Expect(fake.executedCommands()[baseline:]).To(Equal([]string{
+				leader + ": UPDATE CONFIG FOR COORDINATOR 0 bolt_server=" + podAddress(coordinatorSuffix, 0),
+				leader + ": UPDATE CONFIG FOR COORDINATOR 1 bolt_server=" + podAddress(coordinatorSuffix, 1),
+				leader + ": UPDATE CONFIG FOR COORDINATOR 2 bolt_server=" + podAddress(coordinatorSuffix, 2),
+				leader + ": UPDATE CONFIG FOR INSTANCE instance_0 bolt_server=" + podAddress(dataSuffix, 0),
+				leader + ": UPDATE CONFIG FOR INSTANCE instance_1 bolt_server=" + podAddress(dataSuffix, 1),
+			}))
+			reconcileCluster(resourceName)
+			Expect(status().ExternalAccess).To(BeNil())
+			Expect(apimeta.IsStatusConditionTrue(status().Conditions, memgraphcomv1alpha1.ConditionConverged)).To(BeTrue())
+		})
+
+		It("should keep talking to the coordinators over their pod addresses", func() {
+			addressed()
+
+			for _, command := range fake.executedCommands() {
+				Expect(command).To(HavePrefix(podAddress(coordinatorSuffix, 0)+": "),
+					"the operator must never go through the coordinators' LoadBalancer itself")
+			}
 		})
 	})
 })

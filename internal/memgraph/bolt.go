@@ -88,6 +88,16 @@ func (c *boltClient) RegisterInstance(ctx context.Context, instance DataInstance
 	return err
 }
 
+func (c *boltClient) UpdateCoordinatorBoltServer(ctx context.Context, id int32, boltServer string) error {
+	_, err := c.run(ctx, updateCoordinatorBoltServerQuery(id, boltServer))
+	return err
+}
+
+func (c *boltClient) UpdateInstanceBoltServer(ctx context.Context, name, boltServer string) error {
+	_, err := c.run(ctx, updateInstanceBoltServerQuery(name, boltServer))
+	return err
+}
+
 func (c *boltClient) SetInstanceToMain(ctx context.Context, name string) error {
 	_, err := c.run(ctx, setInstanceToMainQuery(name))
 	return err
