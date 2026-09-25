@@ -872,77 +872,23 @@ spec:
                     type: object
                 type: object
               probes:
-                description: probes tunes the probe timings of both roles.
+                description: probes tunes the readiness probe timings of both roles.
                 properties:
                   coordinators:
-                    description: coordinators tunes the probes of every coordinator
+                    description: coordinators tunes the readiness probe of every coordinator
                       pod.
                     properties:
-                      livenessProbe:
-                        description: livenessProbe decides whether the container is
-                          restarted.
-                        properties:
-                          failureThreshold:
-                            description: |-
-                              failureThreshold is how many consecutive failures the probe tolerates
-                              before acting. Defaults to 1440 for the data instances' startup probe —
-                              2h at the default period, so a large snapshot restore is not killed
-                              mid-load — and to 20 for every other probe.
-                            format: int32
-                            minimum: 1
-                            type: integer
-                          periodSeconds:
-                            description: periodSeconds is how often the probe runs.
-                              Defaults to 5.
-                            format: int32
-                            minimum: 1
-                            type: integer
-                          timeoutSeconds:
-                            description: |-
-                              timeoutSeconds is how long a single probe attempt may take. Defaults to
-                              10.
-                            format: int32
-                            minimum: 1
-                            type: integer
-                        type: object
                       readinessProbe:
                         description: |-
                           readinessProbe decides whether the pod receives traffic and whether the
-                          operator considers the workloads ready to register.
+                          operator considers the workloads ready to register. Until it first
+                          succeeds — which for a data instance is after every database has been
+                          recovered — the pod is unready and nothing more.
                         properties:
                           failureThreshold:
                             description: |-
                               failureThreshold is how many consecutive failures the probe tolerates
-                              before acting. Defaults to 1440 for the data instances' startup probe —
-                              2h at the default period, so a large snapshot restore is not killed
-                              mid-load — and to 20 for every other probe.
-                            format: int32
-                            minimum: 1
-                            type: integer
-                          periodSeconds:
-                            description: periodSeconds is how often the probe runs.
-                              Defaults to 5.
-                            format: int32
-                            minimum: 1
-                            type: integer
-                          timeoutSeconds:
-                            description: |-
-                              timeoutSeconds is how long a single probe attempt may take. Defaults to
-                              10.
-                            format: int32
-                            minimum: 1
-                            type: integer
-                        type: object
-                      startupProbe:
-                        description: startupProbe gates the other two probes until
-                          the instance has started.
-                        properties:
-                          failureThreshold:
-                            description: |-
-                              failureThreshold is how many consecutive failures the probe tolerates
-                              before acting. Defaults to 1440 for the data instances' startup probe —
-                              2h at the default period, so a large snapshot restore is not killed
-                              mid-load — and to 20 for every other probe.
+                              before acting. Defaults to 20.
                             format: int32
                             minimum: 1
                             type: integer
@@ -962,73 +908,20 @@ spec:
                         type: object
                     type: object
                   data:
-                    description: data tunes the probes of every data instance pod.
+                    description: data tunes the readiness probe of every data instance
+                      pod.
                     properties:
-                      livenessProbe:
-                        description: livenessProbe decides whether the container is
-                          restarted.
-                        properties:
-                          failureThreshold:
-                            description: |-
-                              failureThreshold is how many consecutive failures the probe tolerates
-                              before acting. Defaults to 1440 for the data instances' startup probe —
-                              2h at the default period, so a large snapshot restore is not killed
-                              mid-load — and to 20 for every other probe.
-                            format: int32
-                            minimum: 1
-                            type: integer
-                          periodSeconds:
-                            description: periodSeconds is how often the probe runs.
-                              Defaults to 5.
-                            format: int32
-                            minimum: 1
-                            type: integer
-                          timeoutSeconds:
-                            description: |-
-                              timeoutSeconds is how long a single probe attempt may take. Defaults to
-                              10.
-                            format: int32
-                            minimum: 1
-                            type: integer
-                        type: object
                       readinessProbe:
                         description: |-
                           readinessProbe decides whether the pod receives traffic and whether the
-                          operator considers the workloads ready to register.
+                          operator considers the workloads ready to register. Until it first
+                          succeeds — which for a data instance is after every database has been
+                          recovered — the pod is unready and nothing more.
                         properties:
                           failureThreshold:
                             description: |-
                               failureThreshold is how many consecutive failures the probe tolerates
-                              before acting. Defaults to 1440 for the data instances' startup probe —
-                              2h at the default period, so a large snapshot restore is not killed
-                              mid-load — and to 20 for every other probe.
-                            format: int32
-                            minimum: 1
-                            type: integer
-                          periodSeconds:
-                            description: periodSeconds is how often the probe runs.
-                              Defaults to 5.
-                            format: int32
-                            minimum: 1
-                            type: integer
-                          timeoutSeconds:
-                            description: |-
-                              timeoutSeconds is how long a single probe attempt may take. Defaults to
-                              10.
-                            format: int32
-                            minimum: 1
-                            type: integer
-                        type: object
-                      startupProbe:
-                        description: startupProbe gates the other two probes until
-                          the instance has started.
-                        properties:
-                          failureThreshold:
-                            description: |-
-                              failureThreshold is how many consecutive failures the probe tolerates
-                              before acting. Defaults to 1440 for the data instances' startup probe —
-                              2h at the default period, so a large snapshot restore is not killed
-                              mid-load — and to 20 for every other probe.
+                              before acting. Defaults to 20.
                             format: int32
                             minimum: 1
                             type: integer

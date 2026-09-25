@@ -225,7 +225,7 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 				ClusterDomain: "k8s.example.com",
 				Probes: memgraphcomv1alpha1.ProbesSpec{
 					Data: memgraphcomv1alpha1.RoleProbesSpec{
-						StartupProbe: memgraphcomv1alpha1.ProbeSpec{FailureThreshold: ptr.To(int32(4320))},
+						ReadinessProbe: memgraphcomv1alpha1.ProbeSpec{FailureThreshold: ptr.To(int32(6))},
 					},
 				},
 				Resources: memgraphcomv1alpha1.ResourcesSpec{
@@ -248,8 +248,8 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 			})
 
 			Expect(stored.Spec.ClusterDomain).To(Equal("k8s.example.com"))
-			Expect(stored.Spec.Probes.Data.StartupProbe.FailureThreshold).To(HaveValue(Equal(int32(4320))))
-			Expect(stored.Spec.Probes.Data.ReadinessProbe).To(Equal(memgraphcomv1alpha1.ProbeSpec{}),
+			Expect(stored.Spec.Probes.Data.ReadinessProbe.FailureThreshold).To(HaveValue(Equal(int32(6))))
+			Expect(stored.Spec.Probes.Coordinators.ReadinessProbe).To(Equal(memgraphcomv1alpha1.ProbeSpec{}),
 				"an unset probe stays unset; its defaults are resolved by the builders, not the schema")
 			Expect(stored.Spec.ExtraEnv.Data).To(HaveLen(1))
 			Expect(stored.Spec.ExtraArgs.Data).To(ConsistOf(

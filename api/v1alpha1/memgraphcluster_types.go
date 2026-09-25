@@ -61,23 +61,13 @@ const (
 	CoordinatorPort int32 = 12000
 )
 
-// Probe timing defaults. Unlike the other defaults these are Go constants only:
-// a CRD schema default is per-field, and the data instances' startup budget
-// deliberately differs from every other probe's, which one shared schema
-// default cannot express. The doc comments on ProbeSpec name them.
+// Readiness probe timing defaults, Go constants mirrored by the doc comments
+// on ProbeSpec. A readiness probe that has not succeeded yet only keeps the pod
+// unready, so the failure threshold is not a budget anything has to fit in.
 const (
-	// DefaultProbeFailureThreshold is the failure budget of every probe except
-	// the data instances' startup probe.
 	DefaultProbeFailureThreshold int32 = 20
-
-	// DefaultDataStartupProbeFailureThreshold gives data instances a generous
-	// startup budget so a large snapshot restore is not killed mid-load: 1440
-	// failures at the default 5s period is 2h, mirroring the
-	// memgraph-high-availability Helm chart's default.
-	DefaultDataStartupProbeFailureThreshold int32 = 1440
-
-	DefaultProbeTimeoutSeconds int32 = 10
-	DefaultProbePeriodSeconds  int32 = 5
+	DefaultProbeTimeoutSeconds   int32 = 10
+	DefaultProbePeriodSeconds    int32 = 5
 )
 
 // Names of the environment variables the operator itself sets on the Memgraph
@@ -580,16 +570,14 @@ type CoreDumpsSpec struct {
 }
 
 // ProbeSpec tunes the timings of one probe. The probe type itself is not
-// configurable: every probe is a TCP-socket check against the role's own port
+// configurable: the probe is a TCP-socket check against the role's own port
 // (the coordinator port for coordinators, the Bolt port for data instances),
 // which is the memgraph-high-availability Helm chart's established convention.
 //
 // Every field defaults to the value named in its doc comment.
 type ProbeSpec struct {
 	// failureThreshold is how many consecutive failures the probe tolerates
-	// before acting. Defaults to 1440 for the data instances' startup probe —
-	// 2h at the default period, so a large snapshot restore is not killed
-	// mid-load — and to 20 for every other probe.
+	// before acting. Defaults to 20.
 	// +kubebuilder:validation:Minimum=1
 	// +optional
 	FailureThreshold *int32 `json:"failureThreshold,omitempty"`
@@ -606,29 +594,37 @@ type ProbeSpec struct {
 	PeriodSeconds *int32 `json:"periodSeconds,omitempty"`
 }
 
-// RoleProbesSpec tunes all three probes of one role.
+// RoleProbesSpec tunes the one probe a role's pods carry: readiness.
+//
+// There is deliberately no liveness and no startup probe. Memgraph recovers its
+// databases before it opens any port, so during recovery nothing distinguishes
+// an instance that is loading a large snapshot from one that is hung, and a
+// TCP-socket liveness check can only kill the former — the only budget it can
+// be given is a guess that grows with the dataset. A recovery longer than the
+// guess then never finishes, because every kill starts it over. What the
+// liveness check could catch, a Bolt listener that went away, already ends the
+// container by itself: the process is gone. With no liveness there is nothing
+// for a startup probe to hold off, and readiness alone gives the right
+// behaviour for free: a recovering pod is unready, receives no traffic and is
+// waited on by the operator, and it is restarted by nothing but its own exit.
+// Restarts of a running instance belong to the operator's rolling restart,
+// which knows the cluster's state, not to the kubelet, which does not.
 type RoleProbesSpec struct {
-	// startupProbe gates the other two probes until the instance has started.
-	// +optional
-	StartupProbe ProbeSpec `json:"startupProbe,omitzero"`
-
 	// readinessProbe decides whether the pod receives traffic and whether the
-	// operator considers the workloads ready to register.
+	// operator considers the workloads ready to register. Until it first
+	// succeeds — which for a data instance is after every database has been
+	// recovered — the pod is unready and nothing more.
 	// +optional
 	ReadinessProbe ProbeSpec `json:"readinessProbe,omitzero"`
-
-	// livenessProbe decides whether the container is restarted.
-	// +optional
-	LivenessProbe ProbeSpec `json:"livenessProbe,omitzero"`
 }
 
-// ProbesSpec tunes probe timings per role.
+// ProbesSpec tunes readiness probe timings per role.
 type ProbesSpec struct {
-	// coordinators tunes the probes of every coordinator pod.
+	// coordinators tunes the readiness probe of every coordinator pod.
 	// +optional
 	Coordinators RoleProbesSpec `json:"coordinators,omitzero"`
 
-	// data tunes the probes of every data instance pod.
+	// data tunes the readiness probe of every data instance pod.
 	// +optional
 	Data RoleProbesSpec `json:"data,omitzero"`
 }
@@ -1008,7 +1004,7 @@ type MemgraphClusterSpec struct {
 	// +optional
 	ClusterDomain string `json:"clusterDomain,omitempty"`
 
-	// probes tunes the probe timings of both roles.
+	// probes tunes the readiness probe timings of both roles.
 	// +optional
 	Probes ProbesSpec `json:"probes,omitzero"`
 

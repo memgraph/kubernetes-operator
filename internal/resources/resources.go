@@ -109,7 +109,7 @@ func selectorLabels(cluster *memgraphcomv1alpha1.MemgraphCluster, component stri
 // normalizedSpec is a MemgraphClusterSpec with every optional field resolved
 // to its default, so builders behave correctly on specs that never passed
 // admission. Most defaults are CRD schema defaults mirrored as Go constants;
-// the probe failure thresholds are Go-only, because they depend on the role.
+// the readiness probe timings are Go-only.
 type normalizedSpec struct {
 	coordinators    int32
 	dataInstances   int32
@@ -154,9 +154,7 @@ type normalizedExternalRole struct {
 type normalizedRole struct {
 	storage           normalizedStorage
 	coreDumps         normalizedCoreDumps
-	startupProbe      normalizedProbe
 	readinessProbe    normalizedProbe
-	livenessProbe     normalizedProbe
 	resources         corev1.ResourceRequirements
 	podLabels         map[string]string
 	statefulSetLabels map[string]string
@@ -224,8 +222,6 @@ func normalize(spec memgraphcomv1alpha1.MemgraphClusterSpec) normalizedSpec {
 			extraArgs:    spec.ExtraArgs.Coordinators,
 			extraVolumes: spec.ExtraVolumes.Coordinators,
 			extraMounts:  spec.ExtraVolumeMounts.Coordinators,
-
-			startupFailureThreshold: memgraphcomv1alpha1.DefaultProbeFailureThreshold,
 		}),
 		dataRole: normalizeRole(roleSpec{
 			storage:      spec.Storage.Data,
@@ -237,10 +233,6 @@ func normalize(spec memgraphcomv1alpha1.MemgraphClusterSpec) normalizedSpec {
 			extraArgs:    spec.ExtraArgs.Data,
 			extraVolumes: spec.ExtraVolumes.Data,
 			extraMounts:  spec.ExtraVolumeMounts.Data,
-
-			// Data instances get the long startup budget: only they load
-			// snapshots, and a large restore must not be killed mid-load.
-			startupFailureThreshold: memgraphcomv1alpha1.DefaultDataStartupProbeFailureThreshold,
 		}),
 	}
 	if spec.ExternalAccess != nil {
@@ -309,19 +301,13 @@ type roleSpec struct {
 	extraArgs    []string
 	extraVolumes []corev1.Volume
 	extraMounts  []corev1.VolumeMount
-
-	// startupFailureThreshold is this role's default startup probe failure
-	// budget — the one default that differs between the roles.
-	startupFailureThreshold int32
 }
 
 func normalizeRole(role roleSpec) normalizedRole {
 	return normalizedRole{
 		storage:           normalizeStorage(role.storage),
 		coreDumps:         role.coreDumps,
-		startupProbe:      normalizeProbe(role.probes.StartupProbe, role.startupFailureThreshold),
-		readinessProbe:    normalizeProbe(role.probes.ReadinessProbe, memgraphcomv1alpha1.DefaultProbeFailureThreshold),
-		livenessProbe:     normalizeProbe(role.probes.LivenessProbe, memgraphcomv1alpha1.DefaultProbeFailureThreshold),
+		readinessProbe:    normalizeProbe(role.probes.ReadinessProbe),
 		resources:         role.resources,
 		podLabels:         role.labels.PodLabels,
 		statefulSetLabels: role.labels.StatefulSetLabels,
@@ -341,12 +327,10 @@ func intOrDefault(configured *int32, fallback int32) int32 {
 	return *configured
 }
 
-// normalizeProbe resolves one probe's timings. Only the failure threshold's
-// default depends on the role — the probe that guards a snapshot restore needs
-// a far larger budget than the rest.
-func normalizeProbe(spec memgraphcomv1alpha1.ProbeSpec, defaultFailureThreshold int32) normalizedProbe {
+// normalizeProbe resolves one probe's timings against their defaults.
+func normalizeProbe(spec memgraphcomv1alpha1.ProbeSpec) normalizedProbe {
 	return normalizedProbe{
-		failureThreshold: intOrDefault(spec.FailureThreshold, defaultFailureThreshold),
+		failureThreshold: intOrDefault(spec.FailureThreshold, memgraphcomv1alpha1.DefaultProbeFailureThreshold),
 		timeoutSeconds:   intOrDefault(spec.TimeoutSeconds, memgraphcomv1alpha1.DefaultProbeTimeoutSeconds),
 		periodSeconds:    intOrDefault(spec.PeriodSeconds, memgraphcomv1alpha1.DefaultProbePeriodSeconds),
 	}
