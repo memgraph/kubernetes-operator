@@ -308,12 +308,6 @@ spec:
   #       release: kube-prometheus-stack
   #     annotations: {}
   #     interval: 15s
-  #   grafanaDashboard: {}
-  #
-  # Or, filed in a folder, for a sidecar selecting on its own label:
-  # monitoring:
   #   grafanaDashboard:
-  #     labels:
-  #       my_sidecar: "yes"
-  #     annotations:
-  #       grafana_folder: Memgraph
+  #     labels: {}
+  #     annotations: {}
