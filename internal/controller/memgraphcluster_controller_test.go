@@ -1318,29 +1318,24 @@ var _ = Describe("MemgraphCluster Controller", func() {
 		// A rejected apply is retried behind the scenes forever, so the resource
 		// itself has to say what the API server refused — otherwise the
 		// conditions keep describing the cluster that is still running while the
-		// declared spec never lands. Removing a role's log storage claim is the
-		// realistic trigger: Kubernetes forbids changing a StatefulSet's
-		// volumeClaimTemplates, so the flip needs the StatefulSet recreated.
+		// declared spec never lands. Every claim template field is pinned at
+		// admission now, so the trigger is a StatefulSet that predates the
+		// operator with a claim of another size: Kubernetes forbids changing a
+		// StatefulSet's volumeClaimTemplates, so the apply that would bring it
+		// onto the declared spec is refused.
 		It("should report the API server's rejection when applying a workload fails", func() {
-			fake.setInstances(convergedCluster())
-			reconcileCluster(resourceName)
-			markWorkloadsReady(resourceName)
-			reconcileCluster(resourceName)
-			Expect(condition(memgraphcomv1alpha1.ConditionReady).Status).To(Equal(metav1.ConditionTrue))
-			Expect(condition(memgraphcomv1alpha1.ConditionConverged).Status).To(Equal(metav1.ConditionTrue))
-
 			cluster := &memgraphcomv1alpha1.MemgraphCluster{}
 			get(resourceName, cluster)
-			cluster.Spec.Storage.Data.CreateLogStorageClaim = ptr.To(false)
-			Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
+			preexisting := resources.DataStatefulSet(cluster, resources.DeclaredDataInstances(cluster))
+			preexisting.Spec.VolumeClaimTemplates[0].Spec.Resources.Requests[corev1.ResourceStorage] =
+				resource.MustParse("2Gi")
+			Expect(k8sClient.Create(ctx, preexisting)).To(Succeed())
 
 			_, err := reconciler.Reconcile(ctx, reconcile.Request{
 				NamespacedName: types.NamespacedName{Name: resourceName, Namespace: resourceNamespace},
 			})
-			Expect(err).To(HaveOccurred(), "the API server refuses to drop a volume claim template")
+			Expect(err).To(HaveOccurred(), "the API server refuses to change a volume claim template")
 
-			s := status()
-			Expect(s.Main).To(Equal("instance_0"), "the last observed MAIN survives an apply failure")
 			for _, condType := range []string{
 				memgraphcomv1alpha1.ConditionReady,
 				memgraphcomv1alpha1.ConditionConverged,
