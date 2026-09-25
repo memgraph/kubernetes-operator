@@ -309,9 +309,26 @@ type SecretsSpec struct {
 // a values file is mechanical.
 //
 // The fields below become StatefulSet volumeClaimTemplates, which Kubernetes
-// treats as immutable: changing them on a live MemgraphCluster is rejected by
-// the StatefulSet controller, not silently applied. Storage changes are a
-// day-2 operation and out of scope for v1alpha1.
+// treats as immutable, so every one of them is pinned by a transition rule:
+// changing it on a live MemgraphCluster is refused at admission with the
+// procedure that works, rather than accepted and then rejected by the API
+// server on every apply forever. Recreating the StatefulSet around its pods is
+// not an option the operator offers — the StatefulSet controller only readopts
+// pods in ascending ordinal order, MAIN first, which deadlocks the rolling
+// restart. The log claim's knobs are pinned only while the claim exists;
+// nothing reads them otherwise. A size given in other units is not a change:
+// quantities are compared as quantities.
+//
+// The has() guards keep every rule evaluable against the block's empty object
+// default, which the API server checks before nested field defaults apply.
+//
+// +kubebuilder:validation:XValidation:rule="has(self.libStorageClassName) == has(oldSelf.libStorageClassName) && (!has(self.libStorageClassName) || self.libStorageClassName == oldSelf.libStorageClassName)",message="libStorageClassName cannot be changed on a live cluster: it is part of a StatefulSet volumeClaimTemplate, which Kubernetes forbids changing in place. Delete the MemgraphCluster (its claims are retained under the default retention policy) and recreate it with the new value"
+// +kubebuilder:validation:XValidation:rule="has(self.libPVCSize) == has(oldSelf.libPVCSize) && (!has(self.libPVCSize) || quantity(string(self.libPVCSize)).compareTo(quantity(string(oldSelf.libPVCSize))) == 0)",message="libPVCSize cannot be changed on a live cluster: it is part of a StatefulSet volumeClaimTemplate, which Kubernetes forbids changing in place. Delete the MemgraphCluster (its claims are retained under the default retention policy) and recreate it with the new value"
+// +kubebuilder:validation:XValidation:rule="has(self.libStorageAccessMode) == has(oldSelf.libStorageAccessMode) && (!has(self.libStorageAccessMode) || self.libStorageAccessMode == oldSelf.libStorageAccessMode)",message="libStorageAccessMode cannot be changed on a live cluster: it is part of a StatefulSet volumeClaimTemplate, which Kubernetes forbids changing in place. Delete the MemgraphCluster (its claims are retained under the default retention policy) and recreate it with the new value"
+// +kubebuilder:validation:XValidation:rule="(has(self.createLogStorageClaim) ? self.createLogStorageClaim : true) == (has(oldSelf.createLogStorageClaim) ? oldSelf.createLogStorageClaim : true)",message="createLogStorageClaim cannot be changed on a live cluster: it adds or removes a StatefulSet volumeClaimTemplate, which Kubernetes forbids in place. Delete the MemgraphCluster (its claims are retained under the default retention policy) and recreate it with the new setting"
+// +kubebuilder:validation:XValidation:rule="!(has(self.createLogStorageClaim) ? self.createLogStorageClaim : true) || (has(self.logStorageClassName) == has(oldSelf.logStorageClassName) && (!has(self.logStorageClassName) || self.logStorageClassName == oldSelf.logStorageClassName))",message="logStorageClassName cannot be changed on a live cluster while the log claim exists: it is part of a StatefulSet volumeClaimTemplate, which Kubernetes forbids changing in place. Delete the MemgraphCluster (its claims are retained under the default retention policy) and recreate it with the new value"
+// +kubebuilder:validation:XValidation:rule="!(has(self.createLogStorageClaim) ? self.createLogStorageClaim : true) || (has(self.logPVCSize) == has(oldSelf.logPVCSize) && (!has(self.logPVCSize) || quantity(string(self.logPVCSize)).compareTo(quantity(string(oldSelf.logPVCSize))) == 0))",message="logPVCSize cannot be changed on a live cluster while the log claim exists: it is part of a StatefulSet volumeClaimTemplate, which Kubernetes forbids changing in place. Delete the MemgraphCluster (its claims are retained under the default retention policy) and recreate it with the new value"
+// +kubebuilder:validation:XValidation:rule="!(has(self.createLogStorageClaim) ? self.createLogStorageClaim : true) || (has(self.logStorageAccessMode) == has(oldSelf.logStorageAccessMode) && (!has(self.logStorageAccessMode) || self.logStorageAccessMode == oldSelf.logStorageAccessMode))",message="logStorageAccessMode cannot be changed on a live cluster while the log claim exists: it is part of a StatefulSet volumeClaimTemplate, which Kubernetes forbids changing in place. Delete the MemgraphCluster (its claims are retained under the default retention policy) and recreate it with the new value"
 type RoleStorageSpec struct {
 	// libPVCSize is the requested size of the lib storage claim, which backs
 	// Memgraph's data directory (snapshots, WAL, and durability metadata).
@@ -343,11 +360,9 @@ type RoleStorageSpec struct {
 	//
 	// The remaining log* knobs below are ignored while this is false.
 	//
-	// Like the sizes and classes around it this is effectively a create-time
-	// choice: flipping it adds or removes a volumeClaimTemplate, which
-	// Kubernetes forbids on a live StatefulSet, so the operator's apply is
-	// rejected until the StatefulSet is recreated (delete it with
-	// --cascade=orphan and the operator rebuilds it around the running pods).
+	// Like the sizes and classes around it this is a create-time choice:
+	// flipping it adds or removes a volumeClaimTemplate, which Kubernetes
+	// forbids on a live StatefulSet, so admission refuses the flip.
 	// +kubebuilder:default=true
 	// +optional
 	CreateLogStorageClaim *bool `json:"createLogStorageClaim,omitempty"`
@@ -423,6 +438,7 @@ type StorageSpec struct {
 // default, which the API server checks before the field default applies.
 //
 // +kubebuilder:validation:XValidation:rule="(has(self.enabled) && self.enabled) == (has(oldSelf.enabled) && oldSelf.enabled)",message="coreDumps enabled cannot be changed on a live cluster: the core dumps volume is a StatefulSet volumeClaimTemplate, which Kubernetes forbids adding or removing in place. Delete the MemgraphCluster (its claims are retained under the default retention policy) and recreate it with the new setting"
+// +kubebuilder:validation:XValidation:rule="!(has(self.enabled) && self.enabled) || (has(self.size) == has(oldSelf.size) && (!has(self.size) || quantity(string(self.size)).compareTo(quantity(string(oldSelf.size))) == 0))",message="coreDumps size cannot be changed on a live cluster while the role collects dumps: it is part of a StatefulSet volumeClaimTemplate, which Kubernetes forbids changing in place. Delete the MemgraphCluster (its claims are retained under the default retention policy) and recreate it with the new value"
 type RoleCoreDumpsSpec struct {
 	// enabled provisions a core dumps volume for every pod of the role and
 	// mounts it at /var/core/memgraph. It is off by default: a crashing Memgraph
@@ -515,6 +531,7 @@ type CoreDumpsUploaderSpec struct {
 // default, which the API server checks before nested field defaults apply.
 //
 // +kubebuilder:validation:XValidation:rule="!has(self.uploader) || (has(self.coordinators) && has(self.coordinators.enabled) && self.coordinators.enabled) || (has(self.data) && has(self.data.enabled) && self.data.enabled)",message="uploader requires core dumps enabled for at least one role — there would be no volume for it to read"
+// +kubebuilder:validation:XValidation:rule="!((has(self.coordinators) && has(self.coordinators.enabled) && self.coordinators.enabled) || (has(self.data) && has(self.data.enabled) && self.data.enabled)) || (has(self.storageClassName) == has(oldSelf.storageClassName) && (!has(self.storageClassName) || self.storageClassName == oldSelf.storageClassName))",message="coreDumps storageClassName cannot be changed on a live cluster while a role collects dumps: it is part of a StatefulSet volumeClaimTemplate, which Kubernetes forbids changing in place. Delete the MemgraphCluster (its claims are retained under the default retention policy) and recreate it with the new value"
 type CoreDumpsSpec struct {
 	// coordinators decides whether every coordinator pod collects dumps, and
 	// how much room it gets for them.

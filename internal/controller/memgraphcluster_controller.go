@@ -175,7 +175,8 @@ func (r *MemgraphClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		resources.DataStatefulSet(&cluster, replicas.data.applied),
 	)
 	desired = append(desired, external...)
-	if err := r.applyDesired(ctx, &cluster, desired...); err != nil {
+	applied, err := r.applyDesired(ctx, &cluster, desired...)
+	if err != nil {
 		return ctrl.Result{}, err
 	}
 	if err := r.pruneExternal(ctx, &cluster, external); err != nil {
@@ -189,7 +190,7 @@ func (r *MemgraphClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, err
 	}
 
-	return r.reconcileRegistration(ctx, &cluster, replicas, exposure)
+	return r.reconcileRegistration(ctx, &cluster, replicas, exposure, applied)
 }
 
 // desiredExternal is every external object the spec asks for: the Services in
@@ -466,28 +467,51 @@ func (e *externalAccess) waitOn(name string) {
 // lands, and the rejection is only visible in the operator's log. Both
 // conditions go False — the workloads are not the declared ones, so neither
 // serving nor convergence can be claimed for the spec the user asked for.
+//
+// It returns the generation the API server assigned each object, which is how
+// the rest of the pass tells a cached object that predates this apply from one
+// that reflects it.
 func (r *MemgraphClusterReconciler) applyDesired(
 	ctx context.Context,
 	cluster *memgraphcomv1alpha1.MemgraphCluster,
 	desired ...client.Object,
-) error {
+) (appliedGenerations, error) {
+	applied := appliedGenerations{}
 	for _, obj := range desired {
 		if err := controllerutil.SetControllerReference(cluster, obj, r.Scheme); err != nil {
-			return fmt.Errorf("setting owner reference on %T %s: %w", obj, obj.GetName(), err)
+			return nil, fmt.Errorf("setting owner reference on %T %s: %w", obj, obj.GetName(), err)
 		}
-		if err := r.apply(ctx, obj); err != nil {
+		generation, err := r.apply(ctx, obj)
+		if err != nil {
 			applyErr := fmt.Errorf("applying %T %s: %w", obj, obj.GetName(), err)
 			msg := truncateMessage(applyErr.Error())
 			if statusErr := r.writeStatus(ctx, cluster, lastObserved(cluster),
 				notReadyCondition(memgraphcomv1alpha1.ReasonApplyFailed, msg),
 				notConvergedCondition(memgraphcomv1alpha1.ReasonApplyFailed, msg),
 			); statusErr != nil {
-				return errors.Join(applyErr, statusErr)
+				return nil, errors.Join(applyErr, statusErr)
 			}
-			return applyErr
+			return nil, applyErr
 		}
+		applied[appliedKey(obj)] = generation
 	}
-	return nil
+	return applied, nil
+}
+
+// appliedGenerations is the metadata.generation the API server assigned each
+// object a pass applied, keyed by kind and name — two kinds share a name here,
+// the headless Service and the StatefulSet of a role.
+type appliedGenerations map[string]int64
+
+func appliedKey(obj client.Object) string {
+	return obj.GetObjectKind().GroupVersionKind().Kind + "/" + obj.GetName()
+}
+
+// statefulSet is the generation this pass applied to the named StatefulSet, or
+// zero when the pass applied none — which is what a StatefulSet read from the
+// cache is then measured against, and zero is what any generation clears.
+func (a appliedGenerations) statefulSet(name string) int64 {
+	return a["StatefulSet/"+name]
 }
 
 // roleReplicas is one role's replica arithmetic for a reconcile pass: how many
@@ -608,15 +632,18 @@ func (r *MemgraphClusterReconciler) observeRollout(
 	ctx context.Context,
 	cluster *memgraphcomv1alpha1.MemgraphCluster,
 	replicas replicaCounts,
+	applied appliedGenerations,
 ) (rolloutRoles, error) {
 	var roles rolloutRoles
 	coordinators, err := r.observeRolloutRole(ctx, cluster, replicas.coordinators,
-		resources.CoordinatorPodSelector(cluster), resources.CoordinatorInstanceName)
+		resources.CoordinatorPodSelector(cluster), resources.CoordinatorInstanceName,
+		applied.statefulSet(replicas.coordinators.name))
 	if err != nil {
 		return rolloutRoles{}, err
 	}
 	data, err := r.observeRolloutRole(ctx, cluster, replicas.data,
-		resources.DataPodSelector(cluster), resources.DataInstanceName)
+		resources.DataPodSelector(cluster), resources.DataInstanceName,
+		applied.statefulSet(replicas.data.name))
 	if err != nil {
 		return rolloutRoles{}, err
 	}
@@ -637,12 +664,22 @@ func (r *MemgraphClusterReconciler) observeRollout(
 // containers keep passing their probes for as long as they take to shut down, and
 // a restart that trusted that would delete the next pod while this one is still
 // running.
+//
+// The revision the pods are measured against is only as good as the StatefulSet
+// it was read from, and that object can be behind in two ways: the informer
+// cache still holds the object as it was before this pass applied it, or the
+// StatefulSet controller has not yet processed the template it carries. Both
+// leave status.updateRevision describing the previous template, which would
+// make every pod look up to date. The role is marked stale in either case, from
+// the generation the apply returned and the one the status reports, and the
+// roll does not judge it until both agree.
 func (r *MemgraphClusterReconciler) observeRolloutRole(
 	ctx context.Context,
 	cluster *memgraphcomv1alpha1.MemgraphCluster,
 	role roleReplicas,
 	selector map[string]string,
 	instanceName func(ordinal int32) string,
+	appliedGeneration int64,
 ) (rollout.Role, error) {
 	observed := rollout.Role{Replicas: role.applied}
 
@@ -656,6 +693,7 @@ func (r *MemgraphClusterReconciler) observeRolloutRole(
 		return rollout.Role{}, fmt.Errorf("getting StatefulSet %s: %w", role.name, err)
 	}
 	observed.UpdateRevision = sts.Status.UpdateRevision
+	observed.Stale = sts.Generation < appliedGeneration || sts.Status.ObservedGeneration != sts.Generation
 
 	var pods corev1.PodList
 	if err := r.List(ctx, &pods,
@@ -759,13 +797,14 @@ func (r *MemgraphClusterReconciler) reconcileRegistration(
 	cluster *memgraphcomv1alpha1.MemgraphCluster,
 	replicas replicaCounts,
 	exposure externalAccess,
+	applied appliedGenerations,
 ) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
 	// Both roles' pods are read once per pass: the readiness gate needs to know
 	// whether a restart is under way to tolerate the pod it took down, and the
 	// restart itself needs the same view further down.
-	roles, err := r.observeRollout(ctx, cluster, replicas)
+	roles, err := r.observeRollout(ctx, cluster, replicas, applied)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -1002,7 +1041,7 @@ func (r *MemgraphClusterReconciler) shedRetiredPods(
 		if role.retiring == 0 {
 			continue
 		}
-		if err := r.applyDesired(ctx, cluster, role.build(cluster, role.replicas.declared)); err != nil {
+		if _, err := r.applyDesired(ctx, cluster, role.build(cluster, role.replicas.declared)); err != nil {
 			return err
 		}
 		log.Info("Shrank a StatefulSet to the declared replica count",
@@ -1330,11 +1369,13 @@ func (r *MemgraphClusterReconciler) showInstances(
 
 // apply server-side-applies a desired object built by the resource builders.
 // Builders set only the fields the operator owns, so the converted apply
-// configuration claims exactly those fields for this controller.
-func (r *MemgraphClusterReconciler) apply(ctx context.Context, obj client.Object) error {
+// configuration claims exactly those fields for this controller. It returns the
+// generation the API server assigned the object: the response is decoded back
+// into the applied configuration, so no second read is needed for it.
+func (r *MemgraphClusterReconciler) apply(ctx context.Context, obj client.Object) (int64, error) {
 	content, err := runtime.DefaultUnstructuredConverter.ToUnstructured(obj)
 	if err != nil {
-		return fmt.Errorf("converting to unstructured: %w", err)
+		return 0, fmt.Errorf("converting to unstructured: %w", err)
 	}
 	u := &unstructured.Unstructured{Object: content}
 	// Zero-valued struct fields survive the conversion; drop them so the
@@ -1343,7 +1384,11 @@ func (r *MemgraphClusterReconciler) apply(ctx context.Context, obj client.Object
 	unstructured.RemoveNestedField(u.Object, "metadata", "creationTimestamp")
 	unstructured.RemoveNestedField(u.Object, "spec", "template", "metadata", "creationTimestamp")
 
-	return r.Apply(ctx, client.ApplyConfigurationFromUnstructured(u), client.FieldOwner(fieldOwner), client.ForceOwnership)
+	if err := r.Apply(ctx, client.ApplyConfigurationFromUnstructured(u),
+		client.FieldOwner(fieldOwner), client.ForceOwnership); err != nil {
+		return 0, err
+	}
+	return u.GetGeneration(), nil
 }
 
 // SetupWithManager sets up the controller with the Manager. The Gateway API

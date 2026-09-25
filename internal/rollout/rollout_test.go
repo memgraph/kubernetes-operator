@@ -502,3 +502,39 @@ func containsAll(s string, substrings ...string) bool {
 	}
 	return true
 }
+
+// TestStaleStatefulSetStatusStopsTheRoll pins the race the e2e suite caught:
+// both StatefulSets are applied in one pass, their statuses land one at a time,
+// and for a moment the coordinators show their new revision while the data
+// StatefulSet still shows its old one. Judged on that, the data plane looks done
+// and a coordinator is restarted first. A stale role is therefore not judged at
+// all, whichever role it is.
+func TestStaleStatefulSetStatusStopsTheRoll(t *testing.T) {
+	// The data StatefulSet's status still describes the old template: its pods
+	// all "match" a revision that is about to change.
+	stale := converged(dataRole(newRevision, newRevision))
+	stale.Stale = true
+	coordinators := coordinatorRole(oldRevision, oldRevision, oldRevision)
+	lag := caughtUp("instance_0", "instance_1")
+
+	decision := Next(stale, coordinators, cluster(2, 3, "instance_0"), lag)
+	if decision.Action != Wait || decision.Reason != memgraphcomv1alpha1.ReasonWorkloadsNotReady {
+		t.Fatalf("expected a stale data StatefulSet to stop the roll, got %+v", decision)
+	}
+
+	// The other way round: the data plane is done and the coordinator StatefulSet
+	// is the one whose status is behind.
+	data := converged(dataRole(newRevision, newRevision))
+	staleCoordinators := coordinators
+	staleCoordinators.Stale = true
+	decision = Next(data, staleCoordinators, cluster(2, 3, "instance_0"), lag)
+	if decision.Action != Wait || decision.Reason != memgraphcomv1alpha1.ReasonWorkloadsNotReady {
+		t.Fatalf("expected a stale coordinator StatefulSet to stop the roll, got %+v", decision)
+	}
+
+	// Once both statuses are current the same view restarts a coordinator.
+	decision = Next(data, coordinators, cluster(2, 3, "instance_0"), lag)
+	if decision.Action != Delete || decision.Pod.Name != coordinatorPod2 {
+		t.Fatalf("expected the roll to proceed once both statuses are current, got %+v", decision)
+	}
+}

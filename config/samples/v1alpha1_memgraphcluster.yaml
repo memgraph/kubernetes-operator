@@ -21,7 +21,7 @@ spec:
   # to YIELD LEADERSHIP first, reported as LeadershipTransferInProgress while that
   # is pending.
   coordinators: 3
-  dataInstances: 3
+  dataInstances: 2
   # repository carries the registry host and image path only — the version
   # belongs in tag, and admission rejects a digest or a tag smuggled into the
   # repository.
@@ -46,14 +46,15 @@ spec:
     # purpose: left unset, each claim uses the cluster's default StorageClass,
     # while the empty string turns dynamic provisioning off and binds a
     # pre-created PersistentVolume. Sizes, access modes and classes become
-    # StatefulSet volumeClaimTemplates, which Kubernetes treats as immutable.
-    # Setting createLogStorageClaim to false drops the log claim for that role
-    # and passes an empty --log-file, leaving stderr (and so `kubectl logs`) as
-    # the only log sink; the other log* knobs are then ignored. Flipping it
-    # on a live cluster needs the role's StatefulSet recreated (patch this
-    # resource, then `kubectl delete statefulset <cluster>-<role>
-    # --cascade=orphan`) — adding or removing a claim template is not an update
-    # Kubernetes allows.
+    # StatefulSet volumeClaimTemplates, which Kubernetes treats as immutable,
+    # so admission refuses changing any of them on a live cluster: delete the
+    # MemgraphCluster (the claims are retained) and recreate it with the new
+    # values. Setting createLogStorageClaim to false drops the log claim for
+    # that role and passes an empty --log-file, leaving stderr (and so
+    # `kubectl logs`) as the only log sink; the other log* knobs are then
+    # ignored, and free to change. Flipping it is refused for the same
+    # reason: adding or removing a claim template is not an update Kubernetes
+    # allows.
     coordinators:
       libPVCSize: 1Gi
       libStorageAccessMode: ReadWriteOnce

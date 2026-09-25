@@ -158,6 +158,15 @@ spec:
                         retention policy) and recreate it with the new setting'
                       rule: (has(self.enabled) && self.enabled) == (has(oldSelf.enabled)
                         && oldSelf.enabled)
+                    - message: 'coreDumps size cannot be changed on a live cluster
+                        while the role collects dumps: it is part of a StatefulSet
+                        volumeClaimTemplate, which Kubernetes forbids changing in
+                        place. Delete the MemgraphCluster (its claims are retained
+                        under the default retention policy) and recreate it with the
+                        new value'
+                      rule: '!(has(self.enabled) && self.enabled) || (has(self.size)
+                        == has(oldSelf.size) && (!has(self.size) || quantity(string(self.size)).compareTo(quantity(string(oldSelf.size)))
+                        == 0))'
                   data:
                     default: {}
                     description: |-
@@ -198,6 +207,15 @@ spec:
                         retention policy) and recreate it with the new setting'
                       rule: (has(self.enabled) && self.enabled) == (has(oldSelf.enabled)
                         && oldSelf.enabled)
+                    - message: 'coreDumps size cannot be changed on a live cluster
+                        while the role collects dumps: it is part of a StatefulSet
+                        volumeClaimTemplate, which Kubernetes forbids changing in
+                        place. Delete the MemgraphCluster (its claims are retained
+                        under the default retention policy) and recreate it with the
+                        new value'
+                      rule: '!(has(self.enabled) && self.enabled) || (has(self.size)
+                        == has(oldSelf.size) && (!has(self.size) || quantity(string(self.size)).compareTo(quantity(string(oldSelf.size)))
+                        == 0))'
                   storageClassName:
                     description: |-
                       storageClassName is the StorageClass backing every core dumps claim of
@@ -362,6 +380,15 @@ spec:
                   rule: '!has(self.uploader) || (has(self.coordinators) && has(self.coordinators.enabled)
                     && self.coordinators.enabled) || (has(self.data) && has(self.data.enabled)
                     && self.data.enabled)'
+                - message: 'coreDumps storageClassName cannot be changed on a live
+                    cluster while a role collects dumps: it is part of a StatefulSet
+                    volumeClaimTemplate, which Kubernetes forbids changing in place.
+                    Delete the MemgraphCluster (its claims are retained under the
+                    default retention policy) and recreate it with the new value'
+                  rule: '!((has(self.coordinators) && has(self.coordinators.enabled)
+                    && self.coordinators.enabled) || (has(self.data) && has(self.data.enabled)
+                    && self.data.enabled)) || (has(self.storageClassName) == has(oldSelf.storageClassName)
+                    && (!has(self.storageClassName) || self.storageClassName == oldSelf.storageClassName))'
               dataInstances:
                 default: 2
                 description: |-
@@ -1083,11 +1110,9 @@ spec:
 
                           The remaining log* knobs below are ignored while this is false.
 
-                          Like the sizes and classes around it this is effectively a create-time
-                          choice: flipping it adds or removes a volumeClaimTemplate, which
-                          Kubernetes forbids on a live StatefulSet, so the operator's apply is
-                          rejected until the StatefulSet is recreated (delete it with
-                          --cascade=orphan and the operator rebuilds it around the running pods).
+                          Like the sizes and classes around it this is a create-time choice:
+                          flipping it adds or removes a volumeClaimTemplate, which Kubernetes
+                          forbids on a live StatefulSet, so admission refuses the flip.
                         type: boolean
                       libPVCSize:
                         anyOf:
@@ -1148,6 +1173,66 @@ spec:
                         maxLength: 253
                         type: string
                     type: object
+                    x-kubernetes-validations:
+                    - message: 'libStorageClassName cannot be changed on a live cluster:
+                        it is part of a StatefulSet volumeClaimTemplate, which Kubernetes
+                        forbids changing in place. Delete the MemgraphCluster (its
+                        claims are retained under the default retention policy) and
+                        recreate it with the new value'
+                      rule: has(self.libStorageClassName) == has(oldSelf.libStorageClassName)
+                        && (!has(self.libStorageClassName) || self.libStorageClassName
+                        == oldSelf.libStorageClassName)
+                    - message: 'libPVCSize cannot be changed on a live cluster: it
+                        is part of a StatefulSet volumeClaimTemplate, which Kubernetes
+                        forbids changing in place. Delete the MemgraphCluster (its
+                        claims are retained under the default retention policy) and
+                        recreate it with the new value'
+                      rule: has(self.libPVCSize) == has(oldSelf.libPVCSize) && (!has(self.libPVCSize)
+                        || quantity(string(self.libPVCSize)).compareTo(quantity(string(oldSelf.libPVCSize)))
+                        == 0)
+                    - message: 'libStorageAccessMode cannot be changed on a live cluster:
+                        it is part of a StatefulSet volumeClaimTemplate, which Kubernetes
+                        forbids changing in place. Delete the MemgraphCluster (its
+                        claims are retained under the default retention policy) and
+                        recreate it with the new value'
+                      rule: has(self.libStorageAccessMode) == has(oldSelf.libStorageAccessMode)
+                        && (!has(self.libStorageAccessMode) || self.libStorageAccessMode
+                        == oldSelf.libStorageAccessMode)
+                    - message: 'createLogStorageClaim cannot be changed on a live
+                        cluster: it adds or removes a StatefulSet volumeClaimTemplate,
+                        which Kubernetes forbids in place. Delete the MemgraphCluster
+                        (its claims are retained under the default retention policy)
+                        and recreate it with the new setting'
+                      rule: '(has(self.createLogStorageClaim) ? self.createLogStorageClaim
+                        : true) == (has(oldSelf.createLogStorageClaim) ? oldSelf.createLogStorageClaim
+                        : true)'
+                    - message: 'logStorageClassName cannot be changed on a live cluster
+                        while the log claim exists: it is part of a StatefulSet volumeClaimTemplate,
+                        which Kubernetes forbids changing in place. Delete the MemgraphCluster
+                        (its claims are retained under the default retention policy)
+                        and recreate it with the new value'
+                      rule: '!(has(self.createLogStorageClaim) ? self.createLogStorageClaim
+                        : true) || (has(self.logStorageClassName) == has(oldSelf.logStorageClassName)
+                        && (!has(self.logStorageClassName) || self.logStorageClassName
+                        == oldSelf.logStorageClassName))'
+                    - message: 'logPVCSize cannot be changed on a live cluster while
+                        the log claim exists: it is part of a StatefulSet volumeClaimTemplate,
+                        which Kubernetes forbids changing in place. Delete the MemgraphCluster
+                        (its claims are retained under the default retention policy)
+                        and recreate it with the new value'
+                      rule: '!(has(self.createLogStorageClaim) ? self.createLogStorageClaim
+                        : true) || (has(self.logPVCSize) == has(oldSelf.logPVCSize)
+                        && (!has(self.logPVCSize) || quantity(string(self.logPVCSize)).compareTo(quantity(string(oldSelf.logPVCSize)))
+                        == 0))'
+                    - message: 'logStorageAccessMode cannot be changed on a live cluster
+                        while the log claim exists: it is part of a StatefulSet volumeClaimTemplate,
+                        which Kubernetes forbids changing in place. Delete the MemgraphCluster
+                        (its claims are retained under the default retention policy)
+                        and recreate it with the new value'
+                      rule: '!(has(self.createLogStorageClaim) ? self.createLogStorageClaim
+                        : true) || (has(self.logStorageAccessMode) == has(oldSelf.logStorageAccessMode)
+                        && (!has(self.logStorageAccessMode) || self.logStorageAccessMode
+                        == oldSelf.logStorageAccessMode))'
                   data:
                     default: {}
                     description: data configures the storage of every data instance
@@ -1165,11 +1250,9 @@ spec:
 
                           The remaining log* knobs below are ignored while this is false.
 
-                          Like the sizes and classes around it this is effectively a create-time
-                          choice: flipping it adds or removes a volumeClaimTemplate, which
-                          Kubernetes forbids on a live StatefulSet, so the operator's apply is
-                          rejected until the StatefulSet is recreated (delete it with
-                          --cascade=orphan and the operator rebuilds it around the running pods).
+                          Like the sizes and classes around it this is a create-time choice:
+                          flipping it adds or removes a volumeClaimTemplate, which Kubernetes
+                          forbids on a live StatefulSet, so admission refuses the flip.
                         type: boolean
                       libPVCSize:
                         anyOf:
@@ -1230,6 +1313,66 @@ spec:
                         maxLength: 253
                         type: string
                     type: object
+                    x-kubernetes-validations:
+                    - message: 'libStorageClassName cannot be changed on a live cluster:
+                        it is part of a StatefulSet volumeClaimTemplate, which Kubernetes
+                        forbids changing in place. Delete the MemgraphCluster (its
+                        claims are retained under the default retention policy) and
+                        recreate it with the new value'
+                      rule: has(self.libStorageClassName) == has(oldSelf.libStorageClassName)
+                        && (!has(self.libStorageClassName) || self.libStorageClassName
+                        == oldSelf.libStorageClassName)
+                    - message: 'libPVCSize cannot be changed on a live cluster: it
+                        is part of a StatefulSet volumeClaimTemplate, which Kubernetes
+                        forbids changing in place. Delete the MemgraphCluster (its
+                        claims are retained under the default retention policy) and
+                        recreate it with the new value'
+                      rule: has(self.libPVCSize) == has(oldSelf.libPVCSize) && (!has(self.libPVCSize)
+                        || quantity(string(self.libPVCSize)).compareTo(quantity(string(oldSelf.libPVCSize)))
+                        == 0)
+                    - message: 'libStorageAccessMode cannot be changed on a live cluster:
+                        it is part of a StatefulSet volumeClaimTemplate, which Kubernetes
+                        forbids changing in place. Delete the MemgraphCluster (its
+                        claims are retained under the default retention policy) and
+                        recreate it with the new value'
+                      rule: has(self.libStorageAccessMode) == has(oldSelf.libStorageAccessMode)
+                        && (!has(self.libStorageAccessMode) || self.libStorageAccessMode
+                        == oldSelf.libStorageAccessMode)
+                    - message: 'createLogStorageClaim cannot be changed on a live
+                        cluster: it adds or removes a StatefulSet volumeClaimTemplate,
+                        which Kubernetes forbids in place. Delete the MemgraphCluster
+                        (its claims are retained under the default retention policy)
+                        and recreate it with the new setting'
+                      rule: '(has(self.createLogStorageClaim) ? self.createLogStorageClaim
+                        : true) == (has(oldSelf.createLogStorageClaim) ? oldSelf.createLogStorageClaim
+                        : true)'
+                    - message: 'logStorageClassName cannot be changed on a live cluster
+                        while the log claim exists: it is part of a StatefulSet volumeClaimTemplate,
+                        which Kubernetes forbids changing in place. Delete the MemgraphCluster
+                        (its claims are retained under the default retention policy)
+                        and recreate it with the new value'
+                      rule: '!(has(self.createLogStorageClaim) ? self.createLogStorageClaim
+                        : true) || (has(self.logStorageClassName) == has(oldSelf.logStorageClassName)
+                        && (!has(self.logStorageClassName) || self.logStorageClassName
+                        == oldSelf.logStorageClassName))'
+                    - message: 'logPVCSize cannot be changed on a live cluster while
+                        the log claim exists: it is part of a StatefulSet volumeClaimTemplate,
+                        which Kubernetes forbids changing in place. Delete the MemgraphCluster
+                        (its claims are retained under the default retention policy)
+                        and recreate it with the new value'
+                      rule: '!(has(self.createLogStorageClaim) ? self.createLogStorageClaim
+                        : true) || (has(self.logPVCSize) == has(oldSelf.logPVCSize)
+                        && (!has(self.logPVCSize) || quantity(string(self.logPVCSize)).compareTo(quantity(string(oldSelf.logPVCSize)))
+                        == 0))'
+                    - message: 'logStorageAccessMode cannot be changed on a live cluster
+                        while the log claim exists: it is part of a StatefulSet volumeClaimTemplate,
+                        which Kubernetes forbids changing in place. Delete the MemgraphCluster
+                        (its claims are retained under the default retention policy)
+                        and recreate it with the new value'
+                      rule: '!(has(self.createLogStorageClaim) ? self.createLogStorageClaim
+                        : true) || (has(self.logStorageAccessMode) == has(oldSelf.logStorageAccessMode)
+                        && (!has(self.logStorageAccessMode) || self.logStorageAccessMode
+                        == oldSelf.logStorageAccessMode))'
                   retentionPolicy:
                     default: Retain
                     description: |-
