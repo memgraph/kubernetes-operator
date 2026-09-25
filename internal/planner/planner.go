@@ -79,6 +79,14 @@ type Topology struct {
 	// from a retiring leader first.
 	RetiringCoordinators  []memgraph.CoordinatorSpec
 	RetiringDataInstances []memgraph.DataInstanceSpec
+
+	// ReadsOnMain is whether the coordinators should hand clients the MAIN as
+	// a reader. It is declared true exactly when the topology has a single data
+	// instance: the readers list is built from the replicas, so without it a
+	// one-instance cluster tells every read session there is nowhere to read
+	// from. With replicas it stays off, so reads land on them as they do by
+	// default.
+	ReadsOnMain bool
 }
 
 // Command is one registration step to execute against the coordinator leader.
@@ -148,6 +156,24 @@ func (c UpdateInstanceBoltServer) Run(ctx context.Context, client memgraph.Clien
 
 func (c UpdateInstanceBoltServer) String() string {
 	return fmt.Sprintf("UPDATE CONFIG FOR INSTANCE %s (bolt_server %s)", c.Instance.Name, c.Instance.BoltServer)
+}
+
+// SetCoordinatorSetting changes one cluster-wide coordinator setting to the
+// value the topology declares for it. Like every other command it is planned
+// only off an observed difference, so a setting already holding the declared
+// value is never touched.
+type SetCoordinatorSetting struct {
+	Name  string
+	Value string
+}
+
+// Run implements Command.
+func (c SetCoordinatorSetting) Run(ctx context.Context, client memgraph.Client) error {
+	return client.SetCoordinatorSetting(ctx, c.Name, c.Value)
+}
+
+func (c SetCoordinatorSetting) String() string {
+	return fmt.Sprintf("SET COORDINATOR SETTING %s TO %s", c.Name, c.Value)
 }
 
 // SetInstanceToMain promotes a data instance to MAIN: at bootstrap, when the
@@ -343,10 +369,26 @@ func (c YieldLeadership) String() string {
 // different address. Only declared members are followed this way. A retiring
 // member is registered under whatever address it had, and it is on its way out.
 //
+// The coordinator settings the topology declares are followed the same way, off
+// the SHOW COORDINATOR SETTINGS view: a setting the view reports at another
+// value gets a SET COORDINATOR SETTING. A view that does not report the setting
+// — or no view at all, which is what a leader that could not be asked yields —
+// plans nothing for it, for the reason an empty bolt address plans no update:
+// unknown is not "different". Nor is a setting followed while a data instance
+// is retiring: reads on MAIN describe the cluster the operator runs, and a
+// cluster shrinking to one instance still has two until the retirement is
+// through. That also keeps a paused retirement what it is documented to be — a
+// pass that touches the cluster not at all.
+//
 // Instances the cluster knows but the topology neither declares nor retires are
 // left untouched: the retiring set is bounded by the operator's own prior apply,
 // so an instance a human registered is never removed.
-func Plan(declared Topology, observed []memgraph.Instance, lag []memgraph.ReplicationLag) []Command {
+func Plan(
+	declared Topology,
+	observed []memgraph.Instance,
+	lag []memgraph.ReplicationLag,
+	settings map[string]string,
+) []Command {
 	registered := index(observed)
 	retiring := retiringNames(declared)
 
@@ -385,6 +427,9 @@ func Plan(declared Topology, observed []memgraph.Instance, lag []memgraph.Replic
 		}
 	}
 	commands = append(commands, boltServerUpdates(declared, registered)...)
+	if len(declared.RetiringDataInstances) == 0 {
+		commands = append(commands, settingUpdates(declared, settings)...)
+	}
 	if handover {
 		commands = append(commands, DemoteInstance{Name: retiringMain})
 	}
@@ -457,6 +502,22 @@ func boltServerUpdates(declared Topology, registered map[string]memgraph.Instanc
 		}
 	}
 	return commands
+}
+
+// settingUpdates are the SET COORDINATOR SETTINGs that move every setting the
+// topology declares onto its declared value, for the settings the observed view
+// reports at another one. A setting the view does not report is left alone: it
+// is a view that does not carry it, not a setting holding the wrong value.
+func settingUpdates(declared Topology, settings map[string]string) []Command {
+	want := memgraph.SettingFalse
+	if declared.ReadsOnMain {
+		want = memgraph.SettingTrue
+	}
+	observed, known := settings[memgraph.SettingReadsOnMain]
+	if !known || strings.EqualFold(observed, want) {
+		return nil
+	}
+	return []Command{SetCoordinatorSetting{Name: memgraph.SettingReadsOnMain, Value: want}}
 }
 
 // leaderName is the coordinator the observed view reports as Raft leader, or the

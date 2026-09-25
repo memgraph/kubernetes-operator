@@ -39,6 +39,22 @@ const (
 	RoleReplica  = "replica"
 )
 
+// SettingReadsOnMain is the coordinator setting that makes the routing table
+// hand clients the MAIN as a reader too. The coordinators build the readers
+// list from the replicas alone, so a cluster with a single data instance has
+// an empty one without it, and a client opening a read session is told there
+// is nowhere to read from — on a cluster whose only member is perfectly able
+// to answer. Its value is "true" or "false", replicated through Raft like the
+// registrations, and reported by SHOW COORDINATOR SETTINGS under this name.
+const SettingReadsOnMain = "enabled_reads_on_main"
+
+// The two values a boolean coordinator setting takes, as SHOW COORDINATOR
+// SETTINGS spells them.
+const (
+	SettingTrue  = "true"
+	SettingFalse = "false"
+)
+
 // HealthUp is the SHOW INSTANCES health of an instance the coordinator leader
 // currently reaches. Anything else — "down", or "unknown" from a coordinator
 // that does not health-check the data plane — means it does not.
@@ -167,6 +183,18 @@ type Client interface {
 	AddCoordinator(ctx context.Context, coordinator CoordinatorSpec) error
 	RegisterInstance(ctx context.Context, instance DataInstanceSpec) error
 	SetInstanceToMain(ctx context.Context, name string) error
+
+	// ShowCoordinatorSettings reports every cluster-wide coordinator setting by
+	// name, as the leader holds it. A follower forwards the query, and a
+	// coordinator that cannot reach the leader answers with no rows rather than
+	// failing — an empty map therefore means "cannot tell", which is why no
+	// setting is changed on the strength of it.
+	ShowCoordinatorSettings(ctx context.Context) (map[string]string, error)
+
+	// SetCoordinatorSetting changes one cluster-wide coordinator setting. It is
+	// a Raft-replicated write with no precondition beyond a known name and a
+	// valid value, forwarded to the leader from wherever it is issued.
+	SetCoordinatorSetting(ctx context.Context, name, value string) error
 
 	// UpdateCoordinatorBoltServer and UpdateInstanceBoltServer change the bolt
 	// address a registered member is announced at — the one address in the

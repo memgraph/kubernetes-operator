@@ -407,6 +407,21 @@ spec:
 		_, err := utils.RunWithInput(cmd, manifest)
 		Expect(err).NotTo(HaveOccurred(), "Failed to apply the MemgraphCluster")
 
+		// A single data instance is the whole cluster, so the routing table has
+		// to name it as a reader too: the readers list is built from the
+		// replicas, and without the setting a client's read session is told there
+		// is nowhere to read from. The operator turns it on as part of
+		// registration, so it is asserted here, on the one single-instance cluster
+		// the suite boots.
+		By("waiting for the single instance to be registered with reads on MAIN enabled")
+		single := clusterUnderTest{namespace: retentionNamespace, name: retentionCluster, coordinators: 3, dataInstances: 1}
+		Eventually(single.verifyRegistered, 10*time.Minute, 10*time.Second).Should(Succeed())
+		Eventually(func(g Gomega) {
+			settings, err := single.coordinatorSettings()
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(settings).To(HaveKeyWithValue("enabled_reads_on_main", "true"))
+		}, 2*time.Minute, 5*time.Second).Should(Succeed())
+
 		By("waiting for the claims to be provisioned and adopted by their StatefulSets")
 		// One lib and one log claim per pod: three coordinators and one data
 		// instance, the smallest topology admission accepts. Adoption is what
@@ -1278,6 +1293,43 @@ func instanceNames(view []instanceRow) []string {
 		names = append(names, instance.name)
 	}
 	return names
+}
+
+// coordinatorSettings reads SHOW COORDINATOR SETTINGS through mgconsole on the
+// coordinator leader, keyed by setting name.
+func (c clusterUnderTest) coordinatorSettings() (map[string]string, error) {
+	pod, _, err := c.leaderPod()
+	if err != nil {
+		return nil, err
+	}
+	cmd := exec.Command("kubectl", "exec", pod, "-n", c.namespace, "-c", "memgraph", "--",
+		"bash", "-c", "echo 'SHOW COORDINATOR SETTINGS;' | mgconsole --output-format=csv")
+	output, err := utils.Run(cmd)
+	if err != nil {
+		return nil, err
+	}
+	lines := utils.GetNonEmptyLines(output)
+	header := -1
+	for i, line := range lines {
+		if strings.Contains(line, "setting_name") && strings.Contains(line, "setting_value") {
+			header = i
+			break
+		}
+	}
+	if header == -1 {
+		return nil, fmt.Errorf("no SHOW COORDINATOR SETTINGS header in mgconsole output: %q", output)
+	}
+	records, err := csv.NewReader(strings.NewReader(strings.Join(lines[header:], "\n"))).ReadAll()
+	if err != nil {
+		return nil, fmt.Errorf("parsing mgconsole CSV output: %w", err)
+	}
+	settings := make(map[string]string, len(records))
+	for _, record := range records[1:] {
+		if len(record) >= 2 {
+			settings[unquoteCell(record[0])] = unquoteCell(record[1])
+		}
+	}
+	return settings, nil
 }
 
 // showInstances runs SHOW INSTANCES through mgconsole inside the given

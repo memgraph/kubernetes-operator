@@ -403,3 +403,20 @@ func TestCoordinatorEndpoints(t *testing.T) {
 		t.Errorf("CoordinatorEndpoints() mismatch (-want +got):\n%s", diff)
 	}
 }
+
+// TestDeclaredTopologyReadsOnMain pins that reads on MAIN are declared exactly
+// for a single data instance: with no replica to read from, the routing table
+// has to name the MAIN as a reader or it names nothing.
+func TestDeclaredTopologyReadsOnMain(t *testing.T) {
+	if !resources.DeclaredTopology(dataInstancesCluster(1), resources.ExternalAddresses{}).ReadsOnMain {
+		t.Error("a single-instance topology does not declare reads on MAIN")
+	}
+	for _, count := range []int32{2, 3} {
+		if resources.DeclaredTopology(dataInstancesCluster(count), resources.ExternalAddresses{}).ReadsOnMain {
+			t.Errorf("a %d-instance topology declares reads on MAIN", count)
+		}
+	}
+	if resources.DeclaredTopology(minimalCluster(), resources.ExternalAddresses{}).ReadsOnMain {
+		t.Error("the default topology declares reads on MAIN")
+	}
+}

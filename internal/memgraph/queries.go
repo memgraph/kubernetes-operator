@@ -50,6 +50,17 @@ func registerInstanceQuery(instance DataInstanceSpec) string {
 	)
 }
 
+// showCoordinatorSettingsQuery takes no argument: one call reports every
+// cluster-wide setting the leader holds.
+const showCoordinatorSettingsQuery = "SHOW COORDINATOR SETTINGS"
+
+// setCoordinatorSettingQuery renders both the name and the value as string
+// literals, which is what the grammar takes for every setting, boolean ones
+// included.
+func setCoordinatorSettingQuery(name, value string) string {
+	return fmt.Sprintf("SET COORDINATOR SETTING %q TO %q", name, value)
+}
+
 // The UPDATE CONFIG queries take the same config map REGISTER INSTANCE and ADD
 // COORDINATOR do, but Memgraph honours only bolt_server in it: the routing
 // address is the one thing about a registered member that may change.

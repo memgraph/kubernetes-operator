@@ -823,19 +823,10 @@ func (r *MemgraphClusterReconciler) reconcileRegistration(
 		}
 	}()
 
-	// How far behind the MAIN each data instance is, which is what decides whether
-	// a retiring MAIN can hand over. The read is not allowed to fail the pass: it
-	// is consulted for that one decision, every other one has to keep working
-	// without it, and an empty view already means "no survivor is known to be
-	// caught up" — the same conclusion, reached by the planner.
-	lag, err := leader.ShowReplicationLag(ctx)
-	if err != nil {
-		log.Info("Could not read replication lag, so no MAIN handover will be planned", "reason", err.Error())
-		lag = nil
-	}
+	lag, settings := observeLeader(ctx, leader)
 
 	latest := observe(topology, observed).exposedAt(exposure)
-	commands := planner.Plan(topology, observed, lag)
+	commands := planner.Plan(topology, observed, lag, settings)
 	if len(commands) == 0 {
 		if retiring != "" {
 			// An empty plan is not on its own proof that the retirement finished: a
@@ -977,6 +968,35 @@ func (r *MemgraphClusterReconciler) reconcileRegistration(
 	// Registration was issued, not yet observed back; verify convergence on a
 	// follow-up reconcile instead of assuming success.
 	return ctrl.Result{RequeueAfter: requeueAfterRegistration}, nil
+}
+
+// observeLeader reads the two views the planner consults beyond SHOW INSTANCES,
+// neither of which is allowed to fail the pass.
+//
+// The replication lag — how far behind the MAIN each data instance is — decides
+// whether a retiring MAIN can hand over. It is consulted for that one decision,
+// every other one has to keep working without it, and an empty view already
+// means "no survivor is known to be caught up", the same conclusion the planner
+// reaches from nil.
+//
+// The coordinator settings carry the one the topology declares, reads on MAIN
+// for the single-instance cluster that has no replica to read from. A view that
+// could not be taken means the setting is left as it is this pass, which nil
+// says to the planner.
+func observeLeader(ctx context.Context, leader memgraph.Client) ([]memgraph.ReplicationLag, map[string]string) {
+	log := logf.FromContext(ctx)
+
+	lag, err := leader.ShowReplicationLag(ctx)
+	if err != nil {
+		log.Info("Could not read replication lag, so no MAIN handover will be planned", "reason", err.Error())
+		lag = nil
+	}
+	settings, err := leader.ShowCoordinatorSettings(ctx)
+	if err != nil {
+		log.Info("Could not read coordinator settings, so none will be changed", "reason", err.Error())
+		settings = nil
+	}
+	return lag, settings
 }
 
 // shedRetiredPods applies the shrinking roles' StatefulSets at their declared

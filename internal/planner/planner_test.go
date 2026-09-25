@@ -18,6 +18,7 @@ package planner_test
 
 import (
 	"fmt"
+	"slices"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -911,7 +912,7 @@ func TestPlan(t *testing.T) {
 				declared = *tc.declared
 			}
 
-			got := planner.Plan(declared, tc.observed, tc.lag)
+			got := planner.Plan(declared, tc.observed, tc.lag, nil)
 			if diff := cmp.Diff(tc.want, got); diff != "" {
 				t.Errorf("Plan() mismatch (-want +got):\n%s", diff)
 			}
@@ -1137,7 +1138,7 @@ func TestPlanUsesFixedPortsAndConfiguredClusterDomain(t *testing.T) {
 		promote(firstInstance),
 	}
 
-	got := planner.Plan(resources.DeclaredTopology(cluster, resources.ExternalAddresses{}), nil, nil)
+	got := planner.Plan(resources.DeclaredTopology(cluster, resources.ExternalAddresses{}), nil, nil, nil)
 	if diff := cmp.Diff(want, got); diff != "" {
 		t.Errorf("Plan() mismatch (-want +got):\n%s", diff)
 	}
@@ -1176,7 +1177,7 @@ func TestPlanConvergedOnFixedPorts(t *testing.T) {
 		},
 	}
 
-	if got := planner.Plan(declared, observed, nil); got != nil {
+	if got := planner.Plan(declared, observed, nil, nil); got != nil {
 		t.Errorf("Plan() = %v, want no commands", got)
 	}
 }
@@ -1306,7 +1307,124 @@ func TestPlanFollowsAnnouncedBoltAddress(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := planner.Plan(tc.declared, tc.observed, nil)
+			got := planner.Plan(tc.declared, tc.observed, nil, nil)
+			if diff := cmp.Diff(tc.want, got); diff != "" {
+				t.Errorf("Plan() mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestPlanFollowsReadsOnMain covers the one coordinator setting the topology
+// declares. A single-instance topology wants reads on MAIN, because the readers
+// list is built from the replicas and would otherwise be empty; a topology with
+// replicas wants it off. Either is planned only off an observed difference, and
+// a view that does not report the setting — or no view at all — plans nothing.
+func TestPlanFollowsReadsOnMain(t *testing.T) {
+	single := topologyOf(3, 1)
+	single.ReadsOnMain = true
+	convergedSingle := []memgraph.Instance{
+		observedCoordinator(0, memgraph.RoleLeader),
+		observedCoordinator(1, memgraph.RoleFollower),
+		observedCoordinator(2, memgraph.RoleFollower),
+		observedDataInstance(0, memgraph.RoleMain),
+	}
+	convergedPair := append(slices.Clone(convergedSingle), observedDataInstance(1, memgraph.RoleReplica))
+	enable := planner.SetCoordinatorSetting{Name: memgraph.SettingReadsOnMain, Value: memgraph.SettingTrue}
+	disable := planner.SetCoordinatorSetting{Name: memgraph.SettingReadsOnMain, Value: memgraph.SettingFalse}
+
+	cases := []struct {
+		name     string
+		declared planner.Topology
+		observed []memgraph.Instance
+		settings map[string]string
+		want     []planner.Command
+	}{
+		{
+			name:     "a single-instance cluster with reads on MAIN off turns it on",
+			declared: single,
+			observed: convergedSingle,
+			settings: map[string]string{memgraph.SettingReadsOnMain: memgraph.SettingFalse},
+			want:     []planner.Command{enable},
+		},
+		{
+			name:     "a single-instance cluster with reads on MAIN on is converged",
+			declared: single,
+			observed: convergedSingle,
+			settings: map[string]string{memgraph.SettingReadsOnMain: memgraph.SettingTrue},
+			want:     nil,
+		},
+		{
+			name:     "a cluster with replicas turns reads on MAIN back off",
+			declared: declaredTopology(),
+			observed: convergedPair,
+			settings: map[string]string{memgraph.SettingReadsOnMain: memgraph.SettingTrue},
+			want:     []planner.Command{disable},
+		},
+		{
+			name:     "a cluster with replicas and the default off is converged",
+			declared: declaredTopology(),
+			observed: convergedPair,
+			settings: map[string]string{memgraph.SettingReadsOnMain: memgraph.SettingFalse},
+			want:     nil,
+		},
+		{
+			name:     "the value is compared case-insensitively",
+			declared: single,
+			observed: convergedSingle,
+			settings: map[string]string{memgraph.SettingReadsOnMain: "True"},
+			want:     nil,
+		},
+		{
+			name:     "a view that does not report the setting changes nothing",
+			declared: single,
+			observed: convergedSingle,
+			settings: map[string]string{"sync_failover_only": memgraph.SettingFalse},
+			want:     nil,
+		},
+		{
+			name:     "no view at all changes nothing",
+			declared: single,
+			observed: convergedSingle,
+			settings: nil,
+			want:     nil,
+		},
+		{
+			name:     "the setting is planned alongside a bootstrap, after the registrations",
+			declared: single,
+			observed: nil,
+			settings: map[string]string{memgraph.SettingReadsOnMain: memgraph.SettingFalse},
+			want: []planner.Command{
+				planner.AddCoordinator{Coordinator: coordinatorSpec(0)},
+				planner.AddCoordinator{Coordinator: coordinatorSpec(1)},
+				planner.AddCoordinator{Coordinator: coordinatorSpec(2)},
+				planner.RegisterInstance{Instance: dataInstanceSpec(0)},
+				enable,
+				promote(firstInstance),
+			},
+		},
+		{
+			// A lowered count declares the single instance the moment it is edited,
+			// but the cluster has two until the retirement is through: the setting
+			// waits for the replica to be gone, so a paused retirement stays a pass
+			// that touches nothing.
+			name: "a retirement down to one instance leaves reads on MAIN for after the replica is gone",
+			declared: func() planner.Topology {
+				topology := shrunkTopology(1, 2)
+				topology.ReadsOnMain = true
+				return topology
+			}(),
+			observed: convergedPair,
+			settings: map[string]string{memgraph.SettingReadsOnMain: memgraph.SettingFalse},
+			want: []planner.Command{
+				planner.UnregisterInstance{Name: secondInstance},
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := planner.Plan(tc.declared, tc.observed, nil, tc.settings)
 			if diff := cmp.Diff(tc.want, got); diff != "" {
 				t.Errorf("Plan() mismatch (-want +got):\n%s", diff)
 			}

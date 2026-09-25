@@ -218,6 +218,7 @@ The MVP is deliberately "provision, bootstrap, observe". It does:
 - **grow a live cluster**: raise `coordinators` or `dataInstances` (both in one edit if you like, in any step size) and the added pods are provisioned and registered by the same diff that restores a lost registration — no manual `ADD COORDINATOR` or `REGISTER INSTANCE`;
 - **shrink a live cluster**: lower `dataInstances` or `coordinators` and the members above the new count are retired before their pods are shed — a data instance has MAIN moved off it if it holds it and is then `UNREGISTER INSTANCE`d, a coordinator is `REMOVE COORDINATOR`ed out of the Raft cluster — so the coordinators never expect an instance whose pod is gone, and no removed member's pod outlives its vote;
 - **expose the cluster outside Kubernetes**, through LoadBalancers or a Gateway API Gateway, and keep the routing table pointing at the addresses clients reach it through (see [External access](#external-access));
+- **serve reads from a single data instance**: with `dataInstances: 1` there is no replica to read from, so the operator turns the coordinators' `enabled_reads_on_main` setting on, which puts the MAIN in the routing table's readers list — and off again once the cluster grows a replica;
 - report the observed MAIN, the registered member counts, the external addresses, and the readiness and convergence conditions on the resource's status.
 
 Scaling is one edit, and `Converged` tells you when it is finished:

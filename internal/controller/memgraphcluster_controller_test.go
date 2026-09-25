@@ -923,6 +923,11 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			Expect(replicas(coordinatorSuffix)).To(Equal(int32(3)))
 			Expect(replicas(dataSuffix)).To(Equal(int32(1)))
 
+			// The cluster is a single data instance now, so reads on MAIN come on;
+			// the pass after observes it and reports convergence.
+			reconcileCluster(resourceName)
+			Expect(sinceBootstrap(baseline)).To(HaveLen(4))
+			Expect(sinceBootstrap(baseline)[3]).To(Equal(leader + ": SET COORDINATOR SETTING enabled_reads_on_main TO true"))
 			reconcileCluster(resourceName)
 			s := status()
 			Expect(s.Coordinators).To(Equal(int32(3)))
@@ -959,6 +964,13 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			Expect(sinceBootstrap(baseline)).To(HaveLen(1), "the removal is not re-issued")
 			Expect(convergedCondition().Reason).To(Equal(memgraphcomv1alpha1.ReasonRetirementInProgress))
 
+			By("turning reads on MAIN on once the cluster is the single instance")
+			reconcileCluster(resourceName)
+			Expect(sinceBootstrap(baseline)).To(Equal([]string{
+				leader + ": UNREGISTER INSTANCE instance_1",
+				leader + ": SET COORDINATOR SETTING enabled_reads_on_main TO true",
+			}), "the setting waits for the replica to be gone, so a paused retirement touches nothing")
+
 			By("reporting the shrink as finished once the StatefulSet runs the declared count")
 			reconcileCluster(resourceName)
 			s := status()
@@ -991,6 +1003,9 @@ var _ = Describe("MemgraphCluster Controller", func() {
 
 			reconcileCluster(resourceName)
 			Expect(replicas(dataSuffix)).To(Equal(int32(1)))
+			// One pass turns reads on MAIN on for the single instance, the next
+			// observes it.
+			reconcileCluster(resourceName)
 			reconcileCluster(resourceName)
 
 			s := status()
@@ -1046,6 +1061,9 @@ var _ = Describe("MemgraphCluster Controller", func() {
 
 			reconcileCluster(resourceName)
 			Expect(replicas(dataSuffix)).To(Equal(int32(1)))
+			// One pass turns reads on MAIN on for the single instance, the next
+			// observes it.
+			reconcileCluster(resourceName)
 			reconcileCluster(resourceName)
 
 			s := status()
@@ -2363,6 +2381,118 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(served).To(BeFalse())
 			Expect(missing).To(Equal("TCPRoute is served only as gateway.networking.k8s.io/v1alpha2"))
+		})
+	})
+
+	Context("when the cluster has a single data instance", func() {
+		const resourceName = "mgc-single"
+
+		enable := fmt.Sprintf("SET COORDINATOR SETTING %s TO %s", memgraph.SettingReadsOnMain, memgraph.SettingTrue)
+		disable := fmt.Sprintf("SET COORDINATOR SETTING %s TO %s", memgraph.SettingReadsOnMain, memgraph.SettingFalse)
+		leader := fmt.Sprintf("%s-coordinator-0.%s-coordinator.%s.svc.cluster.local:%d",
+			resourceName, resourceName, resourceNamespace, memgraphcomv1alpha1.BoltPort)
+
+		create := func(dataInstances int32) {
+			GinkgoHelper()
+			resource := &memgraphcomv1alpha1.MemgraphCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: resourceNamespace},
+				Spec:       memgraphcomv1alpha1.MemgraphClusterSpec{DataInstances: ptr.To(dataInstances)},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+		}
+		setDataInstances := func(count int32) {
+			GinkgoHelper()
+			cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+			get(resourceName, cluster)
+			cluster.Spec.DataInstances = ptr.To(count)
+			Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
+		}
+		bootstrapped := func() int {
+			GinkgoHelper()
+			reconcileCluster(resourceName)
+			markWorkloadsReady(resourceName)
+			reconcileCluster(resourceName)
+			reconcileCluster(resourceName)
+			cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+			get(resourceName, cluster)
+			Expect(apimeta.IsStatusConditionTrue(cluster.Status.Conditions,
+				memgraphcomv1alpha1.ConditionConverged)).To(BeTrue())
+			return len(fake.executedCommands())
+		}
+		sinceBootstrap := func(baseline int) []string {
+			GinkgoHelper()
+			return fake.executedCommands()[baseline:]
+		}
+
+		AfterEach(func() {
+			cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+			get(resourceName, cluster)
+			Expect(k8sClient.Delete(ctx, cluster)).To(Succeed())
+			deleteOwned(resourceName)
+		})
+
+		It("should turn reads on MAIN on when bootstrapping a single instance", func() {
+			create(1)
+			bootstrapped()
+
+			Expect(fake.executedCommands()).To(Equal([]string{
+				leader + ": ADD COORDINATOR 0",
+				leader + ": ADD COORDINATOR 1",
+				leader + ": ADD COORDINATOR 2",
+				leader + ": REGISTER INSTANCE instance_0",
+				leader + ": " + enable,
+				leader + ": SET INSTANCE instance_0 TO MAIN",
+			}))
+			Expect(fake.readsOnMain()).To(Equal(memgraph.SettingTrue))
+		})
+
+		It("should leave reads on MAIN off when bootstrapping a cluster with replicas", func() {
+			create(2)
+			bootstrapped()
+
+			Expect(fake.executedCommands()).NotTo(ContainElement(ContainSubstring("SET COORDINATOR SETTING")))
+			Expect(fake.readsOnMain()).To(Equal(memgraph.SettingFalse))
+		})
+
+		It("should turn reads on MAIN on when a cluster shrinks to a single instance, and off when it grows again", func() {
+			create(2)
+			baseline := bootstrapped()
+
+			setDataInstances(1)
+			// The retirement pass unregisters the replica, the next sheds its pod,
+			// and only then — the cluster being a single instance — does the
+			// setting come on.
+			reconcileCluster(resourceName)
+			Expect(sinceBootstrap(baseline)).To(Equal([]string{
+				leader + ": UNREGISTER INSTANCE instance_1",
+			}), "the setting waits for the replica to be gone")
+			reconcileCluster(resourceName)
+			Expect(fake.readsOnMain()).To(Equal(memgraph.SettingFalse))
+			reconcileCluster(resourceName)
+			Expect(sinceBootstrap(baseline)).To(Equal([]string{
+				leader + ": UNREGISTER INSTANCE instance_1",
+				leader + ": " + enable,
+			}))
+			Expect(fake.readsOnMain()).To(Equal(memgraph.SettingTrue))
+			reconcileCluster(resourceName)
+
+			setDataInstances(2)
+			reconcileCluster(resourceName)
+			markWorkloadsReady(resourceName)
+			reconcileCluster(resourceName)
+			Expect(fake.executedCommands()[len(fake.executedCommands())-2:]).To(Equal([]string{
+				leader + ": REGISTER INSTANCE instance_1",
+				leader + ": " + disable,
+			}))
+			Expect(fake.readsOnMain()).To(Equal(memgraph.SettingFalse))
+		})
+
+		It("should not touch a setting that already holds the declared value", func() {
+			create(1)
+			fake.settings = map[string]string{memgraph.SettingReadsOnMain: memgraph.SettingTrue}
+			bootstrapped()
+
+			Expect(fake.executedCommands()).NotTo(ContainElement(ContainSubstring("SET COORDINATOR SETTING")))
 		})
 	})
 })

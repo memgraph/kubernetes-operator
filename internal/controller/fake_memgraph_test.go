@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"maps"
 	"slices"
 	"strconv"
 	"strings"
@@ -57,6 +58,9 @@ type fakeMemgraph struct {
 	// which is the only way a permanently failing plan can be provoked here: every
 	// other rejection this fake models is one the planner is careful never to plan.
 	rejected map[string]error
+	// settings is the cluster-wide coordinator settings the leader holds. The
+	// zero value reports reads on MAIN as off, which is Memgraph's default.
+	settings map[string]string
 	// executed records every mutating command as "<bolt address>: <command>".
 	executed []string
 }
@@ -96,6 +100,21 @@ func (f *fakeMemgraph) connects() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.connectAttempts
+}
+
+// coordinatorSettings is the settings view, with Memgraph's defaults filled
+// in for anything a test did not set. Must be called with the cluster lock held.
+func (f *fakeMemgraph) coordinatorSettings() map[string]string {
+	settings := map[string]string{memgraph.SettingReadsOnMain: memgraph.SettingFalse}
+	maps.Copy(settings, f.settings)
+	return settings
+}
+
+// readsOnMain reads the reads-on-MAIN setting as the cluster currently holds it.
+func (f *fakeMemgraph) readsOnMain() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.coordinatorSettings()[memgraph.SettingReadsOnMain]
 }
 
 func (f *fakeMemgraph) executedCommands() []string {
@@ -218,6 +237,32 @@ func (c *fakeClient) ShowReplicationLag(context.Context) ([]memgraph.Replication
 		})
 	}
 	return lag, nil
+}
+
+// ShowCoordinatorSettings answers as the real query does on a coordinator that
+// can reach the leader: every setting, by name.
+func (c *fakeClient) ShowCoordinatorSettings(context.Context) (map[string]string, error) {
+	c.cluster.mu.Lock()
+	defer c.cluster.mu.Unlock()
+	if c.closed {
+		return nil, fmt.Errorf("fake memgraph: connection to %s already closed", c.address)
+	}
+	return c.cluster.coordinatorSettings(), nil
+}
+
+// SetCoordinatorSetting changes one setting and, like the real thing, refuses
+// a name it does not know.
+func (c *fakeClient) SetCoordinatorSetting(_ context.Context, name, value string) error {
+	return c.execute(fmt.Sprintf("SET COORDINATOR SETTING %s TO %s", name, value), func() error {
+		if _, known := c.cluster.coordinatorSettings()[name]; !known {
+			return fmt.Errorf("fake memgraph: unknown coordinator setting %s", name)
+		}
+		if c.cluster.settings == nil {
+			c.cluster.settings = map[string]string{}
+		}
+		c.cluster.settings[name] = value
+		return nil
+	})
 }
 
 func (c *fakeClient) AddCoordinator(_ context.Context, coordinator memgraph.CoordinatorSpec) error {

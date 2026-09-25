@@ -106,6 +106,21 @@ func TestUpdateInstanceBoltServerQuery(t *testing.T) {
 	}
 }
 
+// Both halves of a coordinator setting are string literals in the grammar, the
+// boolean ones included, so the query quotes both.
+func TestSetCoordinatorSettingQuery(t *testing.T) {
+	got := setCoordinatorSettingQuery(SettingReadsOnMain, SettingTrue)
+	if want := `SET COORDINATOR SETTING "enabled_reads_on_main" TO "true"`; got != want {
+		t.Errorf("setCoordinatorSettingQuery() = %q, want %q", got, want)
+	}
+}
+
+func TestShowCoordinatorSettingsQuery(t *testing.T) {
+	if want := "SHOW COORDINATOR SETTINGS"; showCoordinatorSettingsQuery != want {
+		t.Errorf("showCoordinatorSettingsQuery = %q, want %q", showCoordinatorSettingsQuery, want)
+	}
+}
+
 func TestDemoteInstanceQuery(t *testing.T) {
 	got := demoteInstanceQuery(testInstanceName)
 	if want := "DEMOTE INSTANCE instance_1"; got != want {

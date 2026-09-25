@@ -78,6 +78,25 @@ func (c *boltClient) ShowReplicationLag(ctx context.Context) ([]ReplicationLag, 
 	return lag, nil
 }
 
+func (c *boltClient) ShowCoordinatorSettings(ctx context.Context) (map[string]string, error) {
+	records, err := c.run(ctx, showCoordinatorSettingsQuery)
+	if err != nil {
+		return nil, err
+	}
+	settings := make(map[string]string, len(records))
+	for _, record := range records {
+		if name := stringColumn(record, "setting_name"); name != "" {
+			settings[name] = stringColumn(record, "setting_value")
+		}
+	}
+	return settings, nil
+}
+
+func (c *boltClient) SetCoordinatorSetting(ctx context.Context, name, value string) error {
+	_, err := c.run(ctx, setCoordinatorSettingQuery(name, value))
+	return err
+}
+
 func (c *boltClient) AddCoordinator(ctx context.Context, coordinator CoordinatorSpec) error {
 	_, err := c.run(ctx, addCoordinatorQuery(coordinator))
 	return err

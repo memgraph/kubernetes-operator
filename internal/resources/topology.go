@@ -106,6 +106,9 @@ func DeclaredTopology(
 	topology := planner.Topology{
 		Coordinators:  make([]memgraph.CoordinatorSpec, 0, spec.coordinators),
 		DataInstances: make([]memgraph.DataInstanceSpec, 0, spec.dataInstances),
+		// A single data instance is the whole cluster: it has to serve reads
+		// too, or the routing table names nowhere to read from.
+		ReadsOnMain: spec.dataInstances == 1,
 	}
 	for ordinal := range spec.coordinators {
 		topology.Coordinators = append(topology.Coordinators,
