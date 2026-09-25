@@ -58,13 +58,15 @@ kubectl apply -f charts/memgraph-operator/crds/
 
 The manager's ClusterRole is generated from the controller's own RBAC markers, so it grants
 exactly what the reconciler issues: read MemgraphClusters, patch their status, and create and
-patch (server-side apply) the StatefulSets, Services, Gateways and TCPRoutes it provisions. It
-deletes exactly two kinds of thing: Pods, one at a time, to roll a changed pod template through
-the cluster, and the external Services, Gateways and TCPRoutes that a removed `externalAccess`
-block or a retired data instance leaves behind. It cannot delete a StatefulSet or a headless
-Service — deleting a `MemgraphCluster` removes them through garbage collection of the owner
-references. The Gateway API rules are granted whether or not the cluster serves that group; a
-cluster without the Gateway API simply never exercises them. Leader election adds a Lease and
+patch (server-side apply) the StatefulSets, Services, Gateways, TCPRoutes and ServiceMonitors it
+provisions. It deletes exactly two kinds of thing: Pods, one at a time, to roll a changed pod
+template through the cluster, and the objects a removed spec block leaves behind — the external
+Services, Gateways and TCPRoutes of a removed `externalAccess` block or a retired data instance,
+and the ServiceMonitor of a removed `monitoring.serviceMonitor` block. It cannot delete a
+StatefulSet or a headless Service — deleting a `MemgraphCluster` removes them through garbage
+collection of the owner references. The Gateway API and `monitoring.coreos.com` rules are granted
+whether or not the cluster serves those groups; a cluster without them simply never exercises
+the rules. Leader election adds a Lease and
 Events in the operator's own namespace, and the
 metrics endpoint adds the TokenReview/SubjectAccessReview permissions it authorizes scrapes
 with. Nothing grants read access to Secrets: the license Secret is referenced from the

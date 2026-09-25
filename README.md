@@ -163,7 +163,7 @@ Uninstall the operator with `helm uninstall memgraph-operator --namespace memgra
 
 ## Configuration
 
-Beyond the quickstart's four fields, v1alpha1 exposes storage (PVC size, access mode, storage class, whether the log claim is created at all, retention) per role, optional core dump collection with an uploader sidecar of your choice per role, resource requests and limits per role, readiness probe timings, custom labels on pods, StatefulSets and Services, the cluster domain used in advertised addresses, [external access](#external-access) through LoadBalancers or a Gateway API Gateway, and a freeform passthrough per role for environment variables, Memgraph flags, and extra volumes and volume mounts. Internal ports are fixed: Bolt 7687, management 10000, replication 20000, and coordinator 12000.
+Beyond the quickstart's four fields, v1alpha1 exposes storage (PVC size, access mode, storage class, whether the log claim is created at all, retention) per role, optional core dump collection with an uploader sidecar of your choice per role, resource requests and limits per role, readiness probe timings, custom labels on pods, StatefulSets and Services, the cluster domain used in advertised addresses, [external access](#external-access) through LoadBalancers or a Gateway API Gateway, a [ServiceMonitor](docs/monitoring.md) for a Prometheus Operator you already run, and a freeform passthrough per role for environment variables, Memgraph flags, and extra volumes and volume mounts. Internal ports are fixed: Bolt 7687, management 10000, replication 20000, coordinator 12000, and metrics 9091.
 
 [`config/samples/v1alpha1_memgraphcluster.yaml`](config/samples/v1alpha1_memgraphcluster.yaml) spells the full surface out with every default and the reasoning behind it. `kubectl explain mgc.spec --recursive` documents the same fields from the installed CRD.
 
@@ -218,6 +218,7 @@ The MVP is deliberately "provision, bootstrap, observe". It does:
 - **grow a live cluster**: raise `coordinators` or `dataInstances` (both in one edit if you like, in any step size) and the added pods are provisioned and registered by the same diff that restores a lost registration — no manual `ADD COORDINATOR` or `REGISTER INSTANCE`;
 - **shrink a live cluster**: lower `dataInstances` or `coordinators` and the members above the new count are retired before their pods are shed — a data instance has MAIN moved off it if it holds it and is then `UNREGISTER INSTANCE`d, a coordinator is `REMOVE COORDINATOR`ed out of the Raft cluster — so the coordinators never expect an instance whose pod is gone, and no removed member's pod outlives its vote;
 - **expose the cluster outside Kubernetes**, through LoadBalancers or a Gateway API Gateway, and keep the routing table pointing at the addresses clients reach it through (see [External access](#external-access));
+- **serve OpenMetrics** from every instance on port 9091, declared on the pods and the headless Services and pinned to that format, so a Prometheus you already run scrapes the cluster with a ServiceMonitor, PodMonitor or scrape config of your own — and, for a Prometheus Operator, create the ServiceMonitor for you with `spec.monitoring.serviceMonitor` (see [`docs/monitoring.md`](docs/monitoring.md));
 - report the observed MAIN, the registered member counts, the external addresses, and the readiness and convergence conditions on the resource's status.
 
 Scaling is one edit, and `Converged` tells you when it is finished:
@@ -242,7 +243,7 @@ What it does not do yet:
 - **NodePort or ingress exposure**, a declared hostname without external-dns, or attaching to a Gateway you already run — see [what external access leaves out](docs/external-access.md#not-in-scope).
 - **TLS**, for Bolt or intra-cluster traffic — the addresses external access announces are plain Bolt.
 - **Bolt authentication** — the operator connects to the coordinators unauthenticated, so clusters must not enable auth yet.
-- **Monitoring** of the Memgraph cluster: no exporter, ServiceMonitor or dashboards. (The operator itself serves controller-runtime metrics; see the [chart README](charts/memgraph-operator/README.md).)
+- **The rest of the HA chart's monitoring**: the `mg-exporter` and its JSON format, vmagent remote write, the Vector log sidecar, and a ServiceMonitor placed in another namespace — see [what monitoring leaves out](docs/monitoring.md#not-in-scope). The Grafana dashboard ConfigMap is next. (The operator itself serves controller-runtime metrics; see the [chart README](charts/memgraph-operator/README.md).)
 - **Standalone (non-HA) topology.** The API is shaped to grow one without a breaking change, but v1alpha1 provisions HA clusters only.
 - **Affinity, tolerations, init containers, sidecars, snapshot-restore fields** and the rest of the HA chart's surface — parity roadmap, not MVP.
 

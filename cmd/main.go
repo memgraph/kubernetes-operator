@@ -40,6 +40,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
+	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
+
 	memgraphcomv1alpha1 "github.com/memgraph/kubernetes-operator/api/v1alpha1"
 	"github.com/memgraph/kubernetes-operator/internal/controller"
 	"github.com/memgraph/kubernetes-operator/internal/memgraph"
@@ -60,6 +62,7 @@ func init() {
 	// cluster serves them: knowing a type costs nothing, watching it is what
 	// is gated on discovery below.
 	utilruntime.Must(gatewayv1.Install(scheme))
+	utilruntime.Must(monitoringv1.AddToScheme(scheme))
 	// +kubebuilder:scaffold:scheme
 }
 
@@ -215,12 +218,23 @@ func main() {
 	}
 	setupLog.Info("Discovered Gateway API support", "served", gatewayAPI, "missing", gatewayAPIMissing)
 
+	// The same for Prometheus Operator's ServiceMonitor, whose CRD belongs to
+	// whoever installs Prometheus Operator.
+	serviceMonitorAPI, serviceMonitorAPIMissing, err := controller.ServiceMonitorServed(mgr.GetRESTMapper())
+	if err != nil {
+		setupLog.Error(err, "Failed to discover whether ServiceMonitor is served")
+		os.Exit(1)
+	}
+	setupLog.Info("Discovered ServiceMonitor support", "served", serviceMonitorAPI, "missing", serviceMonitorAPIMissing)
+
 	if err := (&controller.MemgraphClusterReconciler{
-		Client:            mgr.GetClient(),
-		Scheme:            mgr.GetScheme(),
-		Memgraph:          memgraph.NewBoltConnector(),
-		GatewayAPI:        gatewayAPI,
-		GatewayAPIMissing: gatewayAPIMissing,
+		Client:                   mgr.GetClient(),
+		Scheme:                   mgr.GetScheme(),
+		Memgraph:                 memgraph.NewBoltConnector(),
+		GatewayAPI:               gatewayAPI,
+		GatewayAPIMissing:        gatewayAPIMissing,
+		ServiceMonitorAPI:        serviceMonitorAPI,
+		ServiceMonitorAPIMissing: serviceMonitorAPIMissing,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "memgraphcluster")
 		os.Exit(1)

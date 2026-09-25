@@ -196,6 +196,69 @@ var _ = Describe("MemgraphCluster", Ordered, func() {
 		Eventually(quickstartCluster.verifyRegistered, 10*time.Minute, 10*time.Second).Should(Succeed())
 	})
 
+	// The metrics endpoint is part of the contract whether or not the spec
+	// mentions monitoring: every instance of both roles serves OpenMetrics on
+	// the metrics port, in the format the operator pins rather than whichever
+	// the image defaults to. Read from inside the pod, so the check needs no
+	// scraper and proves the port the ServiceMonitor below names.
+	It("serves OpenMetrics on the metrics port of both roles", func() {
+		for _, pod := range []string{quickstartCluster.coordinatorPod(0), quickstartCluster.dataPod(0)} {
+			body, err := metricsFromPod(clusterNamespace, pod)
+			Expect(err).NotTo(HaveOccurred(), "reading /metrics on %s", pod)
+			Expect(body).To(ContainSubstring("# TYPE "), "%s serves the OpenMetrics text exposition", pod)
+			Expect(strings.TrimSpace(body)).NotTo(HavePrefix("{"), "%s serves OpenMetrics, not the deprecated JSON", pod)
+		}
+	})
+
+	// The one object the operator creates for a Prometheus Operator: present
+	// while the block is, gone when it goes. Whether a Prometheus discovers and
+	// scrapes it is Prometheus Operator's contract, so none runs here; the
+	// cluster has the CRD alone (hack/kind-prometheus-crds.sh).
+	It("creates a ServiceMonitor when asked for one and prunes it when the block is removed", func() {
+		By("adding the monitoring.serviceMonitor block")
+		cmd := exec.Command("kubectl", "patch", "memgraphcluster", quickstartCluster.name,
+			"-n", clusterNamespace, "--type=merge", "-p",
+			`{"spec":{"monitoring":{"serviceMonitor":{"labels":{"release":"kube-prometheus-stack"},"interval":"15s"}}}}`)
+		_, err := utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred())
+
+		By("waiting for the ServiceMonitor to select both headless Services on the metrics port")
+		Eventually(func(g Gomega) {
+			cmd := exec.Command("kubectl", "get", "servicemonitor", quickstartCluster.name, "-n", clusterNamespace,
+				"-o", "jsonpath={.metadata.labels.release} {.spec.selector.matchLabels.app\\.kubernetes\\.io/instance} "+
+					"{.spec.endpoints[0].port} {.spec.endpoints[0].interval}")
+			out, err := utils.Run(cmd)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(strings.TrimSpace(out)).To(Equal(
+				fmt.Sprintf("kube-prometheus-stack %s metrics 15s", quickstartCluster.name)))
+		}, 2*time.Minute, 5*time.Second).Should(Succeed())
+		for _, component := range []string{"coordinator", "data"} {
+			cmd := exec.Command("kubectl", "get", "service", quickstartCluster.name+"-"+component, "-n", clusterNamespace,
+				"-o", "jsonpath={.spec.ports[?(@.name==\"metrics\")].port}")
+			out, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(strings.TrimSpace(out)).To(Equal(fmt.Sprint(memgraphcomv1alpha1.MetricsPort)),
+				"the %s headless Service publishes the port the ServiceMonitor names", component)
+		}
+		quickstartCluster.awaitConverged(3 * time.Minute)
+
+		By("removing the block")
+		cmd = exec.Command("kubectl", "patch", "memgraphcluster", quickstartCluster.name,
+			"-n", clusterNamespace, "--type=merge", "-p", `{"spec":{"monitoring":null}}`)
+		_, err = utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred())
+
+		By("waiting for the ServiceMonitor to go")
+		Eventually(func(g Gomega) {
+			cmd := exec.Command("kubectl", "get", "servicemonitor", "-n", clusterNamespace,
+				"-l", resources.MonitoringLabel+"="+resources.MonitoringValue, "-o", "name")
+			out, err := utils.Run(cmd)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(strings.TrimSpace(out)).To(BeEmpty())
+		}, 2*time.Minute, 5*time.Second).Should(Succeed())
+		quickstartCluster.awaitConverged(3 * time.Minute)
+	})
+
 	// The operator's reason to exist over the chart's one-shot Job: a data
 	// instance that loses its registration is re-registered with no human
 	// action. This runs after the bootstrap spec (Ordered) against the same
@@ -992,6 +1055,22 @@ func (c clusterUnderTest) watchRoll(before map[string]string, timeout time.Durat
 	}, timeout, 2*time.Second).Should(Succeed())
 
 	return order, maxDown
+}
+
+// dataPod is the name of the data pod on the given ordinal.
+func (c clusterUnderTest) dataPod(ordinal int32) string {
+	return fmt.Sprintf("%s-data-%d", c.name, ordinal)
+}
+
+// metricsFromPod reads the pod's own metrics endpoint from inside the pod,
+// over bash's /dev/tcp so the check needs no curl in the image. The HTTP
+// headers are returned with the body; the assertions look for what only the
+// body carries.
+func metricsFromPod(namespace, pod string) (string, error) {
+	request := fmt.Sprintf(`exec 3<>/dev/tcp/127.0.0.1/%d && printf 'GET /metrics HTTP/1.0\r\nHost: localhost\r\n\r\n' >&3 && cat <&3`,
+		memgraphcomv1alpha1.MetricsPort)
+	cmd := exec.Command("kubectl", "exec", pod, "-n", namespace, "-c", "memgraph", "--", "bash", "-c", request)
+	return utils.Run(cmd)
 }
 
 // wipeInstanceRegistration unregisters the named data instance on the

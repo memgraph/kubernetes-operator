@@ -33,6 +33,7 @@ func CoordinatorHeadlessService(cluster *memgraphcomv1alpha1.MemgraphCluster) *c
 			{Name: boltPortName, Port: memgraphcomv1alpha1.BoltPort},
 			{Name: managementPortName, Port: memgraphcomv1alpha1.ManagementPort},
 			{Name: coordinatorPortName, Port: memgraphcomv1alpha1.CoordinatorPort},
+			{Name: metricsPortName, Port: memgraphcomv1alpha1.MetricsPort},
 		})
 }
 
@@ -46,6 +47,7 @@ func DataHeadlessService(cluster *memgraphcomv1alpha1.MemgraphCluster) *corev1.S
 			{Name: boltPortName, Port: memgraphcomv1alpha1.BoltPort},
 			{Name: managementPortName, Port: memgraphcomv1alpha1.ManagementPort},
 			{Name: replicationPortName, Port: memgraphcomv1alpha1.ReplicationPort},
+			{Name: metricsPortName, Port: memgraphcomv1alpha1.MetricsPort},
 		})
 }
 

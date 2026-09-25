@@ -51,6 +51,7 @@ const (
 	boltPortName        = "bolt"
 	managementPortName  = "management"
 	replicationPortName = "replication"
+	metricsPortName     = "metrics"
 
 	statefulSetKind = "StatefulSet"
 	serviceKind     = "Service"
@@ -259,6 +260,8 @@ func expectedArgs(boltPort, managementPort int32, logDestination string, extra .
 	return append([]string{
 		fmt.Sprintf("--bolt-port=%d", boltPort),
 		fmt.Sprintf("--management-port=%d", managementPort),
+		fmt.Sprintf("--metrics-port=%d", memgraphcomv1alpha1.MetricsPort),
+		"--metrics-format=OpenMetrics",
 		"--data-directory=" + dataPath,
 		"--log-level=TRACE",
 		"--also-log-to-stderr",
@@ -396,6 +399,7 @@ func TestCoordinatorStatefulSetDefaults(t *testing.T) {
 							{Name: boltPortName, ContainerPort: memgraphcomv1alpha1.BoltPort},
 							{Name: managementPortName, ContainerPort: memgraphcomv1alpha1.ManagementPort},
 							{Name: coordinatorComponent, ContainerPort: memgraphcomv1alpha1.CoordinatorPort},
+							{Name: metricsPortName, ContainerPort: memgraphcomv1alpha1.MetricsPort},
 						},
 						ReadinessProbe:  tcpProbe(memgraphcomv1alpha1.CoordinatorPort, 20),
 						VolumeMounts:    expectedVolumeMounts(),
@@ -452,6 +456,7 @@ func TestDataStatefulSetDefaults(t *testing.T) {
 							{Name: boltPortName, ContainerPort: memgraphcomv1alpha1.BoltPort},
 							{Name: managementPortName, ContainerPort: memgraphcomv1alpha1.ManagementPort},
 							{Name: replicationPortName, ContainerPort: memgraphcomv1alpha1.ReplicationPort},
+							{Name: metricsPortName, ContainerPort: memgraphcomv1alpha1.MetricsPort},
 						},
 						ReadinessProbe:  tcpProbe(memgraphcomv1alpha1.BoltPort, 20),
 						VolumeMounts:    expectedVolumeMounts(),
@@ -993,6 +998,7 @@ func TestStatefulSetFixedPortsAndClusterDomain(t *testing.T) {
 			{Name: boltPortName, ContainerPort: memgraphcomv1alpha1.BoltPort},
 			{Name: managementPortName, ContainerPort: memgraphcomv1alpha1.ManagementPort},
 			{Name: coordinatorComponent, ContainerPort: memgraphcomv1alpha1.CoordinatorPort},
+			{Name: metricsPortName, ContainerPort: memgraphcomv1alpha1.MetricsPort},
 		}
 		if diff := cmp.Diff(wantPorts, container.Ports); diff != "" {
 			t.Errorf("container ports mismatch (-want +got):\n%s", diff)
@@ -1017,6 +1023,7 @@ func TestStatefulSetFixedPortsAndClusterDomain(t *testing.T) {
 			{Name: boltPortName, ContainerPort: memgraphcomv1alpha1.BoltPort},
 			{Name: managementPortName, ContainerPort: memgraphcomv1alpha1.ManagementPort},
 			{Name: replicationPortName, ContainerPort: memgraphcomv1alpha1.ReplicationPort},
+			{Name: metricsPortName, ContainerPort: memgraphcomv1alpha1.MetricsPort},
 		}
 		if diff := cmp.Diff(wantPorts, container.Ports); diff != "" {
 			t.Errorf("container ports mismatch (-want +got):\n%s", diff)

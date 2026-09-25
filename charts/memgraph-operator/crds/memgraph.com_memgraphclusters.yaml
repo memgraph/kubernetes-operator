@@ -898,6 +898,47 @@ spec:
                         type: object
                     type: object
                 type: object
+              monitoring:
+                description: |-
+                  monitoring creates the objects a monitoring stack the user already runs
+                  discovers the cluster by. Every instance serves OpenMetrics on port 9091
+                  whether or not this block is set; the block only adds the objects that
+                  point a stack at it.
+                properties:
+                  serviceMonitor:
+                    description: |-
+                      serviceMonitor creates a Prometheus Operator ServiceMonitor scraping
+                      every instance of the cluster. The ServiceMonitor CRD
+                      (monitoring.coreos.com/v1) must already be installed on the cluster: it
+                      belongs to whoever installs Prometheus Operator and is never bundled
+                      with the operator. Asking for one on a cluster without it is reported
+                      on the resource as ApplyFailed.
+                    properties:
+                      annotations:
+                        additionalProperties:
+                          type: string
+                        description: annotations are added to the ServiceMonitor.
+                        maxProperties: 64
+                        type: object
+                      interval:
+                        description: |-
+                          interval is how often Prometheus scrapes every instance, as a Prometheus
+                          duration such as "15s" or "1m". Omitted, the ServiceMonitor names no
+                          interval and Prometheus's global scrape interval applies.
+                        pattern: ^(0|(([0-9]+)y)?(([0-9]+)w)?(([0-9]+)d)?(([0-9]+)h)?(([0-9]+)m)?(([0-9]+)s)?(([0-9]+)ms)?)$
+                        type: string
+                      labels:
+                        additionalProperties:
+                          type: string
+                        description: |-
+                          labels are added to the ServiceMonitor. They are what a Prometheus
+                          selects ServiceMonitors by — with kube-prometheus-stack, the release
+                          label, for example "release: kube-prometheus-stack". The operator's own
+                          identity labels win a key collision, as they do everywhere else.
+                        maxProperties: 64
+                        type: object
+                    type: object
+                type: object
               readinessProbe:
                 description: |-
                   readinessProbe tunes the readiness probe timings of every pod, the one

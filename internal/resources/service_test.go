@@ -43,6 +43,7 @@ func TestCoordinatorHeadlessService(t *testing.T) {
 				{Name: boltPortName, Port: memgraphcomv1alpha1.BoltPort},
 				{Name: managementPortName, Port: memgraphcomv1alpha1.ManagementPort},
 				{Name: coordinatorComponent, Port: memgraphcomv1alpha1.CoordinatorPort},
+				{Name: metricsPortName, Port: memgraphcomv1alpha1.MetricsPort},
 			},
 		},
 	}
@@ -69,6 +70,7 @@ func TestDataHeadlessService(t *testing.T) {
 				{Name: boltPortName, Port: memgraphcomv1alpha1.BoltPort},
 				{Name: managementPortName, Port: memgraphcomv1alpha1.ManagementPort},
 				{Name: replicationPortName, Port: memgraphcomv1alpha1.ReplicationPort},
+				{Name: metricsPortName, Port: memgraphcomv1alpha1.MetricsPort},
 			},
 		},
 	}
@@ -101,6 +103,7 @@ func TestHeadlessServicePortsAndLabels(t *testing.T) {
 				{Name: boltPortName, Port: memgraphcomv1alpha1.BoltPort},
 				{Name: managementPortName, Port: memgraphcomv1alpha1.ManagementPort},
 				{Name: coordinatorComponent, Port: memgraphcomv1alpha1.CoordinatorPort},
+				{Name: metricsPortName, Port: memgraphcomv1alpha1.MetricsPort},
 			},
 		},
 		{
@@ -112,6 +115,7 @@ func TestHeadlessServicePortsAndLabels(t *testing.T) {
 				{Name: boltPortName, Port: memgraphcomv1alpha1.BoltPort},
 				{Name: managementPortName, Port: memgraphcomv1alpha1.ManagementPort},
 				{Name: replicationPortName, Port: memgraphcomv1alpha1.ReplicationPort},
+				{Name: metricsPortName, Port: memgraphcomv1alpha1.MetricsPort},
 			},
 		},
 	}
