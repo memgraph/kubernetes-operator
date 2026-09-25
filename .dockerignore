@@ -9,3 +9,6 @@
 # Re-include Go module files
 !go.mod
 !go.sum
+
+# Re-include the files the binary embeds (go:embed): the Grafana dashboard.
+!internal/resources/dashboards/*.json
