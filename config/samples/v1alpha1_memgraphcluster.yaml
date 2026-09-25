@@ -297,18 +297,23 @@ spec:
   # one with its serviceMonitorNamespaceSelector. Removing the block deletes
   # the ServiceMonitor again. grafanaDashboard provisions the "Memgraph
   # OpenMetrics" Grafana dashboard as a ConfigMap for a Grafana sidecar to
-  # load: labels default to grafana_dashboard: "1", the kube-prometheus-stack
-  # convention, and a label set you name replaces that default; the sidecar
-  # reads grafana_folder from the annotations. Each block is optional on its
-  # own.
+  # load. An empty block is enough: the operator labels the ConfigMap
+  # grafana_dashboard: "1", which is what the kube-prometheus-stack sidecar
+  # selects on. Set labels only for a sidecar configured with another label;
+  # a set you name replaces the default. The sidecar reads grafana_folder from
+  # the annotations to file the dashboard. Each block is optional on its own.
   # monitoring:
   #   serviceMonitor:
   #     labels:
   #       release: kube-prometheus-stack
   #     annotations: {}
   #     interval: 15s
+  #   grafanaDashboard: {}
+  #
+  # Or, filed in a folder, for a sidecar selecting on its own label:
+  # monitoring:
   #   grafanaDashboard:
   #     labels:
-  #       grafana_dashboard: "1"
+  #       my_sidecar: "yes"
   #     annotations:
   #       grafana_folder: Memgraph
