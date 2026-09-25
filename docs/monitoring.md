@@ -66,11 +66,31 @@ Converged=False  reason=ApplyFailed
 
 while `Ready` and everything else about the cluster are unaffected. Installing the CRD later takes an operator restart, which is documented here rather than detected, exactly as for the Gateway API. Dropping the block clears the condition.
 
+## `spec.monitoring.grafanaDashboard`
+
+```yaml
+spec:
+  monitoring:
+    grafanaDashboard:
+      labels:
+        grafana_dashboard: "1"     # the default; what your Grafana sidecar selects on
+      annotations:
+        grafana_folder: Memgraph   # optional; the sidecar files the dashboard here
+```
+
+Presence-based like the block above. Present, the operator creates one ConfigMap named `<cluster>-grafana-dashboard` in the cluster's namespace, holding the HA chart's "Memgraph OpenMetrics" dashboard under the key `memgraph_openmetrics.json`; removed, the ConfigMap is deleted. The dashboard binds to a datasource template variable, so it needs no edit to point at your Prometheus. An empty block (`grafanaDashboard: {}`) works with kube-prometheus-stack's sidecar out of the box.
+
+- **`labels`** default to `grafana_dashboard: "1"`, the label the kube-prometheus-stack sidecar selects dashboard ConfigMaps by. A label set you name **replaces** the default rather than adding to it, so a sidecar configured with another label gets exactly that.
+- **`annotations`** are free-form; the sidecar reads `grafana_folder` from them to file the dashboard in a Grafana folder.
+- **The JSON is compiled into the operator**, copied from `charts/memgraph-high-availability/dashboards/memgraph_openmetrics.json` in [memgraph/helm-charts](https://github.com/memgraph/helm-charts). It changes with operator releases, by copying the chart's file over `internal/resources/dashboards/memgraph_openmetrics.json`, not with the spec. Fetching it at reconcile time would make reconciliation depend on the network for a file that changes a few times a year.
+- **No `namespace`**, for the reason the ServiceMonitor has none. The sidecar watches only its own namespace by default; with kube-prometheus-stack, `grafana.sidecar.dashboards.searchNamespace: ALL` (or the cluster's namespace) makes it look here.
+
+The ConfigMap is applied on every reconcile pass like every other object the operator owns, which is about 460 KB to the API server per cluster per 30-second resync and no etcd write when nothing changed. That is noise next to a Prometheus scraping the same cluster, and there is deliberately no second code path that skips the apply when the cached copy matches: it can come if someone sees the cost on a graph.
+
 ## Not in scope
 
 - **The `mg-exporter`**, JSON metrics, vmagent remote write and the Vector log sidecar the HA chart offers. The operator serves OpenMetrics directly and lets your stack scrape it.
 - **`scheme` and `tlsConfig`** on the ServiceMonitor. They only mean something once Memgraph serves metrics over HTTPS, which the operator has no support for yet. They arrive with TLS, driven by the same spec that turns it on.
 - **A ServiceMonitor in another namespace.** See above.
-- **A Prometheus of its own**, or any assertion that a Prometheus scrapes the object. The e2e suite proves the endpoint answers and the object is created and pruned; discovery is Prometheus Operator's contract.
-
-The Grafana dashboard ConfigMap the HA chart provisions is the next issue (`specs/operator-mvp/issues/19-grafana-dashboard.md`) and lands as `spec.monitoring.grafanaDashboard` beside this block.
+- **The chart's "Memgraph Logs" dashboard**, which reads logs the Vector sidecar ships; without the sidecar there is nothing for it to show.
+- **A Prometheus or a Grafana of its own**, or any assertion that one discovers the objects. The e2e suite proves the endpoint answers and the objects are created and pruned; discovery is the stack's contract.

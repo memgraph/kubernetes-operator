@@ -2514,6 +2514,102 @@ var _ = Describe("MemgraphCluster Controller", func() {
 		})
 	})
 
+	Context("when asked for the Grafana dashboard", func() {
+		const resourceName = "mgc-dashboard"
+		const dashboardName = resourceName + "-grafana-dashboard"
+
+		updateSpec := func(mutate func(*memgraphcomv1alpha1.MemgraphClusterSpec)) {
+			GinkgoHelper()
+			cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+			get(resourceName, cluster)
+			mutate(&cluster.Spec)
+			Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
+		}
+		dashboards := func() []corev1.ConfigMap {
+			GinkgoHelper()
+			list := &corev1.ConfigMapList{}
+			Expect(k8sClient.List(ctx, list, client.InNamespace(resourceNamespace),
+				client.MatchingLabels{resources.MonitoringLabel: resources.MonitoringValue})).To(Succeed())
+			return list.Items
+		}
+		cleanupDashboards := func() {
+			GinkgoHelper()
+			for _, item := range dashboards() {
+				Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, &item))).To(Succeed())
+			}
+		}
+
+		BeforeEach(func() {
+			resource := &memgraphcomv1alpha1.MemgraphCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: resourceNamespace},
+				Spec: memgraphcomv1alpha1.MemgraphClusterSpec{
+					Monitoring: &memgraphcomv1alpha1.MonitoringSpec{
+						GrafanaDashboard: &memgraphcomv1alpha1.GrafanaDashboardSpec{},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+		})
+
+		AfterEach(func() {
+			cleanupDashboards()
+			cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+			get(resourceName, cluster)
+			Expect(k8sClient.Delete(ctx, cluster)).To(Succeed())
+			deleteOwned(resourceName)
+		})
+
+		It("should create the dashboard ConfigMap with the sidecar's default label", func() {
+			reconcileCluster(resourceName)
+
+			cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+			get(resourceName, cluster)
+			// The CRD default applied at admission, so an empty block arrived
+			// with the label already in it.
+			Expect(cluster.Spec.Monitoring.GrafanaDashboard.Labels).To(Equal(map[string]string{"grafana_dashboard": "1"}))
+
+			dashboard := &corev1.ConfigMap{}
+			get(dashboardName, dashboard)
+			expectControlledBy(dashboard, cluster)
+			Expect(dashboard.Labels).To(HaveKeyWithValue("grafana_dashboard", "1"))
+			Expect(dashboard.Labels).To(HaveKeyWithValue(resources.MonitoringLabel, resources.MonitoringValue))
+			Expect(dashboard.Data).To(HaveKey(resources.GrafanaDashboardKey))
+			Expect(dashboard.Data[resources.GrafanaDashboardKey]).To(ContainSubstring(`"title": "Memgraph OpenMetrics"`))
+		})
+
+		It("should replace the default label with the block's own and file it by annotation", func() {
+			updateSpec(func(spec *memgraphcomv1alpha1.MemgraphClusterSpec) {
+				spec.Monitoring.GrafanaDashboard.Labels = map[string]string{"my_sidecar": "yes"}
+				spec.Monitoring.GrafanaDashboard.Annotations = map[string]string{"grafana_folder": "Memgraph"}
+			})
+			reconcileCluster(resourceName)
+
+			dashboard := &corev1.ConfigMap{}
+			get(dashboardName, dashboard)
+			Expect(dashboard.Labels).To(HaveKeyWithValue("my_sidecar", "yes"))
+			Expect(dashboard.Labels).NotTo(HaveKey("grafana_dashboard"),
+				"a named label set replaces the default rather than adding to it")
+			Expect(dashboard.Annotations).To(HaveKeyWithValue("grafana_folder", "Memgraph"))
+		})
+
+		It("should prune the ConfigMap when the block is removed", func() {
+			reconcileCluster(resourceName)
+			Expect(dashboards()).To(HaveLen(1))
+
+			updateSpec(func(spec *memgraphcomv1alpha1.MemgraphClusterSpec) {
+				spec.Monitoring.GrafanaDashboard = nil
+			})
+			reconcileCluster(resourceName)
+			Expect(dashboards()).To(BeEmpty(), "removing the block takes the object away")
+
+			updateSpec(func(spec *memgraphcomv1alpha1.MemgraphClusterSpec) {
+				spec.Monitoring = nil
+			})
+			reconcileCluster(resourceName)
+			Expect(dashboards()).To(BeEmpty(), "and so does removing the whole monitoring block")
+		})
+	})
+
 	Context("when discovering ServiceMonitor", func() {
 		It("should find it on a cluster that serves it", func() {
 			served, missing, err := ServiceMonitorServed(k8sClient.RESTMapper())

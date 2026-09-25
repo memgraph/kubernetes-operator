@@ -168,6 +168,12 @@ func main() {
 		metricsServerOptions.KeyName = metricsCertKey
 	}
 
+	// managedByOperator selects the objects the operator itself built, which
+	// every builder stamps with the managed-by label.
+	managedByOperator := klabels.SelectorFromSet(klabels.Set{
+		resources.ManagedByLabel: resources.ManagedByValue,
+	})
+
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsServerOptions,
@@ -176,14 +182,14 @@ func main() {
 		// Pods are cached, because the rolling restart needs each one's
 		// controller-revision-hash and readiness on every pass — but only this
 		// operator's own pods are. Watching every pod in the cluster to find them
-		// would cost memory proportional to somebody else's workload.
+		// would cost memory proportional to somebody else's workload. ConfigMaps
+		// the same: the operator owns one per cluster that asks for the Grafana
+		// dashboard, and every namespace has ConfigMaps that are none of its
+		// business.
 		Cache: cache.Options{
 			ByObject: map[client.Object]cache.ByObject{
-				&corev1.Pod{}: {
-					Label: klabels.SelectorFromSet(klabels.Set{
-						resources.ManagedByLabel: resources.ManagedByValue,
-					}),
-				},
+				&corev1.Pod{}:       {Label: managedByOperator},
+				&corev1.ConfigMap{}: {Label: managedByOperator},
 			},
 		},
 		LeaderElection:   enableLeaderElection,

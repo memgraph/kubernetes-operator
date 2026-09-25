@@ -18,15 +18,7 @@
 - apiGroups:
   - ""
   resources:
-  - pods
-  verbs:
-  - delete
-  - get
-  - list
-  - watch
-- apiGroups:
-  - ""
-  resources:
+  - configmaps
   - services
   verbs:
   - create
@@ -34,6 +26,15 @@
   - get
   - list
   - patch
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  verbs:
+  - delete
+  - get
+  - list
   - watch
 - apiGroups:
   - apps

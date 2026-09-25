@@ -903,6 +903,33 @@ spec:
                   whether or not this block is set; the block only adds the objects that
                   point a stack at it.
                 properties:
+                  grafanaDashboard:
+                    description: |-
+                      grafanaDashboard provisions the Memgraph OpenMetrics Grafana dashboard
+                      as a ConfigMap a Grafana sidecar loads.
+                    properties:
+                      annotations:
+                        additionalProperties:
+                          type: string
+                        description: |-
+                          annotations are added to the ConfigMap. The Grafana sidecar reads
+                          grafana_folder from here to file the dashboard in a folder.
+                        maxProperties: 64
+                        type: object
+                      labels:
+                        additionalProperties:
+                          type: string
+                        default:
+                          grafana_dashboard: "1"
+                        description: |-
+                          labels are the labels the Grafana sidecar selects dashboard ConfigMaps
+                          by. They default to grafana_dashboard: "1", the kube-prometheus-stack
+                          convention, so an empty block works out of the box; a sidecar that
+                          selects on something else gets that instead. The operator's own identity
+                          labels win a key collision, as they do everywhere else.
+                        maxProperties: 64
+                        type: object
+                    type: object
                   serviceMonitor:
                     description: |-
                       serviceMonitor creates a Prometheus Operator ServiceMonitor scraping

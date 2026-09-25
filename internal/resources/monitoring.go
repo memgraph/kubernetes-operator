@@ -17,7 +17,10 @@ limitations under the License.
 package resources
 
 import (
+	_ "embed"
+
 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 
@@ -106,5 +109,58 @@ func ServiceMonitor(cluster *memgraphcomv1alpha1.MemgraphCluster) *monitoringv1.
 				Interval: monitoringv1.Duration(block.interval),
 			}},
 		},
+	}
+}
+
+// grafanaDashboardJSON is the "Memgraph OpenMetrics" Grafana dashboard, copied
+// from charts/memgraph-high-availability/dashboards/memgraph_openmetrics.json
+// in github.com/memgraph/helm-charts. It is a copy on purpose: fetching it at
+// reconcile time would make the operator depend on the network, and the file
+// changes a few times a year. Update it by copying the chart's file over this
+// one when the chart's dashboard changes, as part of a release.
+//
+//go:embed dashboards/memgraph_openmetrics.json
+var grafanaDashboardJSON string
+
+// GrafanaDashboardKey is the key the dashboard JSON sits under in the
+// ConfigMap, which is also the file name the Grafana sidecar writes it as.
+const GrafanaDashboardKey = "memgraph_openmetrics.json"
+
+// grafanaDashboardComponent labels the dashboard ConfigMap.
+const grafanaDashboardComponent = "grafana-dashboard"
+
+// GrafanaDashboardName is the name of the one ConfigMap the operator creates
+// for a cluster that asks for the dashboard.
+func GrafanaDashboardName(cluster *memgraphcomv1alpha1.MemgraphCluster) string {
+	return cluster.Name + "-" + grafanaDashboardComponent
+}
+
+// UsesGrafanaDashboard reports whether the cluster asked for the dashboard.
+func UsesGrafanaDashboard(cluster *memgraphcomv1alpha1.MemgraphCluster) bool {
+	return cluster.Spec.Monitoring != nil && cluster.Spec.Monitoring.GrafanaDashboard != nil
+}
+
+// GrafanaDashboard builds the ConfigMap holding the dashboard JSON, labelled
+// for the Grafana sidecar to find it: the block's labels, which default to the
+// kube-prometheus-stack convention when it names none, under the operator's
+// own identity labels and the marker the controller prunes by.
+//
+// The builder is only called for a cluster whose spec carries the block.
+func GrafanaDashboard(cluster *memgraphcomv1alpha1.MemgraphCluster) *corev1.ConfigMap {
+	spec := normalize(cluster.Spec)
+	block := spec.monitoring.grafanaDashboard
+
+	labels := labels(cluster, grafanaDashboardComponent, block.labels)
+	labels[MonitoringLabel] = MonitoringValue
+
+	return &corev1.ConfigMap{
+		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "ConfigMap"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        GrafanaDashboardName(cluster),
+			Namespace:   cluster.Namespace,
+			Labels:      labels,
+			Annotations: emptyToNil(block.annotations),
+		},
+		Data: map[string]string{GrafanaDashboardKey: grafanaDashboardJSON},
 	}
 }
