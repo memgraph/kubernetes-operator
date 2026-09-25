@@ -133,19 +133,13 @@ func tunedCluster() *memgraphcomv1alpha1.MemgraphCluster {
 	cluster.Spec.ClusterDomain = customClusterDomain
 	cluster.Spec.Probes = memgraphcomv1alpha1.ProbesSpec{
 		Coordinators: memgraphcomv1alpha1.RoleProbesSpec{
-			StartupProbe: memgraphcomv1alpha1.ProbeSpec{FailureThreshold: ptr.To(int32(30))},
 			ReadinessProbe: memgraphcomv1alpha1.ProbeSpec{
 				TimeoutSeconds: ptr.To(int32(3)),
 				PeriodSeconds:  ptr.To(int32(2)),
 			},
 		},
 		Data: memgraphcomv1alpha1.RoleProbesSpec{
-			StartupProbe: memgraphcomv1alpha1.ProbeSpec{
-				FailureThreshold: ptr.To(int32(4320)),
-				TimeoutSeconds:   ptr.To(int32(15)),
-				PeriodSeconds:    ptr.To(int32(10)),
-			},
-			LivenessProbe: memgraphcomv1alpha1.ProbeSpec{FailureThreshold: ptr.To(int32(6))},
+			ReadinessProbe: memgraphcomv1alpha1.ProbeSpec{FailureThreshold: ptr.To(int32(6))},
 		},
 	}
 	cluster.Spec.Resources = memgraphcomv1alpha1.ResourcesSpec{
@@ -206,8 +200,8 @@ func licenseEnv(secretName, licenseKey, organizationKey string) []corev1.EnvVar 
 	}
 }
 
-// tcpProbe is a probe with the default timings, of which only the failure
-// threshold differs between probes.
+// tcpProbe is a readiness probe with the default timings and the given failure
+// threshold.
 func tcpProbe(port, failureThreshold int32) *corev1.Probe {
 	return tunedTCPProbe(port, failureThreshold, 10, 5)
 }
@@ -410,9 +404,7 @@ func TestCoordinatorStatefulSetDefaults(t *testing.T) {
 							{Name: managementPortName, ContainerPort: memgraphcomv1alpha1.ManagementPort},
 							{Name: coordinatorComponent, ContainerPort: memgraphcomv1alpha1.CoordinatorPort},
 						},
-						StartupProbe:    tcpProbe(memgraphcomv1alpha1.CoordinatorPort, 20),
 						ReadinessProbe:  tcpProbe(memgraphcomv1alpha1.CoordinatorPort, 20),
-						LivenessProbe:   tcpProbe(memgraphcomv1alpha1.CoordinatorPort, 20),
 						VolumeMounts:    expectedVolumeMounts(),
 						SecurityContext: expectedContainerSecurityContext(),
 					}},
@@ -468,9 +460,7 @@ func TestDataStatefulSetDefaults(t *testing.T) {
 							{Name: managementPortName, ContainerPort: memgraphcomv1alpha1.ManagementPort},
 							{Name: replicationPortName, ContainerPort: memgraphcomv1alpha1.ReplicationPort},
 						},
-						StartupProbe:    tcpProbe(memgraphcomv1alpha1.BoltPort, 1440),
 						ReadinessProbe:  tcpProbe(memgraphcomv1alpha1.BoltPort, 20),
-						LivenessProbe:   tcpProbe(memgraphcomv1alpha1.BoltPort, 20),
 						VolumeMounts:    expectedVolumeMounts(),
 						SecurityContext: expectedContainerSecurityContext(),
 					}},
@@ -1021,15 +1011,9 @@ func TestStatefulSetFixedPortsAndClusterDomain(t *testing.T) {
 		if diff := cmp.Diff(expectedTunedCoordinatorArgs(), container.Args); diff != "" {
 			t.Errorf("args mismatch (-want +got):\n%s", diff)
 		}
-		for name, probe := range map[string]*corev1.Probe{
-			"startup":   container.StartupProbe,
-			"readiness": container.ReadinessProbe,
-			"liveness":  container.LivenessProbe,
-		} {
-			if got := probe.TCPSocket.Port; got != intstr.FromInt32(memgraphcomv1alpha1.CoordinatorPort) {
-				t.Errorf("%s probe dials %v, want the fixed coordinator port %d",
-					name, got, memgraphcomv1alpha1.CoordinatorPort)
-			}
+		if got := container.ReadinessProbe.TCPSocket.Port; got != intstr.FromInt32(memgraphcomv1alpha1.CoordinatorPort) {
+			t.Errorf("readiness probe dials %v, want the fixed coordinator port %d",
+				got, memgraphcomv1alpha1.CoordinatorPort)
 		}
 	})
 
@@ -1049,15 +1033,9 @@ func TestStatefulSetFixedPortsAndClusterDomain(t *testing.T) {
 		if diff := cmp.Diff(wantArgs, container.Args); diff != "" {
 			t.Errorf("args mismatch (-want +got):\n%s", diff)
 		}
-		for name, probe := range map[string]*corev1.Probe{
-			"startup":   container.StartupProbe,
-			"readiness": container.ReadinessProbe,
-			"liveness":  container.LivenessProbe,
-		} {
-			if got := probe.TCPSocket.Port; got != intstr.FromInt32(memgraphcomv1alpha1.BoltPort) {
-				t.Errorf("%s probe dials %v, want the fixed bolt port %d",
-					name, got, memgraphcomv1alpha1.BoltPort)
-			}
+		if got := container.ReadinessProbe.TCPSocket.Port; got != intstr.FromInt32(memgraphcomv1alpha1.BoltPort) {
+			t.Errorf("readiness probe dials %v, want the fixed bolt port %d",
+				got, memgraphcomv1alpha1.BoltPort)
 		}
 	})
 }
@@ -1098,45 +1076,62 @@ func TestStatefulSetExtraArgsAreNotShellParsed(t *testing.T) {
 	}
 }
 
-// TestStatefulSetProbeOverrides asserts probe timings are per role and per
-// probe, and that a partially specified probe keeps the defaults for the
-// timings it leaves out — including the data instances' 2h startup budget.
+// TestStatefulSetProbeOverrides asserts readiness probe timings are per role,
+// and that a partially specified probe keeps the defaults for the timings it
+// leaves out.
 func TestStatefulSetProbeOverrides(t *testing.T) {
 	cluster := tunedCluster()
 
 	tests := []struct {
-		name                         string
-		sts                          *appsv1.StatefulSet
-		startup, readiness, liveness *corev1.Probe
+		name      string
+		sts       *appsv1.StatefulSet
+		readiness *corev1.Probe
 	}{
 		{
 			name: coordinatorComponent,
 			sts:  coordinatorStatefulSet(cluster),
-			// Only the failure threshold was raised, so the timings default.
-			startup: tunedTCPProbe(memgraphcomv1alpha1.CoordinatorPort, 30, 10, 5),
 			// Timings tightened, failure threshold left at its default.
 			readiness: tunedTCPProbe(memgraphcomv1alpha1.CoordinatorPort, 20, 3, 2),
-			liveness:  tunedTCPProbe(memgraphcomv1alpha1.CoordinatorPort, 20, 10, 5),
 		},
 		{
-			name:      dataComponent,
-			sts:       dataStatefulSet(cluster),
-			startup:   tunedTCPProbe(memgraphcomv1alpha1.BoltPort, 4320, 15, 10),
-			readiness: tunedTCPProbe(memgraphcomv1alpha1.BoltPort, 20, 10, 5),
-			liveness:  tunedTCPProbe(memgraphcomv1alpha1.BoltPort, 6, 10, 5),
+			name: dataComponent,
+			sts:  dataStatefulSet(cluster),
+			// Only the failure threshold was changed, so the timings default.
+			readiness: tunedTCPProbe(memgraphcomv1alpha1.BoltPort, 6, 10, 5),
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			container := tc.sts.Spec.Template.Spec.Containers[0]
-			if diff := cmp.Diff(tc.startup, container.StartupProbe); diff != "" {
-				t.Errorf("startup probe mismatch (-want +got):\n%s", diff)
-			}
 			if diff := cmp.Diff(tc.readiness, container.ReadinessProbe); diff != "" {
 				t.Errorf("readiness probe mismatch (-want +got):\n%s", diff)
 			}
-			if diff := cmp.Diff(tc.liveness, container.LivenessProbe); diff != "" {
-				t.Errorf("liveness probe mismatch (-want +got):\n%s", diff)
+		})
+	}
+}
+
+// TestStatefulSetCarriesNoLivenessOrStartupProbe pins the deliberate absence:
+// a data instance opens no port until every database is recovered, so any
+// liveness check would only ever kill a recovery that outlived a guessed
+// budget, and a startup probe exists only to hold a liveness check off.
+func TestStatefulSetCarriesNoLivenessOrStartupProbe(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		sts  *appsv1.StatefulSet
+	}{
+		{coordinatorComponent, coordinatorStatefulSet(tunedCluster())},
+		{dataComponent, dataStatefulSet(tunedCluster())},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			container := tc.sts.Spec.Template.Spec.Containers[0]
+			if container.LivenessProbe != nil {
+				t.Errorf("container carries a liveness probe: %+v", container.LivenessProbe)
+			}
+			if container.StartupProbe != nil {
+				t.Errorf("container carries a startup probe: %+v", container.StartupProbe)
+			}
+			if container.ReadinessProbe == nil {
+				t.Error("container carries no readiness probe")
 			}
 		})
 	}

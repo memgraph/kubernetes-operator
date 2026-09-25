@@ -132,40 +132,29 @@ spec:
   # registers with the cluster. The internal ports are fixed: Bolt 7687,
   # management 10000, replication 20000, and coordinator 12000.
   clusterDomain: cluster.local
-  # Every probe is a TCP-socket check against the role's own port (the
-  # coordinator port for coordinators, the Bolt port for data instances); only
-  # the timings are configurable. Timings left out keep their defaults:
-  # failureThreshold 20 (1440 for the data instances' startup probe, which is
-  # 2h at the default period, so a large snapshot restore is not killed
-  # mid-load), timeoutSeconds 10, periodSeconds 5.
+  # The one probe a pod carries is readiness: a TCP-socket check against the
+  # role's own port (the coordinator port for coordinators, the Bolt port for
+  # data instances); only the timings are configurable, and timings left out
+  # keep their defaults. Until it first succeeds the pod is unready and
+  # nothing more, so there is no budget to size: a data instance loading a
+  # large snapshot simply shows 0/1 until it is done.
+  #
+  # There is deliberately no liveness and no startup probe. Memgraph opens no
+  # port until every database is recovered, so during recovery nothing tells a
+  # slow recovery from a hung one, and a liveness check could only kill the
+  # former once a guessed budget ran out — a recovery longer than the guess
+  # would then never finish, because every kill starts it over. A Bolt listener
+  # that goes away after startup means the process is gone, which ends the
+  # container without any probe. Restarts of a running instance belong to the
+  # operator's rolling restart, which knows the cluster's state.
   probes:
     coordinators:
-      # Gates the other two probes until the coordinator has started.
-      startupProbe:
-        failureThreshold: 20
-        timeoutSeconds: 10
-        periodSeconds: 5
-      # Decides whether the pod receives traffic, and whether the operator
-      # considers the workloads ready to register.
       readinessProbe:
-        failureThreshold: 20
-        timeoutSeconds: 10
-        periodSeconds: 5
-      # Decides whether the container is restarted.
-      livenessProbe:
         failureThreshold: 20
         timeoutSeconds: 10
         periodSeconds: 5
     data:
-      startupProbe:
-        failureThreshold: 1440
-        timeoutSeconds: 10
-        periodSeconds: 5
       readinessProbe:
-        failureThreshold: 20
-        timeoutSeconds: 10
-        periodSeconds: 5
-      livenessProbe:
         failureThreshold: 20
         timeoutSeconds: 10
         periodSeconds: 5
