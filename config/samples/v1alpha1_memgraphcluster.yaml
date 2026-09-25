@@ -295,10 +295,20 @@ spec:
   # installed already; asking for one without it is reported as ApplyFailed.
   # There is no namespace knob: point a Prometheus in another namespace at this
   # one with its serviceMonitorNamespaceSelector. Removing the block deletes
-  # the ServiceMonitor again.
+  # the ServiceMonitor again. grafanaDashboard provisions the "Memgraph
+  # OpenMetrics" Grafana dashboard as a ConfigMap for a Grafana sidecar to
+  # load: labels default to grafana_dashboard: "1", the kube-prometheus-stack
+  # convention, and a label set you name replaces that default; the sidecar
+  # reads grafana_folder from the annotations. Each block is optional on its
+  # own.
   # monitoring:
   #   serviceMonitor:
   #     labels:
   #       release: kube-prometheus-stack
   #     annotations: {}
   #     interval: 15s
+  #   grafanaDashboard:
+  #     labels:
+  #       grafana_dashboard: "1"
+  #     annotations:
+  #       grafana_folder: Memgraph

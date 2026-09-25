@@ -58,11 +58,13 @@ kubectl apply -f charts/memgraph-operator/crds/
 
 The manager's ClusterRole is generated from the controller's own RBAC markers, so it grants
 exactly what the reconciler issues: read MemgraphClusters, patch their status, and create and
-patch (server-side apply) the StatefulSets, Services, Gateways, TCPRoutes and ServiceMonitors it
-provisions. It deletes exactly two kinds of thing: Pods, one at a time, to roll a changed pod
-template through the cluster, and the objects a removed spec block leaves behind — the external
-Services, Gateways and TCPRoutes of a removed `externalAccess` block or a retired data instance,
-and the ServiceMonitor of a removed `monitoring.serviceMonitor` block. It cannot delete a
+patch (server-side apply) the StatefulSets, Services, Gateways, TCPRoutes, ServiceMonitors and
+dashboard ConfigMaps it provisions. It deletes exactly two kinds of thing: Pods, one at a time,
+to roll a changed pod template through the cluster, and the objects a removed spec block leaves
+behind — the external Services, Gateways and TCPRoutes of a removed `externalAccess` block or a
+retired data instance, and the ServiceMonitor and ConfigMap of a removed `monitoring` block. The
+ConfigMap rule reaches every ConfigMap, but the operator's cache holds only the ones it labelled
+as its own. It cannot delete a
 StatefulSet or a headless Service — deleting a `MemgraphCluster` removes them through garbage
 collection of the owner references. The Gateway API and `monitoring.coreos.com` rules are granted
 whether or not the cluster serves those groups; a cluster without them simply never exercises

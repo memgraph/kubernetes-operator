@@ -67,6 +67,12 @@ const (
 	// Services and pins the format, and a scraper of the user's own works
 	// with no spec at all.
 	MetricsPort int32 = 9091
+
+	// DefaultGrafanaDashboardLabel and its value are the label the Grafana
+	// sidecar in kube-prometheus-stack selects dashboard ConfigMaps by, and
+	// the default labels of a grafanaDashboard block that names none.
+	DefaultGrafanaDashboardLabel = "grafana_dashboard"
+	DefaultGrafanaDashboardValue = "1"
 )
 
 // Readiness probe timing defaults, Go constants mirrored by the doc comments
@@ -987,6 +993,35 @@ type ServiceMonitorSpec struct {
 	Interval string `json:"interval,omitempty"`
 }
 
+// GrafanaDashboardSpec asks the operator to provision the "Memgraph
+// OpenMetrics" Grafana dashboard the way the memgraph-high-availability chart
+// does: as a ConfigMap in the cluster's namespace holding the dashboard JSON,
+// for a Grafana sidecar to discover by label. The dashboard binds to a
+// datasource template variable, so it needs no per-cluster edit. The JSON is
+// compiled into the operator, copied from the chart; it changes with operator
+// releases, not with the spec.
+//
+// The ConfigMap always lives in the cluster's namespace, for the reason the
+// ServiceMonitor does; a sidecar watching another namespace is told to look
+// here (kube-prometheus-stack: sidecar.dashboards.searchNamespace).
+type GrafanaDashboardSpec struct {
+	// labels are the labels the Grafana sidecar selects dashboard ConfigMaps
+	// by. They default to grafana_dashboard: "1", the kube-prometheus-stack
+	// convention, so an empty block works out of the box; a sidecar that
+	// selects on something else gets that instead. The operator's own identity
+	// labels win a key collision, as they do everywhere else.
+	// +kubebuilder:validation:MaxProperties=64
+	// +kubebuilder:default={grafana_dashboard: "1"}
+	// +optional
+	Labels map[string]string `json:"labels,omitempty"`
+
+	// annotations are added to the ConfigMap. The Grafana sidecar reads
+	// grafana_folder from here to file the dashboard in a folder.
+	// +kubebuilder:validation:MaxProperties=64
+	// +optional
+	Annotations map[string]string `json:"annotations,omitempty"`
+}
+
 // MonitoringSpec is what the operator creates for a monitoring stack the user
 // already runs. Each block is optional and presence-based, like externalAccess:
 // present, the object is created and kept; removed, it is deleted again. What
@@ -1001,6 +1036,11 @@ type MonitoringSpec struct {
 	// on the resource as ApplyFailed.
 	// +optional
 	ServiceMonitor *ServiceMonitorSpec `json:"serviceMonitor,omitempty"`
+
+	// grafanaDashboard provisions the Memgraph OpenMetrics Grafana dashboard
+	// as a ConfigMap a Grafana sidecar loads.
+	// +optional
+	GrafanaDashboard *GrafanaDashboardSpec `json:"grafanaDashboard,omitempty"`
 }
 
 // MemgraphClusterSpec defines the desired state of MemgraphCluster.

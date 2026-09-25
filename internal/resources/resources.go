@@ -131,7 +131,15 @@ type normalizedSpec struct {
 // normalizedMonitoring is the monitoring block with each optional object
 // resolved: a nil serviceMonitor is a cluster that asked for none.
 type normalizedMonitoring struct {
-	serviceMonitor *normalizedServiceMonitor
+	serviceMonitor   *normalizedServiceMonitor
+	grafanaDashboard *normalizedGrafanaDashboard
+}
+
+// normalizedGrafanaDashboard is what decorates the dashboard ConfigMap, its
+// labels resolved to the sidecar default when the block names none.
+type normalizedGrafanaDashboard struct {
+	labels      map[string]string
+	annotations map[string]string
 }
 
 // normalizedServiceMonitor is what decorates the ServiceMonitor.
@@ -276,6 +284,18 @@ func normalize(spec memgraphcomv1alpha1.MemgraphClusterSpec) normalizedSpec {
 			labels:      spec.Monitoring.ServiceMonitor.Labels,
 			annotations: spec.Monitoring.ServiceMonitor.Annotations,
 			interval:    spec.Monitoring.ServiceMonitor.Interval,
+		}
+	}
+	if spec.Monitoring != nil && spec.Monitoring.GrafanaDashboard != nil {
+		labels := spec.Monitoring.GrafanaDashboard.Labels
+		if len(labels) == 0 {
+			labels = map[string]string{
+				memgraphcomv1alpha1.DefaultGrafanaDashboardLabel: memgraphcomv1alpha1.DefaultGrafanaDashboardValue,
+			}
+		}
+		n.monitoring.grafanaDashboard = &normalizedGrafanaDashboard{
+			labels:      labels,
+			annotations: spec.Monitoring.GrafanaDashboard.Annotations,
 		}
 	}
 	if spec.Coordinators != nil {

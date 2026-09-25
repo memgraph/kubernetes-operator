@@ -210,17 +210,30 @@ var _ = Describe("MemgraphCluster", Ordered, func() {
 		}
 	})
 
-	// The one object the operator creates for a Prometheus Operator: present
-	// while the block is, gone when it goes. Whether a Prometheus discovers and
-	// scrapes it is Prometheus Operator's contract, so none runs here; the
-	// cluster has the CRD alone (hack/kind-prometheus-crds.sh).
-	It("creates a ServiceMonitor when asked for one and prunes it when the block is removed", func() {
-		By("adding the monitoring.serviceMonitor block")
+	// The objects the operator creates for a monitoring stack: present while
+	// their blocks are, gone when they go. Whether a Prometheus discovers and
+	// scrapes the ServiceMonitor, or a Grafana sidecar loads the ConfigMap, is
+	// that stack's contract, so none runs here; the cluster has the
+	// ServiceMonitor CRD alone (hack/kind-prometheus-crds.sh).
+	It("creates the monitoring objects when asked for them and prunes them when the block is removed", func() {
+		By("adding the monitoring block with both objects")
 		cmd := exec.Command("kubectl", "patch", "memgraphcluster", quickstartCluster.name,
 			"-n", clusterNamespace, "--type=merge", "-p",
-			`{"spec":{"monitoring":{"serviceMonitor":{"labels":{"release":"kube-prometheus-stack"},"interval":"15s"}}}}`)
+			`{"spec":{"monitoring":{"serviceMonitor":{"labels":{"release":"kube-prometheus-stack"},"interval":"15s"},`+
+				`"grafanaDashboard":{"annotations":{"grafana_folder":"Memgraph"}}}}}`)
 		_, err := utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred())
+
+		By("waiting for the dashboard ConfigMap with the sidecar's default label")
+		Eventually(func(g Gomega) {
+			cmd := exec.Command("kubectl", "get", "configmap", quickstartCluster.name+"-grafana-dashboard",
+				"-n", clusterNamespace, "-o",
+				"jsonpath={.metadata.labels.grafana_dashboard} {.metadata.annotations.grafana_folder} "+
+					"{.data.memgraph_openmetrics\\.json}")
+			out, err := utils.Run(cmd)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(out).To(HavePrefix("1 Memgraph {"), "labelled for the sidecar, filed by annotation, holding JSON")
+		}, 2*time.Minute, 5*time.Second).Should(Succeed())
 
 		By("waiting for the ServiceMonitor to select both headless Services on the metrics port")
 		Eventually(func(g Gomega) {
@@ -248,9 +261,9 @@ var _ = Describe("MemgraphCluster", Ordered, func() {
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred())
 
-		By("waiting for the ServiceMonitor to go")
+		By("waiting for the ServiceMonitor and the ConfigMap to go")
 		Eventually(func(g Gomega) {
-			cmd := exec.Command("kubectl", "get", "servicemonitor", "-n", clusterNamespace,
+			cmd := exec.Command("kubectl", "get", "servicemonitor,configmap", "-n", clusterNamespace,
 				"-l", resources.MonitoringLabel+"="+resources.MonitoringValue, "-o", "name")
 			out, err := utils.Run(cmd)
 			g.Expect(err).NotTo(HaveOccurred())

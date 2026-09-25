@@ -145,6 +145,11 @@ type MemgraphClusterReconciler struct {
 // asks for it, deleted when the block goes, on a group the cluster may not
 // serve.
 // +kubebuilder:rbac:groups=monitoring.coreos.com,resources=servicemonitors,verbs=get;list;watch;create;patch;delete
+//
+// The Grafana dashboard ConfigMap has the same lifecycle. Its informer is
+// scoped by the managed-by label in cmd/main.go, so the rule reaches every
+// ConfigMap but the cache holds only the operator's own.
+// +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch;create;patch;delete
 
 // Reconcile drives the cluster toward the declared MemgraphCluster spec in
 // two stages. First it server-side-applies the builders' desired objects: one
@@ -241,13 +246,17 @@ func (r *MemgraphClusterReconciler) desiredExternal(
 }
 
 // desiredMonitoring is every monitoring object the spec asks for: the
-// ServiceMonitor, but only on a cluster that serves the kind. Without it the
-// cluster runs as if the block were absent and the block is reported as failed
-// rather than pending, because no amount of waiting makes the CRD appear.
+// ServiceMonitor, but only on a cluster that serves the kind — without it the
+// cluster runs as if that block were absent and the block is reported as failed
+// rather than pending, because no amount of waiting makes the CRD appear — and
+// the Grafana dashboard ConfigMap, which needs nothing from the cluster.
 func (r *MemgraphClusterReconciler) desiredMonitoring(cluster *memgraphcomv1alpha1.MemgraphCluster) []client.Object {
 	var objects []client.Object
 	if resources.UsesServiceMonitor(cluster) && r.ServiceMonitorAPI {
 		objects = append(objects, resources.ServiceMonitor(cluster))
+	}
+	if resources.UsesGrafanaDashboard(cluster) {
+		objects = append(objects, resources.GrafanaDashboard(cluster))
 	}
 	return objects
 }
@@ -265,18 +274,24 @@ func (r *MemgraphClusterReconciler) serviceMonitorFailure(cluster *memgraphcomv1
 
 // pruneMonitoring deletes the monitoring objects of this cluster that the
 // current spec does not describe, the way pruneExternal does for the external
-// ones. The kind is only consulted where the cluster serves it; where it does
-// not, nothing was ever created.
+// ones. The ServiceMonitor kind is only consulted where the cluster serves it;
+// where it does not, nothing was ever created.
 func (r *MemgraphClusterReconciler) pruneMonitoring(
 	ctx context.Context,
 	cluster *memgraphcomv1alpha1.MemgraphCluster,
 	desired []client.Object,
 ) error {
-	if !r.ServiceMonitorAPI {
-		return nil
+	keep := keptNames(desired)
+	lists := []client.ObjectList{&corev1.ConfigMapList{}}
+	if r.ServiceMonitorAPI {
+		lists = append(lists, &monitoringv1.ServiceMonitorList{})
 	}
-	return r.pruneKind(ctx, cluster, &monitoringv1.ServiceMonitorList{},
-		resources.MonitoringSelector(cluster), keptNames(desired))
+	for _, list := range lists {
+		if err := r.pruneKind(ctx, cluster, list, resources.MonitoringSelector(cluster), keep); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // keptNames indexes desired objects by kind and name, the key pruneKind
@@ -1470,7 +1485,8 @@ func (r *MemgraphClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	builder := ctrl.NewControllerManagedBy(mgr).
 		For(&memgraphcomv1alpha1.MemgraphCluster{}).
 		Owns(&appsv1.StatefulSet{}).
-		Owns(&corev1.Service{})
+		Owns(&corev1.Service{}).
+		Owns(&corev1.ConfigMap{})
 	if r.GatewayAPI {
 		builder = builder.Owns(&gatewayv1.Gateway{}).Owns(&gatewayv1.TCPRoute{})
 	}
