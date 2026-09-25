@@ -41,6 +41,8 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
+	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
+
 	memgraphcomv1alpha1 "github.com/memgraph/kubernetes-operator/api/v1alpha1"
 	"github.com/memgraph/kubernetes-operator/internal/memgraph"
 	"github.com/memgraph/kubernetes-operator/internal/planner"
@@ -95,6 +97,18 @@ type MemgraphClusterReconciler struct {
 	// so a cluster asking for the Gateway mode is told what to install rather
 	// than that "the Gateway API" is absent when its CRDs plainly exist.
 	GatewayAPIMissing string
+
+	// ServiceMonitorAPI reports whether the cluster serves Prometheus
+	// Operator's ServiceMonitor at the version the operator builds, discovered
+	// when the manager started. The CRD belongs to whoever installs Prometheus
+	// Operator and is never bundled, so a cluster without it is normal; what
+	// changes is that a spec asking for a ServiceMonitor cannot be served on
+	// it, and a watch on the kind would keep the manager from starting.
+	ServiceMonitorAPI bool
+
+	// ServiceMonitorAPIMissing says what the discovery found lacking when
+	// ServiceMonitorAPI is false, so the resource is told what to install.
+	ServiceMonitorAPIMissing string
 }
 
 // The install chart's ClusterRole is generated from these markers, so they are
@@ -126,6 +140,11 @@ type MemgraphClusterReconciler struct {
 // with the same lifecycle and the same verbs. The rules are granted whether or
 // not the cluster serves the group: RBAC does not require the resource to exist.
 // +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=gateways;tcproutes,verbs=get;list;watch;create;patch;delete
+//
+// The ServiceMonitor is the same kind of object again: created while the spec
+// asks for it, deleted when the block goes, on a group the cluster may not
+// serve.
+// +kubebuilder:rbac:groups=monitoring.coreos.com,resources=servicemonitors,verbs=get;list;watch;create;patch;delete
 
 // Reconcile drives the cluster toward the declared MemgraphCluster spec in
 // two stages. First it server-side-applies the builders' desired objects: one
@@ -167,7 +186,8 @@ func (r *MemgraphClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	// count it declares: a retiring instance keeps serving clients until its pod
 	// is shed, and the pass that sheds the pod is the one that drops its way in.
 	external := r.desiredExternal(&cluster, replicas.data.applied)
-	desired := make([]client.Object, 0, 4+len(external))
+	monitoring := r.desiredMonitoring(&cluster)
+	desired := make([]client.Object, 0, 4+len(external)+len(monitoring))
 	desired = append(desired,
 		resources.CoordinatorHeadlessService(&cluster),
 		resources.DataHeadlessService(&cluster),
@@ -175,11 +195,15 @@ func (r *MemgraphClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		resources.DataStatefulSet(&cluster, replicas.data.applied),
 	)
 	desired = append(desired, external...)
+	desired = append(desired, monitoring...)
 	applied, err := r.applyDesired(ctx, &cluster, desired...)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 	if err := r.pruneExternal(ctx, &cluster, external); err != nil {
+		return ctrl.Result{}, err
+	}
+	if err := r.pruneMonitoring(ctx, &cluster, monitoring); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -216,6 +240,55 @@ func (r *MemgraphClusterReconciler) desiredExternal(
 	return objects
 }
 
+// desiredMonitoring is every monitoring object the spec asks for: the
+// ServiceMonitor, but only on a cluster that serves the kind. Without it the
+// cluster runs as if the block were absent and the block is reported as failed
+// rather than pending, because no amount of waiting makes the CRD appear.
+func (r *MemgraphClusterReconciler) desiredMonitoring(cluster *memgraphcomv1alpha1.MemgraphCluster) []client.Object {
+	var objects []client.Object
+	if resources.UsesServiceMonitor(cluster) && r.ServiceMonitorAPI {
+		objects = append(objects, resources.ServiceMonitor(cluster))
+	}
+	return objects
+}
+
+// serviceMonitorFailure explains why the ServiceMonitor the spec asks for
+// cannot be served on this cluster, or is empty when it can or nothing asks.
+func (r *MemgraphClusterReconciler) serviceMonitorFailure(cluster *memgraphcomv1alpha1.MemgraphCluster) string {
+	if !resources.UsesServiceMonitor(cluster) || r.ServiceMonitorAPI {
+		return ""
+	}
+	return fmt.Sprintf("The ServiceMonitor kind the operator needs is not served by this cluster (%s): "+
+		"it builds %s ServiceMonitors, which Prometheus Operator installs. Install it, then restart the operator",
+		r.ServiceMonitorAPIMissing, monitoringv1.SchemeGroupVersion.String())
+}
+
+// pruneMonitoring deletes the monitoring objects of this cluster that the
+// current spec does not describe, the way pruneExternal does for the external
+// ones. The kind is only consulted where the cluster serves it; where it does
+// not, nothing was ever created.
+func (r *MemgraphClusterReconciler) pruneMonitoring(
+	ctx context.Context,
+	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	desired []client.Object,
+) error {
+	if !r.ServiceMonitorAPI {
+		return nil
+	}
+	return r.pruneKind(ctx, cluster, &monitoringv1.ServiceMonitorList{},
+		resources.MonitoringSelector(cluster), keptNames(desired))
+}
+
+// keptNames indexes desired objects by kind and name, the key pruneKind
+// spares an existing object by.
+func keptNames(desired []client.Object) map[string]bool {
+	keep := make(map[string]bool, len(desired))
+	for _, obj := range desired {
+		keep[obj.GetObjectKind().GroupVersionKind().Kind+"/"+obj.GetName()] = true
+	}
+	return keep
+}
+
 // pruneExternal deletes the external objects of this cluster that the current
 // spec does not describe: all of them once the externalAccess block is removed,
 // the Gateway and routes when the type moves to LoadBalancer, and the objects in
@@ -229,10 +302,7 @@ func (r *MemgraphClusterReconciler) pruneExternal(
 	cluster *memgraphcomv1alpha1.MemgraphCluster,
 	desired []client.Object,
 ) error {
-	keep := make(map[string]bool, len(desired))
-	for _, obj := range desired {
-		keep[obj.GetObjectKind().GroupVersionKind().Kind+"/"+obj.GetName()] = true
-	}
+	keep := keptNames(desired)
 
 	lists := []client.ObjectList{&corev1.ServiceList{}}
 	if r.GatewayAPI {
@@ -241,30 +311,31 @@ func (r *MemgraphClusterReconciler) pruneExternal(
 		lists = append(lists, &gatewayv1.GatewayList{}, &gatewayv1.TCPRouteList{})
 	}
 	for _, list := range lists {
-		if err := r.pruneExternalKind(ctx, cluster, list, keep); err != nil {
+		if err := r.pruneKind(ctx, cluster, list, resources.ExternalServicesSelector(cluster), keep); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// pruneExternalKind prunes one kind of external object, listed by the marker
-// label every external object of the cluster carries.
-func (r *MemgraphClusterReconciler) pruneExternalKind(
+// pruneKind prunes one kind of operator-created object, listed by the marker
+// label every object of that family carries, sparing the ones desired names.
+func (r *MemgraphClusterReconciler) pruneKind(
 	ctx context.Context,
 	cluster *memgraphcomv1alpha1.MemgraphCluster,
 	list client.ObjectList,
+	selector map[string]string,
 	keep map[string]bool,
 ) error {
 	log := logf.FromContext(ctx)
 
 	if err := r.List(ctx, list, client.InNamespace(cluster.Namespace),
-		client.MatchingLabels(resources.ExternalServicesSelector(cluster))); err != nil {
-		return fmt.Errorf("listing external objects: %w", err)
+		client.MatchingLabels(selector)); err != nil {
+		return fmt.Errorf("listing objects to prune: %w", err)
 	}
 	items, err := apimeta.ExtractList(list)
 	if err != nil {
-		return fmt.Errorf("reading external objects: %w", err)
+		return fmt.Errorf("reading objects to prune: %w", err)
 	}
 	for _, item := range items {
 		obj, ok := item.(client.Object)
@@ -273,7 +344,7 @@ func (r *MemgraphClusterReconciler) pruneExternalKind(
 		}
 		kind, err := apiutil.GVKForObject(obj, r.Scheme)
 		if err != nil {
-			return fmt.Errorf("resolving kind of external object %s: %w", obj.GetName(), err)
+			return fmt.Errorf("resolving kind of object %s: %w", obj.GetName(), err)
 		}
 		if keep[kind.Kind+"/"+obj.GetName()] || !metav1.IsControlledBy(obj, cluster) {
 			continue
@@ -282,10 +353,10 @@ func (r *MemgraphClusterReconciler) pruneExternalKind(
 		err = r.Delete(ctx, obj, client.Preconditions{UID: &uid})
 		switch {
 		case err == nil:
-			log.Info("Deleted an external object the spec no longer describes", "kind", kind.Kind, "name", obj.GetName())
+			log.Info("Deleted an object the spec no longer describes", "kind", kind.Kind, "name", obj.GetName())
 		case apierrors.IsNotFound(err), apierrors.IsConflict(err):
 		default:
-			return fmt.Errorf("deleting external %s %s: %w", kind.Kind, obj.GetName(), err)
+			return fmt.Errorf("deleting %s %s: %w", kind.Kind, obj.GetName(), err)
 		}
 	}
 	return nil
@@ -913,13 +984,14 @@ func (r *MemgraphClusterReconciler) reconcileRegistration(
 		converged := trueCondition(memgraphcomv1alpha1.ConditionConverged,
 			memgraphcomv1alpha1.ReasonAllInstancesRegistered,
 			fmt.Sprintf("All %d declared instances are registered", len(topology.Coordinators)+len(topology.DataInstances)))
-		switch {
-		case exposure.failure != "":
-			// The exposure the spec asks for cannot be served on this cluster, and
-			// waiting will not change that: reported the way a rejected apply is,
-			// while the cluster keeps serving in-cluster at pod addresses.
-			log.Info("Could not serve the requested external access", "reason", exposure.failure)
-			converged = notConvergedCondition(memgraphcomv1alpha1.ReasonApplyFailed, exposure.failure)
+		switch unservable := joinNonEmpty(exposure.failure, r.serviceMonitorFailure(cluster)); {
+		case unservable != "":
+			// The exposure or the ServiceMonitor the spec asks for cannot be
+			// served on this cluster, and waiting will not change that: reported
+			// the way a rejected apply is, while the cluster keeps serving —
+			// in-cluster at pod addresses, unscraped by the operator's object.
+			log.Info("Could not serve what the spec asks for", "reason", unservable)
+			converged = notConvergedCondition(memgraphcomv1alpha1.ReasonApplyFailed, unservable)
 		case len(exposure.pending) > 0:
 			// Every member is registered, but not yet at the address the spec
 			// asks for: the members behind these objects are announced at their
@@ -1402,7 +1474,22 @@ func (r *MemgraphClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if r.GatewayAPI {
 		builder = builder.Owns(&gatewayv1.Gateway{}).Owns(&gatewayv1.TCPRoute{})
 	}
+	if r.ServiceMonitorAPI {
+		builder = builder.Owns(&monitoringv1.ServiceMonitor{})
+	}
 	return builder.Named("memgraphcluster").Complete(r)
+}
+
+// joinNonEmpty joins the messages that are not empty, one sentence after
+// another, so two things the cluster cannot serve are both reported.
+func joinNonEmpty(messages ...string) string {
+	var parts []string
+	for _, message := range messages {
+		if message != "" {
+			parts = append(parts, message)
+		}
+	}
+	return strings.Join(parts, ". ")
 }
 
 // The Gateway API release that first serves TCPRoute at v1, and the Envoy
@@ -1424,14 +1511,29 @@ const (
 // picked up by restarting the operator, which is documented rather than
 // detected.
 func GatewayAPIServed(mapper apimeta.RESTMapper) (served bool, missing string, err error) {
-	for _, kind := range []string{"Gateway", "TCPRoute"} {
-		groupKind := schema.GroupKind{Group: gatewayv1.GroupName, Kind: kind}
-		_, err := mapper.RESTMapping(groupKind, gatewayv1.GroupVersion.Version)
+	return kindsServed(mapper, schema.GroupVersion(gatewayv1.GroupVersion), "Gateway", "TCPRoute")
+}
+
+// ServiceMonitorServed reports whether the cluster the mapper describes serves
+// Prometheus Operator's ServiceMonitor at the version the operator builds it.
+// Like GatewayAPIServed it is asked once, when the manager is set up, and a
+// cluster that gains the CRD later is picked up by restarting the operator.
+func ServiceMonitorServed(mapper apimeta.RESTMapper) (served bool, missing string, err error) {
+	return kindsServed(mapper, monitoringv1.SchemeGroupVersion, monitoringv1.ServiceMonitorsKind)
+}
+
+// kindsServed reports whether every one of the kinds is served at the given
+// version. When one is not, missing says what was found lacking: the kind not
+// served at all, or served only at some other version.
+func kindsServed(mapper apimeta.RESTMapper, groupVersion schema.GroupVersion, kinds ...string) (bool, string, error) {
+	for _, kind := range kinds {
+		groupKind := schema.GroupKind{Group: groupVersion.Group, Kind: kind}
+		_, err := mapper.RESTMapping(groupKind, groupVersion.Version)
 		if err == nil {
 			continue
 		}
 		if !apimeta.IsNoMatchError(err) {
-			return false, "", fmt.Errorf("discovering %s.%s: %w", kind, gatewayv1.GroupName, err)
+			return false, "", fmt.Errorf("discovering %s.%s: %w", kind, groupVersion.Group, err)
 		}
 		if mapping, anyVersion := mapper.RESTMapping(groupKind); anyVersion == nil {
 			return false, fmt.Sprintf("%s is served only as %s", kind, mapping.GroupVersionKind.GroupVersion()), nil

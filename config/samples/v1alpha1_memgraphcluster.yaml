@@ -282,3 +282,23 @@ spec:
   #   data:
   #     annotations:
   #       external-dns.alpha.kubernetes.io/hostname: data-{ordinal}.memgraph.example.com
+
+  # Monitoring. Every instance serves OpenMetrics on port 9091 whether or not
+  # this block exists — the port is declared on the pods and the headless
+  # Services and the format is pinned — so a Prometheus you already run scrapes
+  # the cluster with a ServiceMonitor, PodMonitor or scrape config of your own
+  # and nothing here. The block only adds the objects the operator creates for
+  # you. serviceMonitor creates one Prometheus Operator ServiceMonitor in the
+  # cluster's namespace, selecting both headless Services on the metrics port;
+  # labels are what your Prometheus selects ServiceMonitors by, and interval
+  # left out means Prometheus's global default. The ServiceMonitor CRD must be
+  # installed already; asking for one without it is reported as ApplyFailed.
+  # There is no namespace knob: point a Prometheus in another namespace at this
+  # one with its serviceMonitorNamespaceSelector. Removing the block deletes
+  # the ServiceMonitor again.
+  # monitoring:
+  #   serviceMonitor:
+  #     labels:
+  #       release: kube-prometheus-stack
+  #     annotations: {}
+  #     interval: 15s

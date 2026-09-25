@@ -105,6 +105,9 @@ setup-test-e2e: ## Set up a multi-node Kind cluster for e2e tests if it does not
 	# whose own LoadBalancer is what MetalLB gives the Gateway's address to.
 	KUBECTL=$(KUBECTL) CONTAINER_TOOL=$(CONTAINER_TOOL) hack/kind-metallb.sh
 	KUBECTL=$(KUBECTL) hack/kind-envoy-gateway.sh
+	# And no Prometheus Operator, so the monitoring scenario installs the one
+	# CRD the operator builds against; no Prometheus runs in the suite.
+	KUBECTL=$(KUBECTL) hack/kind-prometheus-crds.sh
 
 # The generous timeout covers the whole suite end to end: building the manager
 # image, pulling real Memgraph images, and bootstrapping an HA cluster in Kind.

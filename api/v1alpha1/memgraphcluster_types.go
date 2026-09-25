@@ -59,6 +59,14 @@ const (
 	ManagementPort  int32 = 10000
 	ReplicationPort int32 = 20000
 	CoordinatorPort int32 = 12000
+
+	// MetricsPort is where every instance serves its OpenMetrics endpoint.
+	// Memgraph's enterprise build starts the metrics server on both roles
+	// whether or not anything scrapes it, so the operator does not switch it
+	// on or off: it declares the port on the containers and the headless
+	// Services and pins the format, and a scraper of the user's own works
+	// with no spec at all.
+	MetricsPort int32 = 9091
 )
 
 // Readiness probe timing defaults, Go constants mirrored by the doc comments
@@ -944,6 +952,57 @@ type ExternalAccessSpec struct {
 	Gateway ExternalAccessGatewaySpec `json:"gateway,omitzero"`
 }
 
+// ServiceMonitorSpec asks the operator for the one object a Prometheus
+// Operator needs to scrape the cluster: a ServiceMonitor in the cluster's
+// namespace, selecting both headless Services by the cluster's identity
+// labels, with one endpoint on the metrics port. The endpoint itself needs no
+// asking: every instance serves OpenMetrics on port 9091 regardless, and a
+// user running their own ServiceMonitor, PodMonitor or scrape config needs
+// nothing from this block.
+//
+// The object always lives in the cluster's namespace. Owner references cannot
+// cross namespaces, and the operator garbage-collects and prunes through them,
+// so there is no namespace knob; a Prometheus in another namespace is pointed
+// at this one with its serviceMonitorNamespaceSelector. Scheme and TLS
+// settings arrive with TLS support, driven by the same spec that turns it on.
+type ServiceMonitorSpec struct {
+	// labels are added to the ServiceMonitor. They are what a Prometheus
+	// selects ServiceMonitors by — with kube-prometheus-stack, the release
+	// label, for example "release: kube-prometheus-stack". The operator's own
+	// identity labels win a key collision, as they do everywhere else.
+	// +kubebuilder:validation:MaxProperties=64
+	// +optional
+	Labels map[string]string `json:"labels,omitempty"`
+
+	// annotations are added to the ServiceMonitor.
+	// +kubebuilder:validation:MaxProperties=64
+	// +optional
+	Annotations map[string]string `json:"annotations,omitempty"`
+
+	// interval is how often Prometheus scrapes every instance, as a Prometheus
+	// duration such as "15s" or "1m". Omitted, the ServiceMonitor names no
+	// interval and Prometheus's global scrape interval applies.
+	// +kubebuilder:validation:Pattern=`^(0|(([0-9]+)y)?(([0-9]+)w)?(([0-9]+)d)?(([0-9]+)h)?(([0-9]+)m)?(([0-9]+)s)?(([0-9]+)ms)?)$`
+	// +optional
+	Interval string `json:"interval,omitempty"`
+}
+
+// MonitoringSpec is what the operator creates for a monitoring stack the user
+// already runs. Each block is optional and presence-based, like externalAccess:
+// present, the object is created and kept; removed, it is deleted again. What
+// every instance serves — OpenMetrics on port 9091 — is not configured here,
+// because it is served whether or not this block exists.
+type MonitoringSpec struct {
+	// serviceMonitor creates a Prometheus Operator ServiceMonitor scraping
+	// every instance of the cluster. The ServiceMonitor CRD
+	// (monitoring.coreos.com/v1) must already be installed on the cluster: it
+	// belongs to whoever installs Prometheus Operator and is never bundled
+	// with the operator. Asking for one on a cluster without it is reported
+	// on the resource as ApplyFailed.
+	// +optional
+	ServiceMonitor *ServiceMonitorSpec `json:"serviceMonitor,omitempty"`
+}
+
 // MemgraphClusterSpec defines the desired state of MemgraphCluster.
 //
 // The one rule here spans two blocks: with type Gateway every data instance
@@ -1044,6 +1103,13 @@ type MemgraphClusterSpec struct {
 	// objects away again and reverts the registered addresses.
 	// +optional
 	ExternalAccess *ExternalAccessSpec `json:"externalAccess,omitempty"`
+
+	// monitoring creates the objects a monitoring stack the user already runs
+	// discovers the cluster by. Every instance serves OpenMetrics on port 9091
+	// whether or not this block is set; the block only adds the objects that
+	// point a stack at it.
+	// +optional
+	Monitoring *MonitoringSpec `json:"monitoring,omitempty"`
 }
 
 // ExternalAddress is the external address one member, or the coordinators

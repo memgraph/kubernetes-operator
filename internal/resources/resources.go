@@ -51,6 +51,7 @@ const (
 	managementPortName  = "management"
 	coordinatorPortName = "coordinator"
 	replicationPortName = "replication"
+	metricsPortName     = "metrics"
 )
 
 // CoordinatorName is the name shared by the coordinator StatefulSet and its
@@ -124,6 +125,20 @@ type normalizedSpec struct {
 	coordinatorRole normalizedRole
 	dataRole        normalizedRole
 	external        normalizedExternal
+	monitoring      normalizedMonitoring
+}
+
+// normalizedMonitoring is the monitoring block with each optional object
+// resolved: a nil serviceMonitor is a cluster that asked for none.
+type normalizedMonitoring struct {
+	serviceMonitor *normalizedServiceMonitor
+}
+
+// normalizedServiceMonitor is what decorates the ServiceMonitor.
+type normalizedServiceMonitor struct {
+	labels      map[string]string
+	annotations map[string]string
+	interval    string
 }
 
 // normalizedExternal is the external access block with its type, its per-role
@@ -254,6 +269,13 @@ func normalize(spec memgraphcomv1alpha1.MemgraphClusterSpec) normalizedSpec {
 		}
 		if n.external.typ == "" {
 			n.external.typ = memgraphcomv1alpha1.ExternalAccessLoadBalancer
+		}
+	}
+	if spec.Monitoring != nil && spec.Monitoring.ServiceMonitor != nil {
+		n.monitoring.serviceMonitor = &normalizedServiceMonitor{
+			labels:      spec.Monitoring.ServiceMonitor.Labels,
+			annotations: spec.Monitoring.ServiceMonitor.Annotations,
+			interval:    spec.Monitoring.ServiceMonitor.Interval,
 		}
 	}
 	if spec.Coordinators != nil {

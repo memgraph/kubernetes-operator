@@ -36,6 +36,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
+	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
+
 	memgraphcomv1alpha1 "github.com/memgraph/kubernetes-operator/api/v1alpha1"
 	// +kubebuilder:scaffold:imports
 )
@@ -66,17 +68,21 @@ var _ = BeforeSuite(func() {
 	err = memgraphcomv1alpha1.AddToScheme(scheme.Scheme)
 	Expect(err).NotTo(HaveOccurred())
 	Expect(gatewayv1.Install(scheme.Scheme)).To(Succeed())
+	Expect(monitoringv1.AddToScheme(scheme.Scheme)).To(Succeed())
 
 	// +kubebuilder:scaffold:scheme
 
 	By("bootstrapping test environment")
 	// The Gateway API CRDs are loaded from the module the operator builds its
 	// Gateway and TCPRoute objects against, so the schema the API server
-	// validates them with is the one the code was written for.
+	// validates them with is the one the code was written for. The
+	// prometheus-operator API module ships no CRD, so the ServiceMonitor CRD
+	// is a copy under test/crds pinned to the module's version.
 	testEnv = &envtest.Environment{
 		CRDDirectoryPaths: []string{
 			filepath.Join("..", "..", "config", "crd", "bases"),
 			gatewayAPICRDs(),
+			filepath.Join("..", "..", "test", "crds"),
 		},
 		ErrorIfCRDPathMissing: true,
 	}

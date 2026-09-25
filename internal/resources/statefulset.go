@@ -107,6 +107,7 @@ func CoordinatorStatefulSet(
 		{Name: boltPortName, ContainerPort: memgraphcomv1alpha1.BoltPort},
 		{Name: managementPortName, ContainerPort: memgraphcomv1alpha1.ManagementPort},
 		{Name: coordinatorPortName, ContainerPort: memgraphcomv1alpha1.CoordinatorPort},
+		{Name: metricsPortName, ContainerPort: memgraphcomv1alpha1.MetricsPort},
 	}
 	// Coordinators are probed on their Raft port: it is the one they serve
 	// even before the Raft cluster has been formed.
@@ -128,6 +129,7 @@ func DataStatefulSet(cluster *memgraphcomv1alpha1.MemgraphCluster, replicas int3
 		{Name: boltPortName, ContainerPort: memgraphcomv1alpha1.BoltPort},
 		{Name: managementPortName, ContainerPort: memgraphcomv1alpha1.ManagementPort},
 		{Name: replicationPortName, ContainerPort: memgraphcomv1alpha1.ReplicationPort},
+		{Name: metricsPortName, ContainerPort: memgraphcomv1alpha1.MetricsPort},
 	}
 	container.ReadinessProbe = tcpProbe(memgraphcomv1alpha1.BoltPort, spec.readinessProbe)
 
@@ -172,6 +174,12 @@ func commonArgs(role normalizedRole) []string {
 	return []string{
 		fmt.Sprintf("--bolt-port=%d", memgraphcomv1alpha1.BoltPort),
 		fmt.Sprintf("--management-port=%d", memgraphcomv1alpha1.ManagementPort),
+		// The metrics endpoint is served either way; the port is pinned so it
+		// agrees with the declared container and Service ports, and the format
+		// so that it is what the operator says rather than what the image's
+		// default happens to be (JSON before 3.13, deprecated since).
+		fmt.Sprintf("--metrics-port=%d", memgraphcomv1alpha1.MetricsPort),
+		"--metrics-format=OpenMetrics",
 		"--data-directory=" + dataDirectory,
 		"--log-level=TRACE",
 		"--also-log-to-stderr",

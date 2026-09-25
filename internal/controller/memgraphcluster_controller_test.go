@@ -36,6 +36,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
+	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
+
 	memgraphcomv1alpha1 "github.com/memgraph/kubernetes-operator/api/v1alpha1"
 	"github.com/memgraph/kubernetes-operator/internal/memgraph"
 	"github.com/memgraph/kubernetes-operator/internal/resources"
@@ -44,6 +46,9 @@ import (
 // dataHostnamePattern is the per-instance external-dns hostname the exposure
 // specs ask for, with the placeholder the operator substitutes.
 const dataHostnamePattern = "data-{ordinal}.memgraph.example.com"
+
+// instanceLabel is the identity label every object of a cluster carries.
+const instanceLabel = "app.kubernetes.io/instance"
 
 // Name suffixes of the per-role workload objects a reconcile creates.
 const (
@@ -90,10 +95,11 @@ var _ = Describe("MemgraphCluster Controller", func() {
 	BeforeEach(func() {
 		fake = newFakeMemgraph()
 		reconciler = &MemgraphClusterReconciler{
-			Client:     k8sClient,
-			Scheme:     k8sClient.Scheme(),
-			Memgraph:   fake,
-			GatewayAPI: true,
+			Client:            k8sClient,
+			Scheme:            k8sClient.Scheme(),
+			Memgraph:          fake,
+			GatewayAPI:        true,
+			ServiceMonitorAPI: true,
 		}
 	})
 
@@ -1558,7 +1564,7 @@ var _ = Describe("MemgraphCluster Controller", func() {
 					Namespace: resourceNamespace,
 					Labels: map[string]string{
 						"app.kubernetes.io/name":        memgraphDbName,
-						"app.kubernetes.io/instance":    resourceName,
+						instanceLabel:                   resourceName,
 						"app.kubernetes.io/component":   component,
 						"app.kubernetes.io/managed-by":  "memgraph-operator",
 						appsv1.StatefulSetRevisionLabel: revision,
@@ -1630,7 +1636,7 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			deleteOwned(resourceName)
 			Expect(k8sClient.DeleteAllOf(ctx, &corev1.Pod{},
 				client.InNamespace(resourceNamespace),
-				client.MatchingLabels{"app.kubernetes.io/instance": resourceName},
+				client.MatchingLabels{instanceLabel: resourceName},
 				client.GracePeriodSeconds(0),
 			)).To(Succeed())
 		})
@@ -2362,6 +2368,165 @@ var _ = Describe("MemgraphCluster Controller", func() {
 				"the message names what the cluster lacks, not merely that something does")
 			Expect(converged.Message).To(ContainSubstring("Gateway API v1.6"),
 				"the message names the release that serves what the operator builds")
+		})
+	})
+
+	Context("when asked for a ServiceMonitor", func() {
+		const resourceName = "mgc-monitored"
+
+		status := func() memgraphcomv1alpha1.MemgraphClusterStatus {
+			GinkgoHelper()
+			cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+			get(resourceName, cluster)
+			return cluster.Status
+		}
+		convergedCondition := func() *metav1.Condition {
+			GinkgoHelper()
+			return apimeta.FindStatusCondition(status().Conditions, memgraphcomv1alpha1.ConditionConverged)
+		}
+		updateSpec := func(mutate func(*memgraphcomv1alpha1.MemgraphClusterSpec)) {
+			GinkgoHelper()
+			cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+			get(resourceName, cluster)
+			mutate(&cluster.Spec)
+			Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
+		}
+		bootstrapped := func() {
+			GinkgoHelper()
+			reconcileCluster(resourceName)
+			markWorkloadsReady(resourceName)
+			reconcileCluster(resourceName)
+			reconcileCluster(resourceName)
+		}
+		serviceMonitors := func() []monitoringv1.ServiceMonitor {
+			GinkgoHelper()
+			list := &monitoringv1.ServiceMonitorList{}
+			Expect(k8sClient.List(ctx, list, client.InNamespace(resourceNamespace))).To(Succeed())
+			return list.Items
+		}
+		// cleanupMonitoring removes the ServiceMonitor by hand: envtest runs no
+		// garbage collector.
+		cleanupMonitoring := func() {
+			GinkgoHelper()
+			for _, item := range serviceMonitors() {
+				Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, &item))).To(Succeed())
+			}
+		}
+
+		BeforeEach(func() {
+			resource := &memgraphcomv1alpha1.MemgraphCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: resourceNamespace},
+				Spec: memgraphcomv1alpha1.MemgraphClusterSpec{
+					Monitoring: &memgraphcomv1alpha1.MonitoringSpec{
+						ServiceMonitor: &memgraphcomv1alpha1.ServiceMonitorSpec{
+							Labels:   map[string]string{"release": "kube-prometheus-stack"},
+							Interval: "15s",
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+		})
+
+		AfterEach(func() {
+			cleanupMonitoring()
+			cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+			get(resourceName, cluster)
+			Expect(k8sClient.Delete(ctx, cluster)).To(Succeed())
+			deleteOwned(resourceName)
+		})
+
+		It("should create one ServiceMonitor selecting the cluster's Services on the metrics port", func() {
+			reconcileCluster(resourceName)
+
+			cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+			get(resourceName, cluster)
+			monitor := &monitoringv1.ServiceMonitor{}
+			get(resourceName, monitor)
+			expectControlledBy(monitor, cluster)
+			Expect(monitor.Labels).To(HaveKeyWithValue("release", "kube-prometheus-stack"))
+			Expect(monitor.Labels).To(HaveKeyWithValue(resources.MonitoringLabel, resources.MonitoringValue))
+			Expect(monitor.Spec.Selector.MatchLabels).To(Equal(map[string]string{
+				"app.kubernetes.io/name": "memgraph", instanceLabel: resourceName,
+			}))
+			Expect(monitor.Spec.Endpoints).To(HaveLen(1))
+			Expect(monitor.Spec.Endpoints[0].Port).To(Equal("metrics"))
+			Expect(monitor.Spec.Endpoints[0].Path).To(Equal("/metrics"))
+			Expect(monitor.Spec.Endpoints[0].Interval).To(BeEquivalentTo("15s"))
+
+			// The selector matches both headless Services, and the endpoint's
+			// port name is one both publish.
+			for _, name := range []string{resourceName + coordinatorSuffix, resourceName + dataSuffix} {
+				svc := &corev1.Service{}
+				get(name, svc)
+				for key, value := range monitor.Spec.Selector.MatchLabels {
+					Expect(svc.Labels).To(HaveKeyWithValue(key, value), name+" is selected")
+				}
+				Expect(svc.Spec.Ports).To(ContainElement(HaveField("Name", "metrics")), name+" publishes the port")
+			}
+		})
+
+		It("should prune the ServiceMonitor when the block is removed and leave the cluster converged", func() {
+			bootstrapped()
+			Expect(serviceMonitors()).To(HaveLen(1))
+			Expect(convergedCondition().Status).To(Equal(metav1.ConditionTrue))
+
+			updateSpec(func(spec *memgraphcomv1alpha1.MemgraphClusterSpec) {
+				spec.Monitoring = nil
+			})
+			reconcileCluster(resourceName)
+			Expect(serviceMonitors()).To(BeEmpty(), "removing the block takes the object away")
+			Expect(convergedCondition().Status).To(Equal(metav1.ConditionTrue))
+
+			updateSpec(func(spec *memgraphcomv1alpha1.MemgraphClusterSpec) {
+				spec.Monitoring = &memgraphcomv1alpha1.MonitoringSpec{
+					ServiceMonitor: &memgraphcomv1alpha1.ServiceMonitorSpec{},
+				}
+			})
+			reconcileCluster(resourceName)
+			Expect(serviceMonitors()).To(HaveLen(1), "adding the block back recreates it")
+			Expect(serviceMonitors()[0].Spec.Endpoints[0].Interval).To(BeEmpty(),
+				"an empty block names no interval, so Prometheus's default applies")
+		})
+
+		It("should report the block as failed on a cluster without the ServiceMonitor CRD", func() {
+			reconciler.ServiceMonitorAPI = false
+			reconciler.ServiceMonitorAPIMissing = "ServiceMonitor is not served"
+			bootstrapped()
+
+			Expect(serviceMonitors()).To(BeEmpty(), "nothing is built for a kind the cluster lacks")
+			Expect(apimeta.IsStatusConditionTrue(status().Conditions, memgraphcomv1alpha1.ConditionReady)).To(BeTrue(),
+				"the cluster still serves")
+			converged := convergedCondition()
+			Expect(converged.Status).To(Equal(metav1.ConditionFalse))
+			Expect(converged.Reason).To(Equal(memgraphcomv1alpha1.ReasonApplyFailed))
+			Expect(converged.Message).To(ContainSubstring("ServiceMonitor is not served"),
+				"the message names what the cluster lacks")
+			Expect(converged.Message).To(ContainSubstring("Prometheus Operator"),
+				"the message names what installs it")
+
+			updateSpec(func(spec *memgraphcomv1alpha1.MemgraphClusterSpec) {
+				spec.Monitoring = nil
+			})
+			reconcileCluster(resourceName)
+			Expect(convergedCondition().Status).To(Equal(metav1.ConditionTrue),
+				"dropping the block clears the failure")
+		})
+	})
+
+	Context("when discovering ServiceMonitor", func() {
+		It("should find it on a cluster that serves it", func() {
+			served, missing, err := ServiceMonitorServed(k8sClient.RESTMapper())
+			Expect(err).NotTo(HaveOccurred())
+			Expect(served).To(BeTrue())
+			Expect(missing).To(BeEmpty())
+		})
+
+		It("should report it absent on a cluster that does not, without failing", func() {
+			served, missing, err := ServiceMonitorServed(apimeta.NewDefaultRESTMapper(nil))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(served).To(BeFalse())
+			Expect(missing).To(Equal("ServiceMonitor is not served"))
 		})
 	})
 
