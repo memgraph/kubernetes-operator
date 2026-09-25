@@ -1646,6 +1646,46 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			Expect(updated.Reason).To(Equal(memgraphcomv1alpha1.ReasonAllPodsUpdated))
 		})
 
+		// The race the e2e suite caught: both StatefulSets are applied in one
+		// pass, their statuses land one at a time, and for a moment the
+		// coordinators show the new revision while the data StatefulSet still
+		// shows the old one and has not observed its new template. Judged on that
+		// view the data plane looks done, and a coordinator would go first.
+		It("should not judge a role whose StatefulSet status lags its template", func() {
+			putPods(oldRevision)
+			// Only the coordinator StatefulSet has published the new revision; the
+			// data StatefulSet's status still describes the previous template.
+			sts := &appsv1.StatefulSet{}
+			get(resourceName+coordinatorSuffix, sts)
+			sts.Status.UpdateRevision = newRevision
+			Expect(k8sClient.Status().Update(ctx, sts)).To(Succeed())
+			get(resourceName+dataSuffix, sts)
+			sts.Status.UpdateRevision = oldRevision
+			sts.Status.ObservedGeneration = sts.Generation - 1
+			Expect(k8sClient.Status().Update(ctx, sts)).To(Succeed())
+
+			reconcileCluster(resourceName)
+
+			for ordinal := range 3 {
+				Expect(podExists(coordinatorSuffix, ordinal)).To(BeTrue(),
+					"no coordinator goes while the data StatefulSet's status is behind")
+			}
+			updated := condition(memgraphcomv1alpha1.ConditionUpdated)
+			Expect(updated.Status).To(Equal(metav1.ConditionFalse))
+			Expect(updated.Message).To(ContainSubstring("data StatefulSet's status"))
+
+			// The status catches up: the data plane is outdated after all, and the
+			// roll starts where it should, with a data pod.
+			get(resourceName+dataSuffix, sts)
+			sts.Status.UpdateRevision = newRevision
+			sts.Status.ObservedGeneration = sts.Generation
+			Expect(k8sClient.Status().Update(ctx, sts)).To(Succeed())
+			reconcileCluster(resourceName)
+
+			Expect(podExists(dataSuffix, 1)).To(BeFalse(), "the non-MAIN data pod is restarted first")
+			Expect(podExists(coordinatorSuffix, 2)).To(BeTrue())
+		})
+
 		// The whole order in one spec: replicas before MAIN, data plane before
 		// coordinators, Raft leader last, one pod at a time throughout.
 		It("should restart data pods before coordinators, MAIN and the leader last", func() {

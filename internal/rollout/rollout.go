@@ -120,6 +120,17 @@ type Role struct {
 	// outdated.
 	UpdateRevision string
 
+	// Stale reports that UpdateRevision cannot be trusted yet: the StatefulSet's
+	// status has not caught up with the pod template it carries, or the object
+	// read is older than the one the operator just applied. Both roles'
+	// StatefulSets are applied in one pass but their statuses land one at a
+	// time, so for a moment one role can show its new revision while the other
+	// still shows its old one — and judged on that, the role with nothing
+	// "outdated" is skipped and the other is restarted first. A stale role is
+	// therefore not judged at all: the roll waits a pass, which is what the
+	// status update takes.
+	Stale bool
+
 	Pods []Pod
 }
 
@@ -164,6 +175,18 @@ func Next(
 ) Decision {
 	instances := index(observed)
 	lags := indexLag(lag)
+
+	// Neither role is judged until both StatefulSets' statuses describe the
+	// template they carry: data first, coordinators after, is only decidable
+	// once "outdated" means the same thing for both.
+	if data.Stale {
+		return waiting(memgraphcomv1alpha1.ReasonWorkloadsNotReady,
+			"Waiting for the data StatefulSet's status to describe its current pod template")
+	}
+	if coordinators.Stale {
+		return waiting(memgraphcomv1alpha1.ReasonWorkloadsNotReady,
+			"Waiting for the coordinator StatefulSet's status to describe its current pod template")
+	}
 
 	if len(outdated(data)) > 0 {
 		return nextDataInstance(data, instances, lags)
