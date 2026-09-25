@@ -147,9 +147,9 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 				},
 				CoreDumps:     defaultCoreDumps(),
 				ClusterDomain: memgraphcomv1alpha1.DefaultClusterDomain,
-				// Probes, resources, labels and the env/args passthrough have no
-				// schema defaults: the probe timings' defaults depend on the role
-				// and the rest default to "nothing added".
+				// The readiness probe, resources, labels and the env/args passthrough
+				// have no schema defaults: the probe timings are resolved by the
+				// builders and the rest default to "nothing added".
 			}), "the CRD schema defaults must match the Go constants the builders fall back to")
 		})
 
@@ -222,12 +222,8 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 
 		It("should accept a fully tuned pod configuration", func() {
 			stored := createAccepted("valid-pod-tuning", memgraphcomv1alpha1.MemgraphClusterSpec{
-				ClusterDomain: "k8s.example.com",
-				Probes: memgraphcomv1alpha1.ProbesSpec{
-					Data: memgraphcomv1alpha1.RoleProbesSpec{
-						ReadinessProbe: memgraphcomv1alpha1.ProbeSpec{FailureThreshold: ptr.To(int32(6))},
-					},
-				},
+				ClusterDomain:  "k8s.example.com",
+				ReadinessProbe: memgraphcomv1alpha1.ReadinessProbeSpec{FailureThreshold: ptr.To(int32(6))},
 				Resources: memgraphcomv1alpha1.ResourcesSpec{
 					Data: corev1.ResourceRequirements{
 						Requests: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("4Gi")},
@@ -248,9 +244,9 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 			})
 
 			Expect(stored.Spec.ClusterDomain).To(Equal("k8s.example.com"))
-			Expect(stored.Spec.Probes.Data.ReadinessProbe.FailureThreshold).To(HaveValue(Equal(int32(6))))
-			Expect(stored.Spec.Probes.Coordinators.ReadinessProbe).To(Equal(memgraphcomv1alpha1.ProbeSpec{}),
-				"an unset probe stays unset; its defaults are resolved by the builders, not the schema")
+			Expect(stored.Spec.ReadinessProbe.FailureThreshold).To(HaveValue(Equal(int32(6))))
+			Expect(stored.Spec.ReadinessProbe.PeriodSeconds).To(BeNil(),
+				"an unset timing stays unset; its default is resolved by the builders, not the schema")
 			Expect(stored.Spec.ExtraEnv.Data).To(HaveLen(1))
 			Expect(stored.Spec.ExtraArgs.Data).To(ConsistOf(
 				"--storage-snapshot-on-exit=true", "--bolt-num-workers=8"))
@@ -522,11 +518,7 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 				"must not set a fixed port"),
 			Entry("a probe timing below one", "invalid-probe-period",
 				memgraphcomv1alpha1.MemgraphClusterSpec{
-					Probes: memgraphcomv1alpha1.ProbesSpec{
-						Coordinators: memgraphcomv1alpha1.RoleProbesSpec{
-							ReadinessProbe: memgraphcomv1alpha1.ProbeSpec{PeriodSeconds: ptr.To(int32(0))},
-						},
-					},
+					ReadinessProbe: memgraphcomv1alpha1.ReadinessProbeSpec{PeriodSeconds: ptr.To(int32(0))},
 				},
 				"should be greater than or equal to 1"),
 		)

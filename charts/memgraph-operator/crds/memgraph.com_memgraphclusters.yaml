@@ -871,75 +871,31 @@ spec:
                         type: object
                     type: object
                 type: object
-              probes:
-                description: probes tunes the readiness probe timings of both roles.
+              readinessProbe:
+                description: |-
+                  readinessProbe tunes the readiness probe timings of every pod, the one
+                  probe the pods carry.
                 properties:
-                  coordinators:
-                    description: coordinators tunes the readiness probe of every coordinator
-                      pod.
-                    properties:
-                      readinessProbe:
-                        description: |-
-                          readinessProbe decides whether the pod receives traffic and whether the
-                          operator considers the workloads ready to register. Until it first
-                          succeeds — which for a data instance is after every database has been
-                          recovered — the pod is unready and nothing more.
-                        properties:
-                          failureThreshold:
-                            description: |-
-                              failureThreshold is how many consecutive failures the probe tolerates
-                              before acting. Defaults to 20.
-                            format: int32
-                            minimum: 1
-                            type: integer
-                          periodSeconds:
-                            description: periodSeconds is how often the probe runs.
-                              Defaults to 5.
-                            format: int32
-                            minimum: 1
-                            type: integer
-                          timeoutSeconds:
-                            description: |-
-                              timeoutSeconds is how long a single probe attempt may take. Defaults to
-                              10.
-                            format: int32
-                            minimum: 1
-                            type: integer
-                        type: object
-                    type: object
-                  data:
-                    description: data tunes the readiness probe of every data instance
-                      pod.
-                    properties:
-                      readinessProbe:
-                        description: |-
-                          readinessProbe decides whether the pod receives traffic and whether the
-                          operator considers the workloads ready to register. Until it first
-                          succeeds — which for a data instance is after every database has been
-                          recovered — the pod is unready and nothing more.
-                        properties:
-                          failureThreshold:
-                            description: |-
-                              failureThreshold is how many consecutive failures the probe tolerates
-                              before acting. Defaults to 20.
-                            format: int32
-                            minimum: 1
-                            type: integer
-                          periodSeconds:
-                            description: periodSeconds is how often the probe runs.
-                              Defaults to 5.
-                            format: int32
-                            minimum: 1
-                            type: integer
-                          timeoutSeconds:
-                            description: |-
-                              timeoutSeconds is how long a single probe attempt may take. Defaults to
-                              10.
-                            format: int32
-                            minimum: 1
-                            type: integer
-                        type: object
-                    type: object
+                  failureThreshold:
+                    description: |-
+                      failureThreshold is how many consecutive failures flip a pod that was
+                      ready to unready. Defaults to 20.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  periodSeconds:
+                    description: periodSeconds is how often the probe runs. Defaults
+                      to 5.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  timeoutSeconds:
+                    description: |-
+                      timeoutSeconds is how long a single probe attempt may take. Defaults to
+                      10.
+                    format: int32
+                    minimum: 1
+                    type: integer
                 type: object
               resources:
                 description: resources sets the compute resources of both roles' Memgraph
