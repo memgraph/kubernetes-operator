@@ -2,22 +2,28 @@
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: memgraph-kubernetes-operator
+  name: manager-role
 rules:
 - apiGroups:
   - ""
   resources:
-  - pods
-  - services
   - configmaps
-  - secrets
+  - services
   verbs:
   - create
   - delete
   - get
   - list
   - patch
-  - update
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  verbs:
+  - delete
+  - get
+  - list
   - watch
 - apiGroups:
   - apps
@@ -25,47 +31,51 @@ rules:
   - statefulsets
   verbs:
   - create
-  - delete
   - get
   - list
   - patch
-  - update
   - watch
 - apiGroups:
-  - batch
+  - gateway.networking.k8s.io
   resources:
-  - jobs
+  - gateways
+  - tcproutes
   verbs:
   - create
   - delete
   - get
   - list
   - patch
-  - update
   - watch
 - apiGroups:
   - memgraph.com
   resources:
-  - memgraphhas
+  - memgraphclusters
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - memgraph.com
+  resources:
+  - memgraphclusters/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - memgraph.com
+  resources:
+  - memgraphclusters/status
+  verbs:
+  - get
+  - patch
+- apiGroups:
+  - monitoring.coreos.com
+  resources:
+  - servicemonitors
   verbs:
   - create
   - delete
   - get
   - list
   - patch
-  - update
   - watch
-- apiGroups:
-  - memgraph.com
-  resources:
-  - memgraphhas/finalizers
-  verbs:
-  - update
-- apiGroups:
-  - memgraph.com
-  resources:
-  - memgraphhas/status
-  verbs:
-  - get
-  - patch
-  - update

@@ -1,0 +1,129 @@
+name: Tests
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions: {}
+
+jobs:
+  unit:
+    permissions:
+      contents: read
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: go.mod
+
+      - name: Run unit tests
+        run: make test-unit
+
+  envtest:
+    permissions:
+      contents: read
+    name: Envtest
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: go.mod
+
+      - name: Run tests against envtest
+        run: make test
+
+  chart:
+    permissions:
+      contents: read
+    name: Install chart
+    # Disabled for now: this job boots a Kind cluster on every pull request.
+    # Remove this line to bring it back -- and note that its version check is
+    # premature until the first release, since it enforces a bump against a
+    # chart version that has never been published.
+    if: false
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+          # chart-version-check compares the chart against the base branch.
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: go.mod
+
+      # The chart ships the CRDs and the manager's RBAC rules generated from
+      # the Go sources; this fails if the committed copies are stale.
+      - name: Verify the generated chart manifests
+        run: make chart-verify
+
+      - name: Lint the chart
+        run: make helm-lint
+
+      # A published chart version is immutable, so a change to the chart that
+      # keeps its version would be a change users never receive.
+      - name: Check the chart version was bumped
+        env:
+          BASE_REF: origin/${{ github.base_ref || github.ref_name }}
+        run: make chart-version-check
+
+      # Releases write into another repository, so the cross-publish path is
+      # tested here, against a local stand-in for it.
+      - name: Test the cross-publish path
+        run: make test-chart-publish
+
+      - name: Install Kind
+        run: go install sigs.k8s.io/kind@v0.32.0
+
+      # Install and uninstall the chart on a clean cluster. No license needed:
+      # this asserts the operator runs and reconciles under the chart's RBAC,
+      # while the e2e job below boots a real cluster on the same chart install.
+      - name: Install and uninstall the chart on Kind
+        run: make test-chart
+
+  e2e:
+    permissions:
+      contents: read
+    name: E2E tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: go.mod
+
+      - name: Install Kind
+        run: go install sigs.k8s.io/kind@v0.32.0
+
+      - name: Run e2e tests against Kind
+        env:
+          # Enterprise license for the Memgraph HA cluster the suite boots,
+          # following the HA chart CI's repository-secret practice.
+          MEMGRAPH_ENTERPRISE_LICENSE: ${{ secrets.MEMGRAPH_ENTERPRISE_LICENSE }}
+          MEMGRAPH_ORGANIZATION_NAME: ${{ secrets.MEMGRAPH_ORGANIZATION_NAME }}
+          # The operator has no webhooks in v1, so the suite needs no CertManager.
+          CERT_MANAGER_INSTALL_SKIP: "true"
+        run: make test-e2e

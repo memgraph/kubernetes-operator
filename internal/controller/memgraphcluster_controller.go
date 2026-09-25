@@ -1,0 +1,1560 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package controller
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"slices"
+	"strings"
+	"time"
+
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
+
+	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
+
+	memgraphcomv1alpha1 "github.com/memgraph/kubernetes-operator/api/v1alpha1"
+	"github.com/memgraph/kubernetes-operator/internal/memgraph"
+	"github.com/memgraph/kubernetes-operator/internal/planner"
+	"github.com/memgraph/kubernetes-operator/internal/resources"
+	"github.com/memgraph/kubernetes-operator/internal/rollout"
+)
+
+// fieldOwner identifies this controller as the server-side-apply field
+// manager of the workload objects it provisions.
+const fieldOwner = "memgraph-operator"
+
+const (
+	// requeueWhilePending is how long to wait before retrying when the
+	// cluster cannot be registered yet — pods not ready, or coordinators not
+	// answering Bolt queries. Both are expected while the cluster starts up.
+	requeueWhilePending = 10 * time.Second
+
+	// requeueAfterRegistration schedules the follow-up reconcile that
+	// verifies issued registration commands actually converged the cluster.
+	requeueAfterRegistration = 10 * time.Second
+
+	// resyncInterval is how often a converged cluster is re-observed to catch
+	// registration drift. A pod that loses its registration (rescheduled onto
+	// a fresh node, wiped storage) while still running produces no watch event
+	// — its StatefulSet is unchanged — so a lost registration would otherwise
+	// go undetected until an unrelated reconcile. This periodic resync is what
+	// makes re-registration continuous rather than one-shot.
+	resyncInterval = 30 * time.Second
+)
+
+// MemgraphClusterReconciler reconciles a MemgraphCluster object
+type MemgraphClusterReconciler struct {
+	client.Client
+	Scheme *runtime.Scheme
+
+	// Memgraph opens Bolt connections to coordinators. Tests substitute a
+	// fake; everything above the memgraph.Client interface never touches the
+	// Bolt driver.
+	Memgraph memgraph.Connector
+
+	// GatewayAPI reports whether the cluster serves the Gateway API kinds the
+	// operator builds, at the version it builds them, as discovered when the
+	// manager started. The Gateway API CRDs belong to whoever installs a
+	// Gateway controller and are never bundled with the operator, so a cluster
+	// without them is normal; what changes is that the Gateway exposure mode
+	// cannot be served on it, and a watch on a kind the cluster does not have
+	// would keep the manager from starting at all.
+	GatewayAPI bool
+
+	// GatewayAPIMissing says what the discovery found lacking when GatewayAPI
+	// is false — a kind not served at all, or served only at an older version —
+	// so a cluster asking for the Gateway mode is told what to install rather
+	// than that "the Gateway API" is absent when its CRDs plainly exist.
+	GatewayAPIMissing string
+
+	// ServiceMonitorAPI reports whether the cluster serves Prometheus
+	// Operator's ServiceMonitor at the version the operator builds, discovered
+	// when the manager started. The CRD belongs to whoever installs Prometheus
+	// Operator and is never bundled, so a cluster without it is normal; what
+	// changes is that a spec asking for a ServiceMonitor cannot be served on
+	// it, and a watch on the kind would keep the manager from starting.
+	ServiceMonitorAPI bool
+
+	// ServiceMonitorAPIMissing says what the discovery found lacking when
+	// ServiceMonitorAPI is false, so the resource is told what to install.
+	ServiceMonitorAPIMissing string
+}
+
+// The install chart's ClusterRole is generated from these markers, so they are
+// the operator's permission surface: nothing broader is ever granted. The
+// verbs are only the ones this reconciler issues — it reads MemgraphClusters
+// and patches their status, and server-side-applies (create plus patch) the
+// workloads without ever updating or deleting them, because deletion belongs
+// to garbage collection via the owner references. The finalizers subresource
+// is needed to set those owner references: they block owner deletion, which
+// clusters running the OwnerReferencesPermissionEnforcement admission plugin
+// only allow with update access to the owner's finalizers.
+//
+// Pods and external Services are the two things the operator deletes. Both
+// StatefulSets use updateStrategy OnDelete, so replacing a pod whose template
+// changed is the operator's job and nobody else's; get/list/watch reads their
+// revision and readiness, and delete is the restart itself. External Services
+// exist only while the spec asks for them: removing the externalAccess block, or
+// retiring the data instance one fronts, has to take the Service away, and
+// server-side apply never removes an object. Headless Services and StatefulSets
+// are never deleted — the same verb covers them, but nothing here issues it.
+// +kubebuilder:rbac:groups=memgraph.com,resources=memgraphclusters,verbs=get;list;watch
+// +kubebuilder:rbac:groups=memgraph.com,resources=memgraphclusters/status,verbs=get;patch
+// +kubebuilder:rbac:groups=memgraph.com,resources=memgraphclusters/finalizers,verbs=update
+// +kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;create;patch
+// +kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;patch;delete
+// +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;delete
+//
+// The Gateway and its TCPRoutes are external objects like the Services above,
+// with the same lifecycle and the same verbs. The rules are granted whether or
+// not the cluster serves the group: RBAC does not require the resource to exist.
+// +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=gateways;tcproutes,verbs=get;list;watch;create;patch;delete
+//
+// The ServiceMonitor is the same kind of object again: created while the spec
+// asks for it, deleted when the block goes, on a group the cluster may not
+// serve.
+// +kubebuilder:rbac:groups=monitoring.coreos.com,resources=servicemonitors,verbs=get;list;watch;create;patch;delete
+//
+// The Grafana dashboard ConfigMap has the same lifecycle. Its informer is
+// scoped by the managed-by label in cmd/main.go, so the rule reaches every
+// ConfigMap but the cache holds only the operator's own.
+// +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch;create;patch;delete
+
+// Reconcile drives the cluster toward the declared MemgraphCluster spec in
+// two stages. First it server-side-applies the builders' desired objects: one
+// StatefulSet per role (coordinators, data instances), each backed by a
+// headless Service, at the replica counts replicaCounts derives. Then, once
+// every pod is ready, it reconciles cluster registration: observe SHOW
+// INSTANCES on the coordinator leader, diff against the declared topology, and
+// issue only the missing commands — which is all growing a live cluster takes,
+// because a raised count declares members the observed cluster does not have
+// registered yet. A lowered dataInstances count runs the same loop in reverse:
+// the members beyond the declared count are demoted if one of them holds MAIN,
+// unregistered, and only then are their pods shed.
+//
+// All interaction is read-before-write and idempotent, so an operator restart
+// mid-bootstrap is harmless. Registration reconciliation is continuous, not
+// one-shot: a converged cluster is re-observed on a periodic resync, so a
+// registration a pod loses (rescheduled, wiped storage) is re-issued without
+// human action. A rejection is reported on the resource rather than only in the
+// log, because no amount of retrying will clear it: an apply the API server
+// refuses — an edit to a field Kubernetes treats as immutable, a quota denial —
+// as ApplyFailed, and a registration command the coordinator leader refuses as
+// RegistrationFailed. Deletion needs no handling here — every object
+// carries a controller owner reference, so garbage collection removes the
+// workloads with the CR.
+func (r *MemgraphClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	log := logf.FromContext(ctx)
+
+	var cluster memgraphcomv1alpha1.MemgraphCluster
+	if err := r.Get(ctx, req.NamespacedName, &cluster); err != nil {
+		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+
+	replicas, err := r.replicaCounts(ctx, &cluster)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// The external objects follow the data pods the operator runs, not the
+	// count it declares: a retiring instance keeps serving clients until its pod
+	// is shed, and the pass that sheds the pod is the one that drops its way in.
+	external := r.desiredExternal(&cluster, replicas.data.applied)
+	monitoring := r.desiredMonitoring(&cluster)
+	desired := make([]client.Object, 0, 4+len(external)+len(monitoring))
+	desired = append(desired,
+		resources.CoordinatorHeadlessService(&cluster),
+		resources.DataHeadlessService(&cluster),
+		resources.CoordinatorStatefulSet(&cluster, replicas.coordinators.applied),
+		resources.DataStatefulSet(&cluster, replicas.data.applied),
+	)
+	desired = append(desired, external...)
+	desired = append(desired, monitoring...)
+	applied, err := r.applyDesired(ctx, &cluster, desired...)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if err := r.pruneExternal(ctx, &cluster, external); err != nil {
+		return ctrl.Result{}, err
+	}
+	if err := r.pruneMonitoring(ctx, &cluster, monitoring); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	log.Info("Applied desired workload objects for MemgraphCluster", "memgraphcluster", req.NamespacedName)
+
+	exposure, err := r.observeExternalAccess(ctx, &cluster)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	return r.reconcileRegistration(ctx, &cluster, replicas, exposure, applied)
+}
+
+// desiredExternal is every external object the spec asks for: the Services in
+// both exposure modes, plus the Gateway and its TCPRoutes in Gateway mode — but
+// only on a cluster that serves the Gateway API. Without it the Services are
+// still applied as ClusterIPs and the cluster runs in-cluster; the exposure is
+// then reported as failed rather than pending, because no amount of waiting
+// makes the API appear.
+func (r *MemgraphClusterReconciler) desiredExternal(
+	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	dataReplicas int32,
+) []client.Object {
+	var objects []client.Object
+	for _, service := range resources.ExternalServices(cluster, dataReplicas) {
+		objects = append(objects, service)
+	}
+	if resources.UsesGateway(cluster) && r.GatewayAPI {
+		objects = append(objects, resources.Gateway(cluster, dataReplicas))
+		for _, route := range resources.TCPRoutes(cluster, dataReplicas) {
+			objects = append(objects, route)
+		}
+	}
+	return objects
+}
+
+// desiredMonitoring is every monitoring object the spec asks for: the
+// ServiceMonitor, but only on a cluster that serves the kind — without it the
+// cluster runs as if that block were absent and the block is reported as failed
+// rather than pending, because no amount of waiting makes the CRD appear — and
+// the Grafana dashboard ConfigMap, which needs nothing from the cluster.
+func (r *MemgraphClusterReconciler) desiredMonitoring(cluster *memgraphcomv1alpha1.MemgraphCluster) []client.Object {
+	var objects []client.Object
+	if resources.UsesServiceMonitor(cluster) && r.ServiceMonitorAPI {
+		objects = append(objects, resources.ServiceMonitor(cluster))
+	}
+	if resources.UsesGrafanaDashboard(cluster) {
+		objects = append(objects, resources.GrafanaDashboard(cluster))
+	}
+	return objects
+}
+
+// serviceMonitorFailure explains why the ServiceMonitor the spec asks for
+// cannot be served on this cluster, or is empty when it can or nothing asks.
+func (r *MemgraphClusterReconciler) serviceMonitorFailure(cluster *memgraphcomv1alpha1.MemgraphCluster) string {
+	if !resources.UsesServiceMonitor(cluster) || r.ServiceMonitorAPI {
+		return ""
+	}
+	return fmt.Sprintf("The ServiceMonitor kind the operator needs is not served by this cluster (%s): "+
+		"it builds %s ServiceMonitors, which Prometheus Operator installs. Install it, then restart the operator",
+		r.ServiceMonitorAPIMissing, monitoringv1.SchemeGroupVersion.String())
+}
+
+// pruneMonitoring deletes the monitoring objects of this cluster that the
+// current spec does not describe, the way pruneExternal does for the external
+// ones. The ServiceMonitor kind is only consulted where the cluster serves it;
+// where it does not, nothing was ever created.
+func (r *MemgraphClusterReconciler) pruneMonitoring(
+	ctx context.Context,
+	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	desired []client.Object,
+) error {
+	keep := keptNames(desired)
+	lists := []client.ObjectList{&corev1.ConfigMapList{}}
+	if r.ServiceMonitorAPI {
+		lists = append(lists, &monitoringv1.ServiceMonitorList{})
+	}
+	for _, list := range lists {
+		if err := r.pruneKind(ctx, cluster, list, resources.MonitoringSelector(cluster), keep); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// keptNames indexes desired objects by kind and name, the key pruneKind
+// spares an existing object by.
+func keptNames(desired []client.Object) map[string]bool {
+	keep := make(map[string]bool, len(desired))
+	for _, obj := range desired {
+		keep[obj.GetObjectKind().GroupVersionKind().Kind+"/"+obj.GetName()] = true
+	}
+	return keep
+}
+
+// pruneExternal deletes the external objects of this cluster that the current
+// spec does not describe: all of them once the externalAccess block is removed,
+// the Gateway and routes when the type moves to LoadBalancer, and the objects in
+// front of a data instance a lowered count has just shed. Apply only ever creates
+// and updates, so this is the one place an object goes away before its owner
+// does. Only objects this cluster controls are considered, and each delete is
+// conditioned on the UID observed, so an object recreated in between is left for
+// the next pass to judge.
+func (r *MemgraphClusterReconciler) pruneExternal(
+	ctx context.Context,
+	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	desired []client.Object,
+) error {
+	keep := keptNames(desired)
+
+	lists := []client.ObjectList{&corev1.ServiceList{}}
+	if r.GatewayAPI {
+		// Listing a kind the cluster does not serve fails, so the Gateway
+		// API kinds are only consulted where they exist.
+		lists = append(lists, &gatewayv1.GatewayList{}, &gatewayv1.TCPRouteList{})
+	}
+	for _, list := range lists {
+		if err := r.pruneKind(ctx, cluster, list, resources.ExternalServicesSelector(cluster), keep); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// pruneKind prunes one kind of operator-created object, listed by the marker
+// label every object of that family carries, sparing the ones desired names.
+func (r *MemgraphClusterReconciler) pruneKind(
+	ctx context.Context,
+	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	list client.ObjectList,
+	selector map[string]string,
+	keep map[string]bool,
+) error {
+	log := logf.FromContext(ctx)
+
+	if err := r.List(ctx, list, client.InNamespace(cluster.Namespace),
+		client.MatchingLabels(selector)); err != nil {
+		return fmt.Errorf("listing objects to prune: %w", err)
+	}
+	items, err := apimeta.ExtractList(list)
+	if err != nil {
+		return fmt.Errorf("reading objects to prune: %w", err)
+	}
+	for _, item := range items {
+		obj, ok := item.(client.Object)
+		if !ok {
+			continue
+		}
+		kind, err := apiutil.GVKForObject(obj, r.Scheme)
+		if err != nil {
+			return fmt.Errorf("resolving kind of object %s: %w", obj.GetName(), err)
+		}
+		if keep[kind.Kind+"/"+obj.GetName()] || !metav1.IsControlledBy(obj, cluster) {
+			continue
+		}
+		uid := obj.GetUID()
+		err = r.Delete(ctx, obj, client.Preconditions{UID: &uid})
+		switch {
+		case err == nil:
+			log.Info("Deleted an object the spec no longer describes", "kind", kind.Kind, "name", obj.GetName())
+		case apierrors.IsNotFound(err), apierrors.IsConflict(err):
+		default:
+			return fmt.Errorf("deleting %s %s: %w", kind.Kind, obj.GetName(), err)
+		}
+	}
+	return nil
+}
+
+// externalAccess is what a reconcile pass observed about the cluster's exposure:
+// the external address every exposed member is announced at, the objects still
+// waiting for one, and the status block that reports them. It is the zero value
+// for an unexposed cluster.
+type externalAccess struct {
+	addresses resources.ExternalAddresses
+	// pending names the external objects that have no address yet, so the
+	// members behind them are announced at their pod addresses for now.
+	pending []string
+	// failure explains why the exposure the spec asks for cannot be served on
+	// this cluster at all, or is empty. Unlike pending, waiting does not clear it.
+	failure string
+	status  *memgraphcomv1alpha1.ExternalAccessStatus
+}
+
+// observeExternalAccess reads the external objects the spec asks for and
+// derives the address each exposed member is reachable at. It is pure
+// observation of Kubernetes state, taken before the cluster itself is looked
+// at, so what registration announces this pass is what the objects report this
+// pass. An object the apply just created and the cache has not caught up with is
+// the same as one with no address yet: pending, and looked at again next pass.
+func (r *MemgraphClusterReconciler) observeExternalAccess(
+	ctx context.Context,
+	cluster *memgraphcomv1alpha1.MemgraphCluster,
+) (externalAccess, error) {
+	if cluster.Spec.ExternalAccess == nil {
+		return externalAccess{}, nil
+	}
+	if resources.UsesGateway(cluster) {
+		return r.observeGatewayAccess(ctx, cluster)
+	}
+
+	address := func(name string) (string, error) {
+		var service corev1.Service
+		if err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: cluster.Namespace}, &service); err != nil {
+			if apierrors.IsNotFound(err) {
+				return "", nil
+			}
+			return "", fmt.Errorf("getting external Service %s: %w", name, err)
+		}
+		return resources.ExternalBoltAddress(&service), nil
+	}
+
+	exposure := newExternalAccess()
+	coordinators := resources.CoordinatorExternalServiceName(cluster)
+	addr, err := address(coordinators)
+	if err != nil {
+		return externalAccess{}, err
+	}
+	exposure.announceCoordinators(addr, coordinators)
+
+	for ordinal := range resources.DeclaredDataInstances(cluster) {
+		name := resources.DataExternalServiceName(cluster, ordinal)
+		addr, err := address(name)
+		if err != nil {
+			return externalAccess{}, err
+		}
+		exposure.announceData(ordinal, addr, name)
+	}
+	return exposure, nil
+}
+
+// observeGatewayAccess is observeExternalAccess for a cluster exposed through
+// a Gateway: one address for the whole cluster, read off the Gateway, with a
+// port per listener — and a hostname per route when external-dns publishes one.
+// On a cluster without the Gateway API nothing can be read, so every member is
+// announced at its pod address and the exposure is reported as failed.
+func (r *MemgraphClusterReconciler) observeGatewayAccess(
+	ctx context.Context,
+	cluster *memgraphcomv1alpha1.MemgraphCluster,
+) (externalAccess, error) {
+	exposure := newExternalAccess()
+	if !r.GatewayAPI {
+		exposure.failure = fmt.Sprintf("The Gateway API version the operator needs is not served by this cluster (%s): "+
+			"it builds %s Gateways and TCPRoutes, which %s or newer serves and which a Gateway controller "+
+			"such as Envoy Gateway %s or newer installs. Install it, then restart the operator",
+			r.GatewayAPIMissing, gatewayv1.GroupVersion.String(), minGatewayAPIRelease, minEnvoyGatewayRelease)
+		exposure.announceCoordinators("", resources.GatewayName(cluster))
+		for ordinal := range resources.DeclaredDataInstances(cluster) {
+			exposure.announceData(ordinal, "", resources.GatewayName(cluster))
+		}
+		return exposure, nil
+	}
+
+	var gateway gatewayv1.Gateway
+	gatewayName := resources.GatewayName(cluster)
+	found := true
+	if err := r.Get(ctx, types.NamespacedName{Name: gatewayName, Namespace: cluster.Namespace}, &gateway); err != nil {
+		if !apierrors.IsNotFound(err) {
+			return externalAccess{}, fmt.Errorf("getting Gateway %s: %w", gatewayName, err)
+		}
+		found = false
+	}
+	route := func(name string) (*gatewayv1.TCPRoute, error) {
+		var route gatewayv1.TCPRoute
+		if err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: cluster.Namespace}, &route); err != nil {
+			if apierrors.IsNotFound(err) {
+				return nil, nil
+			}
+			return nil, fmt.Errorf("getting TCPRoute %s: %w", name, err)
+		}
+		return &route, nil
+	}
+	address := func(routeName string, port int32) (string, error) {
+		if !found {
+			return "", nil
+		}
+		tcpRoute, err := route(routeName)
+		if err != nil {
+			return "", err
+		}
+		return resources.GatewayBoltAddress(&gateway, tcpRoute, port), nil
+	}
+
+	addr, err := address(resources.CoordinatorTCPRouteName(cluster), memgraphcomv1alpha1.BoltPort)
+	if err != nil {
+		return externalAccess{}, err
+	}
+	exposure.announceCoordinators(addr, gatewayName)
+	for ordinal := range resources.DeclaredDataInstances(cluster) {
+		addr, err := address(resources.DataTCPRouteName(cluster, ordinal), resources.DataGatewayPort(cluster, ordinal))
+		if err != nil {
+			return externalAccess{}, err
+		}
+		exposure.announceData(ordinal, addr, gatewayName)
+	}
+	return exposure, nil
+}
+
+func newExternalAccess() externalAccess {
+	return externalAccess{
+		addresses: resources.ExternalAddresses{Data: map[int32]string{}},
+		status:    &memgraphcomv1alpha1.ExternalAccessStatus{},
+	}
+}
+
+// announceCoordinators records the coordinators' shared address, or the object
+// still owed one.
+func (e *externalAccess) announceCoordinators(address, waitingOn string) {
+	if address == "" {
+		e.waitOn(waitingOn)
+	}
+	e.addresses.Coordinators = address
+	e.status.Coordinators = address
+}
+
+// announceData records one data instance's address, or the object still owed
+// one.
+func (e *externalAccess) announceData(ordinal int32, address, waitingOn string) {
+	if address == "" {
+		e.waitOn(waitingOn)
+	} else {
+		e.addresses.Data[ordinal] = address
+	}
+	e.status.Data = append(e.status.Data, memgraphcomv1alpha1.ExternalAddress{
+		Name: resources.DataInstanceName(ordinal), Address: address,
+	})
+}
+
+// waitOn names an object once, however many members wait on it: in Gateway mode
+// every member waits on the same Gateway.
+func (e *externalAccess) waitOn(name string) {
+	if !slices.Contains(e.pending, name) {
+		e.pending = append(e.pending, name)
+	}
+}
+
+// applyDesired server-side-applies the desired workload objects, each owned by
+// the cluster so garbage collection removes it with the CR.
+//
+// A rejected apply is retried forever behind the scenes, so it is reported on
+// the resource before the error is returned: without that the conditions keep
+// describing the cluster that is still running while the declared spec never
+// lands, and the rejection is only visible in the operator's log. Both
+// conditions go False — the workloads are not the declared ones, so neither
+// serving nor convergence can be claimed for the spec the user asked for.
+//
+// It returns the generation the API server assigned each object, which is how
+// the rest of the pass tells a cached object that predates this apply from one
+// that reflects it.
+func (r *MemgraphClusterReconciler) applyDesired(
+	ctx context.Context,
+	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	desired ...client.Object,
+) (appliedGenerations, error) {
+	applied := appliedGenerations{}
+	for _, obj := range desired {
+		if err := controllerutil.SetControllerReference(cluster, obj, r.Scheme); err != nil {
+			return nil, fmt.Errorf("setting owner reference on %T %s: %w", obj, obj.GetName(), err)
+		}
+		generation, err := r.apply(ctx, obj)
+		if err != nil {
+			applyErr := fmt.Errorf("applying %T %s: %w", obj, obj.GetName(), err)
+			msg := truncateMessage(applyErr.Error())
+			if statusErr := r.writeStatus(ctx, cluster, lastObserved(cluster),
+				notReadyCondition(memgraphcomv1alpha1.ReasonApplyFailed, msg),
+				notConvergedCondition(memgraphcomv1alpha1.ReasonApplyFailed, msg),
+			); statusErr != nil {
+				return nil, errors.Join(applyErr, statusErr)
+			}
+			return nil, applyErr
+		}
+		applied[appliedKey(obj)] = generation
+	}
+	return applied, nil
+}
+
+// appliedGenerations is the metadata.generation the API server assigned each
+// object a pass applied, keyed by kind and name — two kinds share a name here,
+// the headless Service and the StatefulSet of a role.
+type appliedGenerations map[string]int64
+
+func appliedKey(obj client.Object) string {
+	return obj.GetObjectKind().GroupVersionKind().Kind + "/" + obj.GetName()
+}
+
+// statefulSet is the generation this pass applied to the named StatefulSet, or
+// zero when the pass applied none — which is what a StatefulSet read from the
+// cache is then measured against, and zero is what any generation clears.
+func (a appliedGenerations) statefulSet(name string) int64 {
+	return a["StatefulSet/"+name]
+}
+
+// roleReplicas is one role's replica arithmetic for a reconcile pass: how many
+// replicas the spec declares, and how many the operator applies to the role's
+// StatefulSet.
+type roleReplicas struct {
+	// name is the StatefulSet's name, so a condition message names the object
+	// the user can look at.
+	name     string
+	declared int32
+	applied  int32
+}
+
+// replicaCounts is both roles' replica arithmetic.
+type replicaCounts struct {
+	coordinators roleReplicas
+	data         roleReplicas
+}
+
+// retirementMessage names the members a lowered count is shedding, and is empty
+// when none are. It is non-empty for exactly as long as the retirement is
+// unfinished: the retiring sets are derived from the replica counts the
+// operator's own StatefulSets still run, so they empty only once the shrink that
+// removes those pods has been applied.
+func retirementMessage(topology planner.Topology) string {
+	var retiring []string
+	if names := coordinatorNames(topology.RetiringCoordinators); len(names) > 0 {
+		retiring = append(retiring, "coordinator(s) "+strings.Join(names, ", "))
+	}
+	if names := instanceNames(topology.RetiringDataInstances); len(names) > 0 {
+		retiring = append(retiring, "data instance(s) "+strings.Join(names, ", "))
+	}
+	if len(retiring) == 0 {
+		return ""
+	}
+	return "Retiring " + strings.Join(retiring, " and ") + " before their pods are shed"
+}
+
+func coordinatorNames(coordinators []memgraph.CoordinatorSpec) []string {
+	names := make([]string, 0, len(coordinators))
+	for _, coordinator := range coordinators {
+		names = append(names, coordinator.Name())
+	}
+	return names
+}
+
+func instanceNames(instances []memgraph.DataInstanceSpec) []string {
+	names := make([]string, 0, len(instances))
+	for _, instance := range instances {
+		names = append(names, instance.Name)
+	}
+	return names
+}
+
+// yieldedLeader is the retiring coordinator a plan ends by moving Raft leadership
+// off, or the empty string when the plan does not do that. A yield is always the
+// plan's last command, because nothing after it could be planned: the election
+// picks the successor, so the pass stops there and the next one observes the
+// cluster under whoever won.
+func yieldedLeader(commands []planner.Command) string {
+	if len(commands) == 0 {
+		return ""
+	}
+	yield, ok := commands[len(commands)-1].(planner.YieldLeadership)
+	if !ok {
+		return ""
+	}
+	return yield.Leader
+}
+
+// replicaCounts resolves the replica count to apply per role: the declared count
+// while the cluster grows or holds its size, and deliberately the current count
+// while a lowered count would shrink it. Shedding pods means removing members
+// from the Memgraph cluster first — the coordinators otherwise keep expecting
+// instances whose pods are gone, and a removed coordinator's vote must be given
+// up before its pod is — so this rule never shrinks anything, which keeps it free
+// of any knowledge about the cluster's state.
+//
+// A lowered count of either role is carried out at the end of the registration
+// phase instead, once the retiring members have actually left the cluster (see
+// reconcileRegistration).
+func (r *MemgraphClusterReconciler) replicaCounts(
+	ctx context.Context,
+	cluster *memgraphcomv1alpha1.MemgraphCluster,
+) (replicaCounts, error) {
+	var counts replicaCounts
+	for _, role := range []struct {
+		name     string
+		declared int32
+		resolved *roleReplicas
+	}{
+		{resources.CoordinatorName(cluster), resources.DeclaredCoordinators(cluster), &counts.coordinators},
+		{resources.DataName(cluster), resources.DeclaredDataInstances(cluster), &counts.data},
+	} {
+		current, err := r.currentReplicas(ctx, cluster.Namespace, role.name)
+		if err != nil {
+			return replicaCounts{}, err
+		}
+		// The larger of the two, so growing applies the declared count while
+		// shrinking holds the current one.
+		*role.resolved = roleReplicas{
+			name: role.name, declared: role.declared, applied: max(role.declared, current),
+		}
+	}
+	return counts, nil
+}
+
+// rolloutRoles is both roles' pods as the rolling restart sees them.
+type rolloutRoles struct {
+	coordinators rollout.Role
+	data         rollout.Role
+}
+
+// observeRollout reads both roles' pods and the revision their StatefulSet
+// currently hashes its pod template to, which is everything the rolling restart
+// needs about Kubernetes. It is pure observation: nothing is decided here.
+func (r *MemgraphClusterReconciler) observeRollout(
+	ctx context.Context,
+	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	replicas replicaCounts,
+	applied appliedGenerations,
+) (rolloutRoles, error) {
+	var roles rolloutRoles
+	coordinators, err := r.observeRolloutRole(ctx, cluster, replicas.coordinators,
+		resources.CoordinatorPodSelector(cluster), resources.CoordinatorInstanceName,
+		applied.statefulSet(replicas.coordinators.name))
+	if err != nil {
+		return rolloutRoles{}, err
+	}
+	data, err := r.observeRolloutRole(ctx, cluster, replicas.data,
+		resources.DataPodSelector(cluster), resources.DataInstanceName,
+		applied.statefulSet(replicas.data.name))
+	if err != nil {
+		return rolloutRoles{}, err
+	}
+	roles.coordinators, roles.data = coordinators, data
+	return roles, nil
+}
+
+// observeRolloutRole reads one role's pods, in ordinal order, each tagged with
+// the Memgraph instance that runs on it.
+//
+// Pods are looked up by the name their ordinal gives them rather than by
+// iterating whatever the list returned, so a pod that has been deleted and not
+// yet recreated is simply absent from the result — which is how the rolling
+// restart learns to wait for it, and what keeps a pod belonging to some other
+// generation of the StatefulSet from being counted.
+//
+// A pod on its way out is not ready no matter what its conditions still say. Its
+// containers keep passing their probes for as long as they take to shut down, and
+// a restart that trusted that would delete the next pod while this one is still
+// running.
+//
+// The revision the pods are measured against is only as good as the StatefulSet
+// it was read from, and that object can be behind in two ways: the informer
+// cache still holds the object as it was before this pass applied it, or the
+// StatefulSet controller has not yet processed the template it carries. Both
+// leave status.updateRevision describing the previous template, which would
+// make every pod look up to date. The role is marked stale in either case, from
+// the generation the apply returned and the one the status reports, and the
+// roll does not judge it until both agree.
+func (r *MemgraphClusterReconciler) observeRolloutRole(
+	ctx context.Context,
+	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	role roleReplicas,
+	selector map[string]string,
+	instanceName func(ordinal int32) string,
+	appliedGeneration int64,
+) (rollout.Role, error) {
+	observed := rollout.Role{Replicas: role.applied}
+
+	var sts appsv1.StatefulSet
+	if err := r.Get(ctx, types.NamespacedName{Name: role.name, Namespace: cluster.Namespace}, &sts); err != nil {
+		if apierrors.IsNotFound(err) {
+			// Nothing has been provisioned yet, so there is no revision to measure
+			// pods against and nothing to restart.
+			return observed, nil
+		}
+		return rollout.Role{}, fmt.Errorf("getting StatefulSet %s: %w", role.name, err)
+	}
+	observed.UpdateRevision = sts.Status.UpdateRevision
+	observed.Stale = sts.Generation < appliedGeneration || sts.Status.ObservedGeneration != sts.Generation
+
+	var pods corev1.PodList
+	if err := r.List(ctx, &pods,
+		client.InNamespace(cluster.Namespace), client.MatchingLabels(selector)); err != nil {
+		return rollout.Role{}, fmt.Errorf("listing pods of StatefulSet %s: %w", role.name, err)
+	}
+	byName := make(map[string]*corev1.Pod, len(pods.Items))
+	for i := range pods.Items {
+		byName[pods.Items[i].Name] = &pods.Items[i]
+	}
+
+	for ordinal := int32(0); ordinal < role.applied; ordinal++ {
+		pod, ok := byName[fmt.Sprintf("%s-%d", role.name, ordinal)]
+		if !ok {
+			continue
+		}
+		observed.Pods = append(observed.Pods, rollout.Pod{
+			Name:         pod.Name,
+			UID:          string(pod.UID),
+			Instance:     instanceName(ordinal),
+			Ordinal:      ordinal,
+			RevisionHash: pod.Labels[appsv1.StatefulSetRevisionLabel],
+			Ready:        pod.DeletionTimestamp == nil && podReady(pod),
+		})
+	}
+	return observed, nil
+}
+
+// podReady reports the pod's Ready condition.
+func podReady(pod *corev1.Pod) bool {
+	for _, condition := range pod.Status.Conditions {
+		if condition.Type == corev1.PodReady {
+			return condition.Status == corev1.ConditionTrue
+		}
+	}
+	return false
+}
+
+// restartPod deletes the pod a rolling restart picked, so its StatefulSet
+// recreates it on the current pod template. The delete is conditioned on the UID
+// that was observed: a pod already replaced between the observation and here is
+// left alone rather than restarted twice, and a pod that is simply gone is not an
+// error — the next pass re-observes and decides again.
+func (r *MemgraphClusterReconciler) restartPod(
+	ctx context.Context,
+	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	decision rollout.Decision,
+) error {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: decision.Pod.Name, Namespace: cluster.Namespace},
+	}
+	uid := types.UID(decision.Pod.UID)
+	err := r.Delete(ctx, pod, client.Preconditions{UID: &uid})
+	switch {
+	case err == nil, apierrors.IsNotFound(err), apierrors.IsConflict(err):
+		return nil
+	default:
+		return fmt.Errorf("deleting pod %s to restart it: %w", decision.Pod.Name, err)
+	}
+}
+
+// currentReplicas is the replica count the operator's own previous apply left on
+// a role's StatefulSet, or zero when the cluster has not been provisioned yet.
+func (r *MemgraphClusterReconciler) currentReplicas(
+	ctx context.Context,
+	namespace, name string,
+) (int32, error) {
+	var sts appsv1.StatefulSet
+	if err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, &sts); err != nil {
+		if apierrors.IsNotFound(err) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("getting StatefulSet %s: %w", name, err)
+	}
+	if sts.Spec.Replicas == nil {
+		return 0, nil
+	}
+	return *sts.Spec.Replicas, nil
+}
+
+// reconcileRegistration converges cluster registration once the workloads are
+// ready: find the coordinator leader, plan against its SHOW INSTANCES view,
+// and execute the planned commands against that one connection. Unreachable
+// coordinators are retried on a delay rather than surfaced as errors — Bolt
+// endpoints lagging pod readiness is a normal startup phase, not a failure.
+//
+// The readiness gate is deliberately strict about the pods a lowered count is
+// retiring too: they belong to the StatefulSet the operator is still holding at
+// its current size, so a retiring pod that cannot become ready blocks its own
+// removal, and the resource reports WorkloadsNotReady rather than the operator
+// acting on a half-known cluster.
+//
+// This is also where a scale-down finishes. Once the plan comes back empty —
+// meaning the retiring instances have been unregistered and the retiring
+// coordinators have left the Raft cluster — the shrinking role's StatefulSet is
+// applied at the declared count, shedding their pods. That is the one place the
+// operator ever lowers a replica count, so the coordinators never see a registered
+// instance's pod disappear, and no removed member's pod outlives its vote.
+func (r *MemgraphClusterReconciler) reconcileRegistration(
+	ctx context.Context,
+	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	replicas replicaCounts,
+	exposure externalAccess,
+	applied appliedGenerations,
+) (ctrl.Result, error) {
+	log := logf.FromContext(ctx)
+
+	// Both roles' pods are read once per pass: the readiness gate needs to know
+	// whether a restart is under way to tolerate the pod it took down, and the
+	// restart itself needs the same view further down.
+	roles, err := r.observeRollout(ctx, cluster, replicas, applied)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	ready, err := r.workloadsReady(ctx, cluster, replicas, roles)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if !ready {
+		log.Info("Waited for workload pods to become ready before registration")
+		msg := "Waiting for all workload pods to become ready"
+		if statusErr := r.writeStatus(ctx, cluster, lastObserved(cluster).exposedAt(exposure),
+			notReadyCondition(memgraphcomv1alpha1.ReasonWorkloadsNotReady, msg),
+			notConvergedCondition(memgraphcomv1alpha1.ReasonWorkloadsNotReady, msg),
+		); statusErr != nil {
+			return ctrl.Result{}, statusErr
+		}
+		return ctrl.Result{RequeueAfter: requeueWhilePending}, nil
+	}
+
+	topology := resources.DeclaredTopology(cluster, exposure.addresses)
+	// The members a lowered count is shedding are the ordinals the operator's own
+	// previous apply still runs beyond the declared count, so the range is bounded
+	// by what the operator itself created.
+	topology.RetiringCoordinators = resources.RetiringCoordinators(cluster, replicas.coordinators.applied)
+	topology.RetiringDataInstances = resources.RetiringDataInstances(cluster, replicas.data.applied)
+	// Whether a retirement is in flight is decided once per pass, from the
+	// topology alone: it is what both the condition and the shrink below key off.
+	retiring := retirementMessage(topology)
+
+	// The operator speaks to the coordinators over their pod addresses, never
+	// the announced ones: those may be an external LoadBalancer.
+	leader, observed, err := r.observeCluster(ctx,
+		resources.CoordinatorEndpoints(cluster, replicas.coordinators.applied))
+	if err != nil {
+		log.Info("Deferred registration because no coordinator leader was usable", "reason", err.Error())
+		reason, msg := memgraphcomv1alpha1.ReasonCoordinatorUnreachable, "No coordinator answered SHOW INSTANCES"
+		if errors.Is(err, errNoCoordinatorLeader) {
+			// The coordinators are up but have no leader between them, so their
+			// views are stale and no registration command would be accepted.
+			reason, msg = memgraphcomv1alpha1.ReasonNoCoordinatorLeader,
+				"No coordinator reported a leader, so the cluster has no Raft quorum"
+		}
+		if statusErr := r.writeStatus(ctx, cluster, lastObserved(cluster).exposedAt(exposure),
+			notReadyCondition(reason, msg),
+			notConvergedCondition(reason, msg),
+		); statusErr != nil {
+			return ctrl.Result{}, statusErr
+		}
+		return ctrl.Result{RequeueAfter: requeueWhilePending}, nil
+	}
+	defer func() {
+		if err := leader.Close(ctx); err != nil {
+			log.Error(err, "Failed to close coordinator connection")
+		}
+	}()
+
+	// How far behind the MAIN each data instance is, which is what decides whether
+	// a retiring MAIN can hand over. The read is not allowed to fail the pass: it
+	// is consulted for that one decision, every other one has to keep working
+	// without it, and an empty view already means "no survivor is known to be
+	// caught up" — the same conclusion, reached by the planner.
+	lag, err := leader.ShowReplicationLag(ctx)
+	if err != nil {
+		log.Info("Could not read replication lag, so no MAIN handover will be planned", "reason", err.Error())
+		lag = nil
+	}
+
+	latest := observe(topology, observed).exposedAt(exposure)
+	commands := planner.Plan(topology, observed, lag)
+	if len(commands) == 0 {
+		if retiring != "" {
+			// An empty plan is not on its own proof that the retirement finished: a
+			// handover waiting for a caught-up survivor plans nothing either, because
+			// no command would make a lagging replica ready. Shedding pods on that
+			// would delete a registered MAIN, so the membership is what gates it.
+			if !planner.Retired(topology, observed) {
+				log.Info("Deferred retirement because no surviving data instance is caught up with MAIN")
+				msg := "Waiting for a surviving data instance that is reachable and caught up with MAIN " +
+					"before moving MAIN off the instance being retired"
+				if statusErr := r.writeStatus(ctx, cluster, latest, readyOrNot(latest.main),
+					notConvergedCondition(memgraphcomv1alpha1.ReasonNoCaughtUpSurvivor, msg),
+				); statusErr != nil {
+					return ctrl.Result{}, statusErr
+				}
+				return ctrl.Result{RequeueAfter: requeueWhilePending}, nil
+			}
+			if err := r.shedRetiredPods(ctx, cluster, topology, replicas); err != nil {
+				return ctrl.Result{}, err
+			}
+			if statusErr := r.writeStatus(ctx, cluster, latest, readyOrNot(latest.main),
+				notConvergedCondition(memgraphcomv1alpha1.ReasonRetirementInProgress, retiring),
+			); statusErr != nil {
+				return ctrl.Result{}, statusErr
+			}
+			// The shrink was applied, not yet observed back: the next pass sees the
+			// lowered count, finds nothing retiring, and reports convergence.
+			return ctrl.Result{RequeueAfter: requeueAfterRegistration}, nil
+		}
+
+		// Registration is converged, so this is where a changed pod template gets
+		// rolled through the cluster. It is deliberately the only place: a
+		// retirement is still moving MAIN around and a pending registration means
+		// the cluster is not the one the spec describes, so neither is a moment to
+		// start deleting pods.
+		converged := trueCondition(memgraphcomv1alpha1.ConditionConverged,
+			memgraphcomv1alpha1.ReasonAllInstancesRegistered,
+			fmt.Sprintf("All %d declared instances are registered", len(topology.Coordinators)+len(topology.DataInstances)))
+		switch unservable := joinNonEmpty(exposure.failure, r.serviceMonitorFailure(cluster)); {
+		case unservable != "":
+			// The exposure or the ServiceMonitor the spec asks for cannot be
+			// served on this cluster, and waiting will not change that: reported
+			// the way a rejected apply is, while the cluster keeps serving —
+			// in-cluster at pod addresses, unscraped by the operator's object.
+			log.Info("Could not serve what the spec asks for", "reason", unservable)
+			converged = notConvergedCondition(memgraphcomv1alpha1.ReasonApplyFailed, unservable)
+		case len(exposure.pending) > 0:
+			// Every member is registered, but not yet at the address the spec
+			// asks for: the members behind these objects are announced at their
+			// pod addresses until the LoadBalancers or the Gateway get theirs. That
+			// is cloud provisioning the operator can only wait on, and it does not
+			// hold up the restart below — the pods are none of its business.
+			log.Info("Waited for external addresses", "objects", exposure.pending)
+			converged = notConvergedCondition(memgraphcomv1alpha1.ReasonExternalAddressPending,
+				"Waiting for an external address on "+strings.Join(exposure.pending, ", "))
+		}
+
+		switch decision := rollout.Next(roles.data, roles.coordinators, observed, lag); decision.Action {
+		case rollout.Delete:
+			// Reported before the pod goes, for the reason a rejected apply is: the
+			// next pass has to explain an absence it caused, and a restart nobody
+			// announced looks like the cluster losing a pod on its own.
+			if statusErr := r.writeStatus(ctx, cluster, latest, readyOrNot(latest.main), converged,
+				notUpdatedCondition(decision.Reason, decision.Message)); statusErr != nil {
+				return ctrl.Result{}, statusErr
+			}
+			if err := r.restartPod(ctx, cluster, decision); err != nil {
+				return ctrl.Result{}, err
+			}
+			log.Info("Deleted a workload pod to restart it onto the current pod template",
+				"pod", decision.Pod.Name, "reason", decision.Message)
+			return ctrl.Result{RequeueAfter: requeueWhilePending}, nil
+
+		case rollout.Wait:
+			log.Info("Deferred the next pod restart", "reason", decision.Message)
+			if statusErr := r.writeStatus(ctx, cluster, latest, readyOrNot(latest.main), converged,
+				notUpdatedCondition(decision.Reason, decision.Message)); statusErr != nil {
+				return ctrl.Result{}, statusErr
+			}
+			return ctrl.Result{RequeueAfter: requeueWhilePending}, nil
+		}
+
+		// Converged, but keep re-observing: a registration a pod loses later
+		// produces no watch event, so drift is only caught by resyncing.
+		log.Info("Confirmed cluster registration is converged")
+		updated := trueCondition(memgraphcomv1alpha1.ConditionUpdated,
+			memgraphcomv1alpha1.ReasonAllPodsUpdated,
+			"All workload pods run the pod template the spec describes")
+		if statusErr := r.writeStatus(ctx, cluster, latest,
+			readyOrNot(latest.main), converged, updated); statusErr != nil {
+			return ctrl.Result{}, statusErr
+		}
+		return ctrl.Result{RequeueAfter: resyncInterval}, nil
+	}
+
+	// Report the in-progress state before mutating the cluster: a MAIN already
+	// serving stays Ready while a lost registration is restored; a fresh
+	// bootstrap has no MAIN yet, so Ready is False until one is elected. A
+	// retirement in flight is named as such — it is the more specific operation,
+	// and the one whose pending members a user wants to see. A pending leadership
+	// yield is more specific still: it is the one step whose outcome nobody can
+	// predict, so a scale-down circling it says so rather than looking stuck on
+	// the removal it cannot reach yet.
+	reason := memgraphcomv1alpha1.ReasonRegistrationInProgress
+	message := fmt.Sprintf("Issuing %d registration command(s) to converge the cluster", len(commands))
+	if retiring != "" {
+		reason, message = memgraphcomv1alpha1.ReasonRetirementInProgress, retiring
+	}
+	if yielded := yieldedLeader(commands); yielded != "" {
+		reason = memgraphcomv1alpha1.ReasonLeadershipTransferInProgress
+		message = fmt.Sprintf(
+			"Retiring coordinator %s holds Raft leadership, which cannot be removed: yielding it to another member",
+			yielded)
+	}
+	inProgress := notConvergedCondition(reason, message)
+	if statusErr := r.writeStatus(ctx, cluster, latest, readyOrNot(latest.main), inProgress); statusErr != nil {
+		return ctrl.Result{}, statusErr
+	}
+
+	// A command the leader rejects is reported on the resource before the error is
+	// returned, for the reason a rejected apply is: the command is retried forever,
+	// so without it the conditions keep saying registration is in progress while
+	// the rejection only ever reaches the operator's log. Ready is left describing
+	// what the cluster was last observed doing — a MAIN that is serving keeps
+	// serving through a registration the coordinator refuses.
+	for _, command := range commands {
+		if err := command.Run(ctx, leader); err != nil {
+			commandErr := fmt.Errorf("executing registration command %q: %w", command, err)
+			msg := truncateMessage(commandErr.Error())
+			if statusErr := r.writeStatus(ctx, cluster, latest, readyOrNot(latest.main),
+				notConvergedCondition(memgraphcomv1alpha1.ReasonRegistrationFailed, msg),
+			); statusErr != nil {
+				return ctrl.Result{}, errors.Join(commandErr, statusErr)
+			}
+			return ctrl.Result{}, commandErr
+		}
+		log.Info("Executed registration command", "command", command.String())
+	}
+
+	// Registration was issued, not yet observed back; verify convergence on a
+	// follow-up reconcile instead of assuming success.
+	return ctrl.Result{RequeueAfter: requeueAfterRegistration}, nil
+}
+
+// shedRetiredPods applies the shrinking roles' StatefulSets at their declared
+// replica counts — the one place the operator ever lowers a replica count. It is
+// reached only after the plan came back empty, so every pod it sheds belongs to a
+// member that has already left the Memgraph cluster: an unregistered data
+// instance, or a coordinator whose Raft vote is gone.
+func (r *MemgraphClusterReconciler) shedRetiredPods(
+	ctx context.Context,
+	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	topology planner.Topology,
+	replicas replicaCounts,
+) error {
+	log := logf.FromContext(ctx)
+	for _, role := range []struct {
+		retiring int
+		replicas roleReplicas
+		build    func(*memgraphcomv1alpha1.MemgraphCluster, int32) *appsv1.StatefulSet
+	}{
+		{len(topology.RetiringCoordinators), replicas.coordinators, resources.CoordinatorStatefulSet},
+		{len(topology.RetiringDataInstances), replicas.data, resources.DataStatefulSet},
+	} {
+		if role.retiring == 0 {
+			continue
+		}
+		if _, err := r.applyDesired(ctx, cluster, role.build(cluster, role.replicas.declared)); err != nil {
+			return err
+		}
+		log.Info("Shrank a StatefulSet to the declared replica count",
+			"statefulset", role.replicas.name, "replicas", role.replicas.declared)
+	}
+	return nil
+}
+
+// observation is everything a reconcile pass observed about the cluster that
+// reaches the resource's status: which data instance is MAIN, how many of each
+// role's declared members are registered, and the external addresses the
+// cluster is announced at. It is observation only — no reconcile decision reads
+// it back off the status.
+type observation struct {
+	main                    string
+	registeredCoordinators  int32
+	registeredDataInstances int32
+	externalAccess          *memgraphcomv1alpha1.ExternalAccessStatus
+}
+
+// observe reads the coordinator leader's cluster view into the status fields.
+func observe(topology planner.Topology, observed []memgraph.Instance) observation {
+	coordinators, dataInstances := planner.Registered(topology, observed)
+	return observation{
+		main:                    observedMain(observed),
+		registeredCoordinators:  coordinators,
+		registeredDataInstances: dataInstances,
+	}
+}
+
+// exposedAt adds the pass's view of the external addresses. It is read off
+// Kubernetes rather than the cluster, so every pass has it — including the ones
+// that could not reach a coordinator and republish the rest of the observation.
+func (o observation) exposedAt(exposure externalAccess) observation {
+	o.externalAccess = exposure.status
+	return o
+}
+
+// lastObserved is the observation already published on the resource. The paths
+// that could not observe the cluster this pass republish it: an unready pod or
+// an unreachable coordinator says nothing about what the last reachable leader
+// reported.
+func lastObserved(cluster *memgraphcomv1alpha1.MemgraphCluster) observation {
+	return observation{
+		main:                    cluster.Status.Main,
+		registeredCoordinators:  cluster.Status.Coordinators,
+		registeredDataInstances: cluster.Status.DataInstances,
+		externalAccess:          cluster.Status.ExternalAccess,
+	}
+}
+
+// observedMain returns the name of the data instance reported as MAIN *and*
+// reachable, or the empty string when the cluster has none it can serve writes
+// from.
+//
+// Reachability is part of the question, not a refinement of it. A MAIN whose pod
+// is gone keeps its role in the coordinators' Raft state and keeps being reported
+// as MAIN, so a check on the role alone would claim the cluster serves writes for
+// the whole failover window — including every window the rolling restart opens on
+// purpose by deleting the MAIN's pod.
+func observedMain(observed []memgraph.Instance) string {
+	for _, instance := range observed {
+		if instance.IsMain() && instance.IsUp() {
+			return instance.Name
+		}
+	}
+	return ""
+}
+
+// readyOrNot builds the Ready condition from whether a MAIN is elected: the
+// cluster serves writes exactly when a data instance is MAIN.
+func readyOrNot(main string) metav1.Condition {
+	if main == "" {
+		return notReadyCondition(memgraphcomv1alpha1.ReasonNoMainElected,
+			"No data instance has been promoted to MAIN yet")
+	}
+	return trueCondition(memgraphcomv1alpha1.ConditionReady,
+		memgraphcomv1alpha1.ReasonMainElected, "Data instance "+main+" is MAIN")
+}
+
+// maxConditionMessage bounds a condition message well under the API's own
+// 32Ki limit: an apply rejection can carry a long field list, and the useful
+// part — what the API server refused — comes first.
+const maxConditionMessage = 1024
+
+func truncateMessage(message string) string {
+	if len(message) <= maxConditionMessage {
+		return message
+	}
+	return message[:maxConditionMessage-3] + "..."
+}
+
+func trueCondition(condType, reason, message string) metav1.Condition {
+	return metav1.Condition{Type: condType, Status: metav1.ConditionTrue, Reason: reason, Message: message}
+}
+
+func notReadyCondition(reason, message string) metav1.Condition {
+	return metav1.Condition{
+		Type: memgraphcomv1alpha1.ConditionReady, Status: metav1.ConditionFalse, Reason: reason, Message: message,
+	}
+}
+
+func notConvergedCondition(reason, message string) metav1.Condition {
+	return metav1.Condition{
+		Type: memgraphcomv1alpha1.ConditionConverged, Status: metav1.ConditionFalse, Reason: reason, Message: message,
+	}
+}
+
+func notUpdatedCondition(reason, message string) metav1.Condition {
+	return metav1.Condition{
+		Type: memgraphcomv1alpha1.ConditionUpdated, Status: metav1.ConditionFalse, Reason: reason, Message: message,
+	}
+}
+
+// writeStatus patches the status subresource with the pass's observation and the
+// given conditions. It uses the status subresource exclusively — spec is never
+// touched — and skips the patch when nothing changed, so a converged cluster
+// re-observed on every resync does not churn the resource version.
+func (r *MemgraphClusterReconciler) writeStatus(
+	ctx context.Context,
+	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	observed observation,
+	conditions ...metav1.Condition,
+) error {
+	base := cluster.DeepCopy()
+	cluster.Status.Main = observed.main
+	cluster.Status.Coordinators = observed.registeredCoordinators
+	cluster.Status.DataInstances = observed.registeredDataInstances
+	cluster.Status.ExternalAccess = observed.externalAccess
+	for _, condition := range conditions {
+		condition.ObservedGeneration = cluster.Generation
+		apimeta.SetStatusCondition(&cluster.Status.Conditions, condition)
+	}
+	if equality.Semantic.DeepEqual(base.Status, cluster.Status) {
+		return nil
+	}
+	if err := r.Status().Patch(ctx, cluster, client.MergeFrom(base)); err != nil {
+		return fmt.Errorf("patching MemgraphCluster status: %w", err)
+	}
+	return nil
+}
+
+// workloadsReady reports whether both role StatefulSets have all their pods
+// ready. Registration waits for the full topology: coordinators cannot form a
+// Raft cluster and data instances cannot be registered until every advertised
+// address resolves to a running pod.
+//
+// The count each role must reach is the one this pass applied, never the
+// spec.replicas read back off the StatefulSet. Reads go through the informer
+// cache, which lags the apply, so the object read back a few lines after a
+// scale-up is still the pre-apply snapshot — and in that snapshot the old
+// spec.replicas and the old status.readyReplicas agree, because the cluster
+// genuinely was converged at the old size. Comparing those two stale numbers
+// against each other reports a grown topology as ready and lets registration run
+// against a pod Kubernetes has not been asked to create yet. Comparing a stale
+// readyReplicas against the count this pass intends cannot fail that way: a lagging
+// status only ever reads as not-yet-ready.
+//
+// A StatefulSet the apply just created is not ready, not an error: the same lag
+// makes an absent StatefulSet the same waiting state as one whose pods have not
+// come up yet.
+//
+// One absence is tolerated: the pod a rolling restart itself took down. Without
+// that, the first pod the restart deletes would make this gate false, the pass
+// would return before ever connecting to a coordinator, and the restart could
+// never learn whether that pod came back — a roll that deletes one pod and then
+// waits forever. The exception is deliberately narrow, and both halves of the
+// condition matter. It applies only to a role that has outdated pods, so a
+// healthy cluster is still held to every pod being ready; and only when all of
+// the role's pods exist, because a role short of its replicas is exactly the
+// stale-informer case above — during a 3-to-4 scale-up a readyReplicas of 3
+// against an applied 4 would otherwise read as "one pod down, mid-roll,
+// tolerated" and let registration run against a pod that does not exist yet.
+func (r *MemgraphClusterReconciler) workloadsReady(
+	ctx context.Context,
+	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	replicas replicaCounts,
+	roles rolloutRoles,
+) (bool, error) {
+	for _, role := range []struct {
+		replicas roleReplicas
+		rollout  rollout.Role
+	}{
+		{replicas.coordinators, roles.coordinators},
+		{replicas.data, roles.data},
+	} {
+		var sts appsv1.StatefulSet
+		name := role.replicas.name
+		if err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: cluster.Namespace}, &sts); err != nil {
+			if apierrors.IsNotFound(err) {
+				return false, nil
+			}
+			return false, fmt.Errorf("getting StatefulSet %s: %w", name, err)
+		}
+		required := role.replicas.applied
+		if rollout.InProgress(role.rollout) && sts.Status.Replicas == required {
+			required--
+		}
+		if sts.Status.ReadyReplicas < required {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+// errNoCoordinatorLeader reports that coordinators answered SHOW INSTANCES but
+// none of them named a leader. It is distinguished from unreachable
+// coordinators because the two need different remedies, and it is reported as
+// such on the resource.
+var errNoCoordinatorLeader = errors.New("no coordinator reported a leader")
+
+// observeCluster connects to the coordinator leader and returns its client
+// together with the SHOW INSTANCES view the planner diffs against.
+// Coordinators are tried in ordinal order over their pod addresses: one
+// reporting itself leader is used directly, and one reporting another
+// coordinator as leader hands over the name to connect to. The view is read
+// once either way — a follower forwards SHOW INSTANCES to the leader, so what it
+// answers with is already the leader's view, and only the planner's mutating
+// commands need the leader connection itself.
+//
+// A coordinator that names no leader is skipped, never used as planning input.
+// Its view is not the fresh-cluster case: a coordinator starts with itself as
+// the only member of its Raft configuration and as the leader of that
+// one-member cluster, so a fresh coordinator always names itself. An absent
+// leader means the coordinator lost track of one — quorum gone, or it stepped
+// down or was removed from the Raft cluster — and it then answers from its own
+// state machine, which can be arbitrarily stale. Every mutating query the
+// planner could issue needs a leader anyway, so such a view describes a cluster
+// state that is neither current nor writable.
+func (r *MemgraphClusterReconciler) observeCluster(
+	ctx context.Context,
+	endpoints []resources.CoordinatorEndpoint,
+) (memgraph.Client, []memgraph.Instance, error) {
+	var errs []error
+	leaderless := false
+	for _, coordinator := range endpoints {
+		conn, observed, err := r.showInstances(ctx, coordinator.Address)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+
+		leaderName := ""
+		for _, instance := range observed {
+			if instance.IsLeader() {
+				leaderName = instance.Name
+				break
+			}
+		}
+		if leaderName == coordinator.Name {
+			return conn, observed, nil
+		}
+		if err := conn.Close(ctx); err != nil {
+			errs = append(errs, err)
+		}
+		if leaderName == "" {
+			leaderless = true
+			errs = append(errs, fmt.Errorf("%s reported no leader", coordinator.Name))
+			continue
+		}
+
+		// This coordinator is a follower, so it answered with the leader's
+		// forwarded view: keep that view and open the connection the mutating
+		// commands need on the leader itself.
+		address, found := leaderAddress(endpoints, observed, leaderName)
+		if !found {
+			errs = append(errs, fmt.Errorf("%s reported leader %s without a Bolt address",
+				coordinator.Name, leaderName))
+			continue
+		}
+		leader, err := r.Memgraph.Connect(ctx, address)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		return leader, observed, nil
+	}
+	if leaderless {
+		return nil, nil, fmt.Errorf("%w: %w", errNoCoordinatorLeader, errors.Join(errs...))
+	}
+	return nil, nil, fmt.Errorf("no coordinator answered SHOW INSTANCES: %w", errors.Join(errs...))
+}
+
+// leaderAddress resolves the Bolt address the operator reaches the coordinator
+// reported as leader at. The pod endpoints are preferred — they cover every
+// coordinator the operator runs, declared or retiring — but the reported view is
+// a valid fallback for a leader the operator did not create, such as a
+// coordinator a human added. That address is the announced one, which on an
+// exposed cluster may be the coordinators' shared LoadBalancer; the connection
+// then lands on whichever coordinator it picks and, if that is not the leader,
+// the mutating commands are forwarded to the leader by the coordinator anyway.
+func leaderAddress(endpoints []resources.CoordinatorEndpoint, observed []memgraph.Instance, name string) (string, bool) {
+	for _, coordinator := range endpoints {
+		if coordinator.Name == name {
+			return coordinator.Address, true
+		}
+	}
+	for _, instance := range observed {
+		if instance.Name == name && instance.BoltServer != "" {
+			return instance.BoltServer, true
+		}
+	}
+	return "", false
+}
+
+// showInstances connects to one coordinator's Bolt address and fetches its
+// cluster view, closing the connection again on query failure.
+func (r *MemgraphClusterReconciler) showInstances(
+	ctx context.Context,
+	address string,
+) (memgraph.Client, []memgraph.Instance, error) {
+	c, err := r.Memgraph.Connect(ctx, address)
+	if err != nil {
+		return nil, nil, err
+	}
+	observed, err := c.ShowInstances(ctx)
+	if err != nil {
+		if closeErr := c.Close(ctx); closeErr != nil {
+			return nil, nil, errors.Join(err, closeErr)
+		}
+		return nil, nil, err
+	}
+	return c, observed, nil
+}
+
+// apply server-side-applies a desired object built by the resource builders.
+// Builders set only the fields the operator owns, so the converted apply
+// configuration claims exactly those fields for this controller. It returns the
+// generation the API server assigned the object: the response is decoded back
+// into the applied configuration, so no second read is needed for it.
+func (r *MemgraphClusterReconciler) apply(ctx context.Context, obj client.Object) (int64, error) {
+	content, err := runtime.DefaultUnstructuredConverter.ToUnstructured(obj)
+	if err != nil {
+		return 0, fmt.Errorf("converting to unstructured: %w", err)
+	}
+	u := &unstructured.Unstructured{Object: content}
+	// Zero-valued struct fields survive the conversion; drop them so the
+	// applied configuration only claims fields the builders actually set.
+	unstructured.RemoveNestedField(u.Object, "status")
+	unstructured.RemoveNestedField(u.Object, "metadata", "creationTimestamp")
+	unstructured.RemoveNestedField(u.Object, "spec", "template", "metadata", "creationTimestamp")
+
+	if err := r.Apply(ctx, client.ApplyConfigurationFromUnstructured(u),
+		client.FieldOwner(fieldOwner), client.ForceOwnership); err != nil {
+		return 0, err
+	}
+	return u.GetGeneration(), nil
+}
+
+// SetupWithManager sets up the controller with the Manager. The Gateway API
+// kinds are watched only where the cluster serves them: an informer on a kind
+// the API server does not know never syncs, and the manager would not start.
+func (r *MemgraphClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	builder := ctrl.NewControllerManagedBy(mgr).
+		For(&memgraphcomv1alpha1.MemgraphCluster{}).
+		Owns(&appsv1.StatefulSet{}).
+		Owns(&corev1.Service{}).
+		Owns(&corev1.ConfigMap{})
+	if r.GatewayAPI {
+		builder = builder.Owns(&gatewayv1.Gateway{}).Owns(&gatewayv1.TCPRoute{})
+	}
+	if r.ServiceMonitorAPI {
+		builder = builder.Owns(&monitoringv1.ServiceMonitor{})
+	}
+	return builder.Named("memgraphcluster").Complete(r)
+}
+
+// joinNonEmpty joins the messages that are not empty, one sentence after
+// another, so two things the cluster cannot serve are both reported.
+func joinNonEmpty(messages ...string) string {
+	var parts []string
+	for _, message := range messages {
+		if message != "" {
+			parts = append(parts, message)
+		}
+	}
+	return strings.Join(parts, ". ")
+}
+
+// The Gateway API release that first serves TCPRoute at v1, and the Envoy
+// Gateway release that first bundles it. Older Gateway API releases serve
+// TCPRoute at v1alpha2 only, and v1.6 stops serving v1alpha2 altogether, so
+// there is no version of the kind that works against both sides of that line;
+// the operator builds v1 and says so when the cluster is on the other side.
+const (
+	minGatewayAPIRelease   = "Gateway API v1.6"
+	minEnvoyGatewayRelease = "v1.9"
+)
+
+// GatewayAPIServed reports whether the cluster the mapper describes serves the
+// Gateway API kinds the operator builds, at the version it builds them. When it
+// does not, missing says what was found lacking: the kind not served at all, or
+// served only at some other version — the usual case being a Gateway API
+// release older than v1.6, where TCPRoute exists only as v1alpha2. It is asked
+// once, when the manager is set up: a cluster that gains the CRDs later is
+// picked up by restarting the operator, which is documented rather than
+// detected.
+func GatewayAPIServed(mapper apimeta.RESTMapper) (served bool, missing string, err error) {
+	return kindsServed(mapper, schema.GroupVersion(gatewayv1.GroupVersion), "Gateway", "TCPRoute")
+}
+
+// ServiceMonitorServed reports whether the cluster the mapper describes serves
+// Prometheus Operator's ServiceMonitor at the version the operator builds it.
+// Like GatewayAPIServed it is asked once, when the manager is set up, and a
+// cluster that gains the CRD later is picked up by restarting the operator.
+func ServiceMonitorServed(mapper apimeta.RESTMapper) (served bool, missing string, err error) {
+	return kindsServed(mapper, monitoringv1.SchemeGroupVersion, monitoringv1.ServiceMonitorsKind)
+}
+
+// kindsServed reports whether every one of the kinds is served at the given
+// version. When one is not, missing says what was found lacking: the kind not
+// served at all, or served only at some other version.
+func kindsServed(mapper apimeta.RESTMapper, groupVersion schema.GroupVersion, kinds ...string) (bool, string, error) {
+	for _, kind := range kinds {
+		groupKind := schema.GroupKind{Group: groupVersion.Group, Kind: kind}
+		_, err := mapper.RESTMapping(groupKind, groupVersion.Version)
+		if err == nil {
+			continue
+		}
+		if !apimeta.IsNoMatchError(err) {
+			return false, "", fmt.Errorf("discovering %s.%s: %w", kind, groupVersion.Group, err)
+		}
+		if mapping, anyVersion := mapper.RESTMapping(groupKind); anyVersion == nil {
+			return false, fmt.Sprintf("%s is served only as %s", kind, mapping.GroupVersionKind.GroupVersion()), nil
+		}
+		return false, kind + " is not served", nil
+	}
+	return true, "", nil
+}

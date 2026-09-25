@@ -1,0 +1,313 @@
+apiVersion: memgraph.com/v1alpha1
+kind: MemgraphCluster
+metadata:
+  labels:
+    app.kubernetes.io/name: kubernetes-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: memgraphcluster-sample
+spec:
+  # Raising either count on a live cluster grows it: the operator provisions the
+  # new pods and registers them with the cluster. The coordinator count must be
+  # odd so the Raft quorum cannot split, and at least three — a quorum of one
+  # cannot survive losing itself.
+  #
+  # Lowering either count shrinks the cluster: the members above the new count are
+  # retired before their pods are shed — a data instance has MAIN moved off it and
+  # is then UNREGISTER INSTANCEd, a coordinator is REMOVE COORDINATORed out of the
+  # Raft cluster — reported as Converged=False with reason RetirementInProgress.
+  # Two notes. The operator only touches the cluster while every pod is ready, so
+  # a retiring pod that cannot become ready blocks its own removal. And Raft
+  # refuses to remove its own leader, so a leader in the retiring range is asked
+  # to YIELD LEADERSHIP first, reported as LeadershipTransferInProgress while that
+  # is pending.
+  coordinators: 3
+  dataInstances: 2
+  # repository carries the registry host and image path only — the version
+  # belongs in tag, and admission rejects a digest or a tag smuggled into the
+  # repository.
+  image:
+    repository: docker.io/memgraph/memgraph
+    tag: 3.13.0-relwithdebinfo
+    pullPolicy: IfNotPresent
+  # References an existing Secret holding the enterprise license; the CR
+  # carries no secret material itself.
+  secrets:
+    name: memgraph-secrets
+    licenseKey: MEMGRAPH_ENTERPRISE_LICENSE
+    organizationKey: MEMGRAPH_ORGANIZATION_NAME
+  storage:
+    # Retain (the default) leaves the PersistentVolumeClaims behind when this
+    # resource is deleted — or when a role is scaled down — so the data survives
+    # an accidental delete. Switch to Delete on dev clusters that should clean up
+    # after themselves.
+    retentionPolicy: Retain
+    # Each pod of a role gets a lib claim (Memgraph's data directory) and a log
+    # claim. The storage class names have no default and are commented out on
+    # purpose: left unset, each claim uses the cluster's default StorageClass,
+    # while the empty string turns dynamic provisioning off and binds a
+    # pre-created PersistentVolume. Sizes, access modes and classes become
+    # StatefulSet volumeClaimTemplates, which Kubernetes treats as immutable,
+    # so admission refuses changing any of them on a live cluster: delete the
+    # MemgraphCluster (the claims are retained) and recreate it with the new
+    # values. Setting createLogStorageClaim to false drops the log claim for
+    # that role and passes an empty --log-file, leaving stderr (and so
+    # `kubectl logs`) as the only log sink; the other log* knobs are then
+    # ignored, and free to change. Flipping it is refused for the same
+    # reason: adding or removing a claim template is not an update Kubernetes
+    # allows.
+    coordinators:
+      libPVCSize: 1Gi
+      libStorageAccessMode: ReadWriteOnce
+      # libStorageClassName: standard
+      createLogStorageClaim: true
+      logPVCSize: 1Gi
+      logStorageAccessMode: ReadWriteOnce
+      # logStorageClassName: standard
+    data:
+      libPVCSize: 1Gi
+      libStorageAccessMode: ReadWriteOnce
+      # libStorageClassName: standard
+      createLogStorageClaim: true
+      logPVCSize: 1Gi
+      logStorageAccessMode: ReadWriteOnce
+      # logStorageClassName: standard
+  # Core dumps are off by default. Enabling them for a role provisions a third
+  # claim per pod, mounts it at /var/core/memgraph — a fixed path, since only
+  # the kernel writes it and only the uploader reads it, and the operator points
+  # both at it — and, unless configureCorePattern is false, runs a privileged
+  # init container that sets the node's core pattern. Two things that catch
+  # people: core_pattern is a property of the node, so it applies to everything
+  # that crashes there, and the privileged init container is rejected in a
+  # namespace running PodSecurity "restricted". Set configureCorePattern: false
+  # there and have the platform point core_pattern at that directory itself.
+  # Whether a role collects dumps is decided when the cluster is created: the
+  # claim is a StatefulSet volumeClaimTemplate, which Kubernetes forbids adding
+  # or removing in place, so flipping enabled on a live cluster is rejected. To
+  # change it, delete the MemgraphCluster (the default retention policy keeps
+  # every claim) and recreate it with the new setting.
+  coreDumps:
+    # Per role, because only these two answers differ between them: whether the
+    # role collects dumps at all, and how much room one needs — a dump is about
+    # as large as the crashing process' memory, and a data instance holds the
+    # graph while a coordinator holds Raft state.
+    coordinators:
+      enabled: true
+      size: 10Gi
+    data:
+      enabled: true
+      size: 10Gi
+    # The rest is one decision for the cluster, so it is stated once.
+    # storageClassName: standard
+    configureCorePattern: true
+    # An optional sidecar that ships the dumps somewhere durable, joining the
+    # pods of every role that collects them. The operator mounts the dumps into
+    # it read-only, passes the directory as CORE_DUMPS_DIR, mounts a writable
+    # /tmp, and runs it with the same locked-down security context as Memgraph
+    # (non-root uid 101, read-only root filesystem, no capabilities) — so pick an
+    # image that tolerates that. Credentials come from envFromSecrets, never from
+    # this resource. This is the operator's equivalent of the HA chart's
+    # coreDumpUploader, with the destination left entirely to you:
+    #
+    # uploader:
+    #   image: amazon/aws-cli:2.33.28
+    #   envFromSecrets:
+    #     - aws-s3-credentials      # AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY
+    #   env:
+    #     - name: HOME              # aws-cli needs a writable HOME
+    #       value: /tmp
+    #     - name: S3_TARGET
+    #       value: s3://memgraph-ha-cluster/core-dumps
+    #     - name: AWS_REGION
+    #       value: eu-west-1
+    #   command: [/bin/sh, -c]
+    #   args:
+    #     - |
+    #       while true; do
+    #         aws s3 sync "$CORE_DUMPS_DIR" "$S3_TARGET/$HOSTNAME" --region "$AWS_REGION"
+    #         sleep 30
+    #       done
+    #   resources:
+    #     requests:
+    #       memory: 64Mi
+  # The cluster domain is part of every advertised address the operator
+  # registers with the cluster. The internal ports are fixed: Bolt 7687,
+  # management 10000, replication 20000, and coordinator 12000.
+  clusterDomain: cluster.local
+  # The one probe a pod carries is readiness: a TCP-socket check against the
+  # role's own port (the coordinator port for coordinators, the Bolt port for
+  # data instances); only the timings are configurable, one block for both
+  # roles, and timings left out keep their defaults. Until it first succeeds
+  # the pod is unready and nothing more, so there is no budget to size: a data
+  # instance loading a large snapshot simply shows 0/1 until it is done.
+  #
+  # There is deliberately no liveness and no startup probe. Memgraph opens no
+  # port until every database is recovered, so during recovery nothing tells a
+  # slow recovery from a hung one, and a liveness check could only kill the
+  # former once a guessed budget ran out — a recovery longer than the guess
+  # would then never finish, because every kill starts it over. A Bolt listener
+  # that goes away after startup means the process is gone, which ends the
+  # container without any probe. Restarts of a running instance belong to the
+  # operator's rolling restart, which knows the cluster's state.
+  readinessProbe:
+    failureThreshold: 20
+    timeoutSeconds: 10
+    periodSeconds: 5
+  # Requests and limits of the Memgraph container, per role, unset by default so
+  # the pods schedule anywhere. When setting Memgraph's own --memory-limit
+  # below, keep it under the pod's memory limit: Memgraph must hit its own limit
+  # and fail the query before the kubelet evicts the pod. (The block is the core
+  # ResourceRequirements type, so it also accepts claims — leave that one alone,
+  # it needs pod-level resourceClaims the operator does not set.)
+  resources:
+    coordinators: {}
+      # requests:
+      #   cpu: 100m
+      #   memory: 256Mi
+      # limits:
+      #   memory: 1Gi
+    data: {}
+      # requests:
+      #   cpu: 500m
+      #   memory: 2Gi
+      # limits:
+      #   memory: 4Gi
+  # Custom labels per object. The operator's own app.kubernetes.io identity
+  # labels always win a collision: they are what the StatefulSets and Services
+  # select on.
+  labels:
+    coordinators:
+      podLabels: {}
+        # team: platform
+      statefulSetLabels: {}
+      serviceLabels: {}
+    data:
+      podLabels: {}
+      statefulSetLabels: {}
+      serviceLabels: {}
+  # Literal, non-secret environment variables only: there is no valueFrom, so
+  # the CR stays safe to commit. The license and the organization name come from
+  # the secrets block above, and admission rejects an entry that tries to shadow
+  # either of them or POD_NAME, which carries the pod's own identity.
+  extraEnv:
+    coordinators: []
+      # - name: MEMGRAPH_LOG_LEVEL
+      #   value: TRACE
+    data: []
+  # Any Memgraph flag, without waiting for a typed field. These are appended
+  # after the flags the operator derives, and Memgraph takes the last
+  # occurrence of a repeated flag — except for the ports and the coordinator
+  # identity, which admission rejects here because they must stay consistent
+  # with the registered addresses.
+  extraArgs:
+    coordinators: []
+    data:
+      - --storage-snapshot-on-exit=false
+  # Any pod volume the operator does not provision itself, plus where to mount
+  # it in the Memgraph container. Entries are plain core/v1 volumes and volume
+  # mounts, appended after the operator's own — the usual reason to reach for
+  # them is a Secret holding certificates or a ConfigMap of extra
+  # configuration.
+  #
+  # extraVolumes entries are stored without schema validation: a core/v1 volume
+  # carries every volume source Kubernetes has, and inlining that schema per
+  # role would grow the CRD past what a client-side `kubectl apply` can carry.
+  # So any volume source works, exactly as in the Helm chart, but a typo in one
+  # is only caught when the operator applies the StatefulSet — where it shows up
+  # as the ApplyFailed condition on this resource. The mounts, being small, are
+  # fully validated: admission rejects a path the operator already mounts.
+  extraVolumes:
+    coordinators: []
+    data: []
+      # - name: bolt-certs
+      #   secret:
+      #     secretName: bolt-tls
+      #     defaultMode: 0400
+  extraVolumeMounts:
+    coordinators: []
+    data: []
+      # - name: bolt-certs
+      #   mountPath: /etc/memgraph/ssl
+      #   readOnly: true
+  # Reach the cluster from outside Kubernetes. Clients outside need two things:
+  # a way in, and a routing table whose addresses they can reach — the
+  # coordinators hand every client the bolt address each instance was registered
+  # with. The operator owns both: with type LoadBalancer it creates one Service
+  # of type LoadBalancer shared by all coordinators and one per data instance,
+  # and registers every instance at the address its LoadBalancer acquires — the
+  # external-dns hostname annotation when one is set, otherwise the hostname or
+  # IP the cloud reports — moving it with UPDATE CONFIG as that address appears
+  # or changes. Until an address exists the instance is announced at its pod
+  # address and Converged reports ExternalAddressPending. Removing the block
+  # deletes the Services and reverts every registered address to the pod's.
+  #
+  # Every data instance has its own LoadBalancer, so a data hostname must carry
+  # {ordinal}, which becomes the pod ordinal on each Service; the coordinators
+  # share one LoadBalancer and one hostname. status.externalAccess reports what
+  # the cluster is announced at. Commented out because a LoadBalancer costs
+  # money on every cloud.
+  # externalAccess:
+  #   type: LoadBalancer
+  #   coordinators:
+  #     labels: {}
+  #     annotations:
+  #       external-dns.alpha.kubernetes.io/hostname: memgraph.example.com
+  #   data:
+  #     labels: {}
+  #     annotations:
+  #       external-dns.alpha.kubernetes.io/hostname: data-{ordinal}.memgraph.example.com
+  #
+  # With type Gateway the operator creates one Gateway API Gateway instead: a
+  # TCP listener shared by all coordinators on the bolt port and one per data
+  # instance on gateway.dataPortBase + ordinal, each fed by a TCPRoute to a
+  # ClusterIP Service. One address, one cloud load balancer, a port per
+  # instance. The Gateway API CRDs and a Gateway controller (Envoy Gateway,
+  # Cilium, Istio, ...) must already be installed, at Gateway API v1.6 or
+  # newer: the operator builds gateway.networking.k8s.io/v1 TCPRoutes, which
+  # older releases serve only as v1alpha2 (Envoy Gateway v1.9 is the first to
+  # bundle v1.6). The operator never bundles the CRDs, discovers them when it
+  # starts, and reports Converged=False with reason ApplyFailed naming what is
+  # missing on a cluster without them. In this mode the role
+  # annotations land on the TCPRoutes, which is where external-dns reads a
+  # route's hostname from.
+  # externalAccess:
+  #   type: Gateway
+  #   gateway:
+  #     gatewayClassName: eg
+  #     dataPortBase: 9000
+  #     labels: {}
+  #     annotations: {}
+  #   coordinators:
+  #     annotations:
+  #       external-dns.alpha.kubernetes.io/hostname: memgraph.example.com
+  #   data:
+  #     annotations:
+  #       external-dns.alpha.kubernetes.io/hostname: data-{ordinal}.memgraph.example.com
+
+  # Monitoring. Every instance serves OpenMetrics on port 9091 whether or not
+  # this block exists — the port is declared on the pods and the headless
+  # Services and the format is pinned — so a Prometheus you already run scrapes
+  # the cluster with a ServiceMonitor, PodMonitor or scrape config of your own
+  # and nothing here. The block only adds the objects the operator creates for
+  # you. serviceMonitor creates one Prometheus Operator ServiceMonitor in the
+  # cluster's namespace, selecting both headless Services on the metrics port;
+  # labels are what your Prometheus selects ServiceMonitors by, and interval
+  # left out means Prometheus's global default. The ServiceMonitor CRD must be
+  # installed already; asking for one without it is reported as ApplyFailed.
+  # There is no namespace knob: point a Prometheus in another namespace at this
+  # one with its serviceMonitorNamespaceSelector. Removing the block deletes
+  # the ServiceMonitor again. grafanaDashboard provisions the "Memgraph
+  # OpenMetrics" Grafana dashboard as a ConfigMap for a Grafana sidecar to
+  # load. An empty block is enough: the operator labels the ConfigMap
+  # grafana_dashboard: "1", which is what the kube-prometheus-stack sidecar
+  # selects on. Set labels only for a sidecar configured with another label;
+  # a set you name replaces the default. The sidecar reads grafana_folder from
+  # the annotations to file the dashboard. Each block is optional on its own.
+  # monitoring:
+  #   serviceMonitor:
+  #     labels:
+  #       release: kube-prometheus-stack
+  #     annotations: {}
+  #     interval: 15s
+  #   grafanaDashboard:
+  #     labels: {}
+  #     annotations: {}
