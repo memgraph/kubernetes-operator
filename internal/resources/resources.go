@@ -120,6 +120,7 @@ type normalizedSpec struct {
 	organizationKey string
 	clusterDomain   string
 	retentionPolicy memgraphcomv1alpha1.StorageRetentionPolicy
+	readinessProbe  normalizedProbe
 	coordinatorRole normalizedRole
 	dataRole        normalizedRole
 	external        normalizedExternal
@@ -154,7 +155,6 @@ type normalizedExternalRole struct {
 type normalizedRole struct {
 	storage           normalizedStorage
 	coreDumps         normalizedCoreDumps
-	readinessProbe    normalizedProbe
 	resources         corev1.ResourceRequirements
 	podLabels         map[string]string
 	statefulSetLabels map[string]string
@@ -212,10 +212,10 @@ func normalize(spec memgraphcomv1alpha1.MemgraphClusterSpec) normalizedSpec {
 		organizationKey: spec.Secrets.OrganizationKey,
 		clusterDomain:   spec.ClusterDomain,
 		retentionPolicy: spec.Storage.RetentionPolicy,
+		readinessProbe:  normalizeProbe(spec.ReadinessProbe),
 		coordinatorRole: normalizeRole(roleSpec{
 			storage:      spec.Storage.Coordinators,
 			coreDumps:    normalizeCoreDumps(spec.CoreDumps, spec.CoreDumps.Coordinators),
-			probes:       spec.Probes.Coordinators,
 			resources:    spec.Resources.Coordinators,
 			labels:       spec.Labels.Coordinators,
 			env:          spec.ExtraEnv.Coordinators,
@@ -226,7 +226,6 @@ func normalize(spec memgraphcomv1alpha1.MemgraphClusterSpec) normalizedSpec {
 		dataRole: normalizeRole(roleSpec{
 			storage:      spec.Storage.Data,
 			coreDumps:    normalizeCoreDumps(spec.CoreDumps, spec.CoreDumps.Data),
-			probes:       spec.Probes.Data,
 			resources:    spec.Resources.Data,
 			labels:       spec.Labels.Data,
 			env:          spec.ExtraEnv.Data,
@@ -285,7 +284,7 @@ func normalize(spec memgraphcomv1alpha1.MemgraphClusterSpec) normalizedSpec {
 }
 
 // roleSpec gathers the per-role pieces the spec's concern-first blocks
-// (storage, probes, resources, labels, extraEnv, extraArgs) scatter across the
+// (storage, resources, labels, extraEnv, extraArgs) scatter across the
 // CR, so normalization is written once and both roles resolve their defaults
 // the same way.
 type roleSpec struct {
@@ -294,7 +293,6 @@ type roleSpec struct {
 	// folded from two spec blocks (the cluster-wide settings and the role's
 	// own), which the caller does before handing it over.
 	coreDumps    normalizedCoreDumps
-	probes       memgraphcomv1alpha1.RoleProbesSpec
 	resources    corev1.ResourceRequirements
 	labels       memgraphcomv1alpha1.RoleLabelsSpec
 	env          []memgraphcomv1alpha1.EnvVar
@@ -307,7 +305,6 @@ func normalizeRole(role roleSpec) normalizedRole {
 	return normalizedRole{
 		storage:           normalizeStorage(role.storage),
 		coreDumps:         role.coreDumps,
-		readinessProbe:    normalizeProbe(role.probes.ReadinessProbe),
 		resources:         role.resources,
 		podLabels:         role.labels.PodLabels,
 		statefulSetLabels: role.labels.StatefulSetLabels,
@@ -327,8 +324,8 @@ func intOrDefault(configured *int32, fallback int32) int32 {
 	return *configured
 }
 
-// normalizeProbe resolves one probe's timings against their defaults.
-func normalizeProbe(spec memgraphcomv1alpha1.ProbeSpec) normalizedProbe {
+// normalizeProbe resolves the readiness probe's timings against their defaults.
+func normalizeProbe(spec memgraphcomv1alpha1.ReadinessProbeSpec) normalizedProbe {
 	return normalizedProbe{
 		failureThreshold: intOrDefault(spec.FailureThreshold, memgraphcomv1alpha1.DefaultProbeFailureThreshold),
 		timeoutSeconds:   intOrDefault(spec.TimeoutSeconds, memgraphcomv1alpha1.DefaultProbeTimeoutSeconds),

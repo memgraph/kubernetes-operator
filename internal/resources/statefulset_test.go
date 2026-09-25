@@ -131,16 +131,9 @@ const customClusterDomain = "k8s.example.com"
 func tunedCluster() *memgraphcomv1alpha1.MemgraphCluster {
 	cluster := minimalCluster()
 	cluster.Spec.ClusterDomain = customClusterDomain
-	cluster.Spec.Probes = memgraphcomv1alpha1.ProbesSpec{
-		Coordinators: memgraphcomv1alpha1.RoleProbesSpec{
-			ReadinessProbe: memgraphcomv1alpha1.ProbeSpec{
-				TimeoutSeconds: ptr.To(int32(3)),
-				PeriodSeconds:  ptr.To(int32(2)),
-			},
-		},
-		Data: memgraphcomv1alpha1.RoleProbesSpec{
-			ReadinessProbe: memgraphcomv1alpha1.ProbeSpec{FailureThreshold: ptr.To(int32(6))},
-		},
+	cluster.Spec.ReadinessProbe = memgraphcomv1alpha1.ReadinessProbeSpec{
+		TimeoutSeconds: ptr.To(int32(3)),
+		PeriodSeconds:  ptr.To(int32(2)),
 	}
 	cluster.Spec.Resources = memgraphcomv1alpha1.ResourcesSpec{
 		Coordinators: corev1.ResourceRequirements{
@@ -1076,9 +1069,9 @@ func TestStatefulSetExtraArgsAreNotShellParsed(t *testing.T) {
 	}
 }
 
-// TestStatefulSetProbeOverrides asserts readiness probe timings are per role,
-// and that a partially specified probe keeps the defaults for the timings it
-// leaves out.
+// TestStatefulSetProbeOverrides asserts the one readiness probe block reaches
+// both roles, each on its own port, and that a partially specified block keeps
+// the defaults for the timings it leaves out.
 func TestStatefulSetProbeOverrides(t *testing.T) {
 	cluster := tunedCluster()
 
@@ -1094,10 +1087,9 @@ func TestStatefulSetProbeOverrides(t *testing.T) {
 			readiness: tunedTCPProbe(memgraphcomv1alpha1.CoordinatorPort, 20, 3, 2),
 		},
 		{
-			name: dataComponent,
-			sts:  dataStatefulSet(cluster),
-			// Only the failure threshold was changed, so the timings default.
-			readiness: tunedTCPProbe(memgraphcomv1alpha1.BoltPort, 6, 10, 5),
+			name:      dataComponent,
+			sts:       dataStatefulSet(cluster),
+			readiness: tunedTCPProbe(memgraphcomv1alpha1.BoltPort, 20, 3, 2),
 		},
 	}
 	for _, tc := range tests {

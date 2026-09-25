@@ -62,8 +62,9 @@ const (
 )
 
 // Readiness probe timing defaults, Go constants mirrored by the doc comments
-// on ProbeSpec. A readiness probe that has not succeeded yet only keeps the pod
-// unready, so the failure threshold is not a budget anything has to fit in.
+// on ReadinessProbeSpec. A readiness probe that has not succeeded yet only keeps
+// the pod unready, so the failure threshold is not a budget anything has to fit
+// in.
 const (
 	DefaultProbeFailureThreshold int32 = 20
 	DefaultProbeTimeoutSeconds   int32 = 10
@@ -569,32 +570,17 @@ type CoreDumpsSpec struct {
 	Uploader *CoreDumpsUploaderSpec `json:"uploader,omitempty"`
 }
 
-// ProbeSpec tunes the timings of one probe. The probe type itself is not
-// configurable: the probe is a TCP-socket check against the role's own port
-// (the coordinator port for coordinators, the Bolt port for data instances),
-// which is the memgraph-high-availability Helm chart's established convention.
+// ReadinessProbeSpec tunes the timings of the one probe every pod of the
+// cluster carries, its readiness probe. The probe type itself is not
+// configurable: it is a TCP-socket check against the role's own port (the
+// coordinator port for coordinators, the Bolt port for data instances), which
+// is the memgraph-high-availability Helm chart's established convention. One
+// block serves both roles: nothing about readiness differs between them.
 //
-// Every field defaults to the value named in its doc comment.
-type ProbeSpec struct {
-	// failureThreshold is how many consecutive failures the probe tolerates
-	// before acting. Defaults to 20.
-	// +kubebuilder:validation:Minimum=1
-	// +optional
-	FailureThreshold *int32 `json:"failureThreshold,omitempty"`
-
-	// timeoutSeconds is how long a single probe attempt may take. Defaults to
-	// 10.
-	// +kubebuilder:validation:Minimum=1
-	// +optional
-	TimeoutSeconds *int32 `json:"timeoutSeconds,omitempty"`
-
-	// periodSeconds is how often the probe runs. Defaults to 5.
-	// +kubebuilder:validation:Minimum=1
-	// +optional
-	PeriodSeconds *int32 `json:"periodSeconds,omitempty"`
-}
-
-// RoleProbesSpec tunes the one probe a role's pods carry: readiness.
+// Until the probe first succeeds — which for a data instance is after every
+// database has been recovered — the pod is unready and nothing more, so none of
+// these timings is a budget a recovery has to fit in. Every field defaults to
+// the value named in its doc comment.
 //
 // There is deliberately no liveness and no startup probe. Memgraph recovers its
 // databases before it opens any port, so during recovery nothing distinguishes
@@ -609,24 +595,23 @@ type ProbeSpec struct {
 // waited on by the operator, and it is restarted by nothing but its own exit.
 // Restarts of a running instance belong to the operator's rolling restart,
 // which knows the cluster's state, not to the kubelet, which does not.
-type RoleProbesSpec struct {
-	// readinessProbe decides whether the pod receives traffic and whether the
-	// operator considers the workloads ready to register. Until it first
-	// succeeds — which for a data instance is after every database has been
-	// recovered — the pod is unready and nothing more.
+type ReadinessProbeSpec struct {
+	// failureThreshold is how many consecutive failures flip a pod that was
+	// ready to unready. Defaults to 20.
+	// +kubebuilder:validation:Minimum=1
 	// +optional
-	ReadinessProbe ProbeSpec `json:"readinessProbe,omitzero"`
-}
+	FailureThreshold *int32 `json:"failureThreshold,omitempty"`
 
-// ProbesSpec tunes readiness probe timings per role.
-type ProbesSpec struct {
-	// coordinators tunes the readiness probe of every coordinator pod.
+	// timeoutSeconds is how long a single probe attempt may take. Defaults to
+	// 10.
+	// +kubebuilder:validation:Minimum=1
 	// +optional
-	Coordinators RoleProbesSpec `json:"coordinators,omitzero"`
+	TimeoutSeconds *int32 `json:"timeoutSeconds,omitempty"`
 
-	// data tunes the readiness probe of every data instance pod.
+	// periodSeconds is how often the probe runs. Defaults to 5.
+	// +kubebuilder:validation:Minimum=1
 	// +optional
-	Data RoleProbesSpec `json:"data,omitzero"`
+	PeriodSeconds *int32 `json:"periodSeconds,omitempty"`
 }
 
 // ResourcesSpec sets the compute resources of the Memgraph container per role.
@@ -1004,9 +989,10 @@ type MemgraphClusterSpec struct {
 	// +optional
 	ClusterDomain string `json:"clusterDomain,omitempty"`
 
-	// probes tunes the readiness probe timings of both roles.
+	// readinessProbe tunes the readiness probe timings of every pod, the one
+	// probe the pods carry.
 	// +optional
-	Probes ProbesSpec `json:"probes,omitzero"`
+	ReadinessProbe ReadinessProbeSpec `json:"readinessProbe,omitzero"`
 
 	// resources sets the compute resources of both roles' Memgraph containers.
 	// +optional

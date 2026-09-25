@@ -110,7 +110,7 @@ func CoordinatorStatefulSet(
 	}
 	// Coordinators are probed on their Raft port: it is the one they serve
 	// even before the Raft cluster has been formed.
-	container.ReadinessProbe = tcpProbe(memgraphcomv1alpha1.CoordinatorPort, role.readinessProbe)
+	container.ReadinessProbe = tcpProbe(memgraphcomv1alpha1.CoordinatorPort, spec.readinessProbe)
 
 	return statefulSet(cluster, coordinatorComponent, CoordinatorName(cluster), spec, role, replicas, container)
 }
@@ -129,7 +129,7 @@ func DataStatefulSet(cluster *memgraphcomv1alpha1.MemgraphCluster, replicas int3
 		{Name: managementPortName, ContainerPort: memgraphcomv1alpha1.ManagementPort},
 		{Name: replicationPortName, ContainerPort: memgraphcomv1alpha1.ReplicationPort},
 	}
-	container.ReadinessProbe = tcpProbe(memgraphcomv1alpha1.BoltPort, role.readinessProbe)
+	container.ReadinessProbe = tcpProbe(memgraphcomv1alpha1.BoltPort, spec.readinessProbe)
 
 	return statefulSet(cluster, dataComponent, DataName(cluster), spec, role, replicas, container)
 }
@@ -485,7 +485,7 @@ func retentionType(policy memgraphcomv1alpha1.StorageRetentionPolicy) appsv1.Per
 // instance opens no port until every database is recovered, so a liveness
 // check could only ever kill a recovery that outlived a guessed budget, and a
 // Bolt listener that goes away after startup means the process is gone, which
-// ends the container without any probe. RoleProbesSpec carries the argument.
+// ends the container without any probe. ReadinessProbeSpec carries the argument.
 func tcpProbe(port int32, timings normalizedProbe) *corev1.Probe {
 	return &corev1.Probe{
 		ProbeHandler: corev1.ProbeHandler{

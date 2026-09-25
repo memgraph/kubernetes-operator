@@ -134,10 +134,10 @@ spec:
   clusterDomain: cluster.local
   # The one probe a pod carries is readiness: a TCP-socket check against the
   # role's own port (the coordinator port for coordinators, the Bolt port for
-  # data instances); only the timings are configurable, and timings left out
-  # keep their defaults. Until it first succeeds the pod is unready and
-  # nothing more, so there is no budget to size: a data instance loading a
-  # large snapshot simply shows 0/1 until it is done.
+  # data instances); only the timings are configurable, one block for both
+  # roles, and timings left out keep their defaults. Until it first succeeds
+  # the pod is unready and nothing more, so there is no budget to size: a data
+  # instance loading a large snapshot simply shows 0/1 until it is done.
   #
   # There is deliberately no liveness and no startup probe. Memgraph opens no
   # port until every database is recovered, so during recovery nothing tells a
@@ -147,17 +147,10 @@ spec:
   # that goes away after startup means the process is gone, which ends the
   # container without any probe. Restarts of a running instance belong to the
   # operator's rolling restart, which knows the cluster's state.
-  probes:
-    coordinators:
-      readinessProbe:
-        failureThreshold: 20
-        timeoutSeconds: 10
-        periodSeconds: 5
-    data:
-      readinessProbe:
-        failureThreshold: 20
-        timeoutSeconds: 10
-        periodSeconds: 5
+  readinessProbe:
+    failureThreshold: 20
+    timeoutSeconds: 10
+    periodSeconds: 5
   # Requests and limits of the Memgraph container, per role, unset by default so
   # the pods schedule anywhere. When setting Memgraph's own --memory-limit
   # below, keep it under the pod's memory limit: Memgraph must hit its own limit
