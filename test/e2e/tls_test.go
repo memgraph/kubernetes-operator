@@ -35,6 +35,7 @@ import (
 	"time"
 
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
+	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
@@ -221,7 +222,7 @@ spec:
 			"-o", "jsonpath={.spec.endpoints[0].scheme} {.spec.endpoints[0].tlsConfig.insecureSkipVerify}")
 		out, err := utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(strings.TrimSpace(out)).To(Equal("https true"))
+		Expect(strings.TrimSpace(out)).To(Equal(string(monitoringv1.SchemeHTTPS)+" true"))
 
 		By("fetching /metrics over TLS from a data pod")
 		url := fmt.Sprintf("https://%s.%s-data.%s.svc.cluster.local:%d/metrics",
