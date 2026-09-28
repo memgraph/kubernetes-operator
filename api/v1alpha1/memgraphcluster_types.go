@@ -1090,13 +1090,61 @@ type BoltTLSSpec struct {
 	SecretName string `json:"secretName"`
 }
 
+// IntraClusterTLSSpec makes the members of the cluster talk to each other
+// over mutual TLS: replication, the coordinator-to-instance management RPC
+// and Raft between coordinators. On every such connection both sides present
+// a certificate and verify the other's against the CA, and the server side
+// refuses a peer presenting none. What that proves is membership — the peer
+// holds a certificate the cluster's CA signed — not identity: Memgraph checks
+// no member hostname on this path, so every pod of both roles shares one
+// certificate and per-pod certificates would add nothing it could check. A
+// wildcard SAN per role (*.<cluster>-coordinator.<namespace>.svc.<clusterDomain>
+// and *.<cluster>-data...) is recommended regardless, so a later hostname check
+// in Memgraph costs nothing.
+//
+// The mode is all-or-nothing per process, and a member with it cannot talk
+// to a member without it. The operator replaces pods one at a time and gates
+// every step on replication lag, so turning the mode on or off on a live
+// cluster would deadlock at the first step: the restarted replica speaks TLS,
+// the still-plaintext MAIN can no longer replicate to it, and lag never
+// converges. Adding or removing the block on a live cluster is therefore
+// refused at admission (the rule lives on the spec, where both the old and
+// the new tls block are in view). Changing secretName inside the block is
+// allowed and rolls the cluster; both Secrets must then chain to a CA the
+// other side trusts, so a CA cut-over needs ca.crt in both to be a bundle of
+// the old and the new CA.
+//
+// Rotation is as for bolt: the Secret is mounted without subPath, an
+// in-place update reaches every pod's files, Raft picks them up on its own
+// and the rest on RELOAD INTRA_CLUSTER TLS, issued on every instance.
+type IntraClusterTLSSpec struct {
+	// secretName names a Secret in the cluster's namespace holding the
+	// certificate under tls.crt, the private key under tls.key and the CA to
+	// verify peers against under ca.crt — what a cert-manager Certificate
+	// issued by a private CA writes. Every pod of both roles mounts it
+	// read-only.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
+	// +required
+	SecretName string `json:"secretName"`
+}
+
 // TLSSpec holds the cluster's TLS modes, each an optional presence-based block
 // like externalAccess and monitoring: present, the mode is on; absent, off.
+// The two are independent: Bolt TLS faces clients, intra-cluster TLS faces
+// the members, and either works without the other.
 type TLSSpec struct {
 	// bolt serves Bolt and the metrics endpoint over TLS on both roles, from
 	// the certificate in the named Secret.
 	// +optional
 	Bolt *BoltTLSSpec `json:"bolt,omitempty"`
+
+	// intraCluster makes the members talk to each other over mutual TLS from
+	// the certificate and CA in the named Secret. It cannot be added to or
+	// removed from a live cluster; see IntraClusterTLSSpec.
+	// +optional
+	IntraCluster *IntraClusterTLSSpec `json:"intraCluster,omitempty"`
 }
 
 // MemgraphClusterSpec defines the desired state of MemgraphCluster.
@@ -1106,7 +1154,13 @@ type TLSSpec struct {
 // decides whether the range fits in the port space. The has() guards keep the
 // rule evaluable before the nested defaults apply.
 //
+// The transition rule pins the presence of tls.intraCluster. It lives here
+// rather than on TLSSpec because a rule on the block only fires when the
+// block existed before: adding tls with intraCluster inside to a cluster that
+// had no tls block, or removing the whole block, would slip past it.
+//
 // +kubebuilder:validation:XValidation:rule="!has(self.externalAccess) || !has(self.externalAccess.gateway) || !has(self.externalAccess.gateway.dataPortBase) || !has(self.dataInstances) || self.externalAccess.gateway.dataPortBase + self.dataInstances <= 65536",message="externalAccess.gateway.dataPortBase + dataInstances must not exceed 65536: every data instance listens on dataPortBase + its ordinal"
+// +kubebuilder:validation:XValidation:rule="(has(self.tls) && has(self.tls.intraCluster)) == (has(oldSelf.tls) && has(oldSelf.tls.intraCluster))",message="tls.intraCluster cannot be added or removed on a live cluster: a member with intra-cluster TLS cannot talk to one without it, so restarting pods one at a time would deadlock waiting for replication that can no longer happen. Delete the MemgraphCluster (its claims are retained under the default retention policy) and recreate it with the new setting"
 type MemgraphClusterSpec struct {
 	// coordinators is the number of Raft coordinator instances. It must be odd
 	// so the Raft quorum cannot split, and at least three, which is the
@@ -1208,7 +1262,8 @@ type MemgraphClusterSpec struct {
 	Monitoring *MonitoringSpec `json:"monitoring,omitempty"`
 
 	// tls turns on the cluster's TLS modes from certificates in Secrets the
-	// user supplies. Absent, every port speaks plaintext.
+	// user supplies. Absent, every port speaks plaintext. bolt may be added or
+	// removed on a live cluster; intraCluster may not.
 	// +optional
 	TLS *TLSSpec `json:"tls,omitempty"`
 }

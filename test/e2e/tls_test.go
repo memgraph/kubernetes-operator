@@ -43,20 +43,28 @@ import (
 	"github.com/memgraph/kubernetes-operator/test/utils"
 )
 
-// The Bolt TLS scenario proves the two things the block promises and the one
-// thing it must survive. It boots a cluster in plaintext, exposed through
-// LoadBalancers and asking for a ServiceMonitor, then adds spec.tls.bolt and
-// watches the ordered roll complete — the roll is the hard part, because the
-// coordinators are restarted last and the operator has to keep reaching them
-// in whichever mode each still speaks. Afterwards a TLS routing driver on the
+// The TLS scenario proves what the two blocks promise and the one thing each
+// must survive. It boots a cluster with intra-cluster TLS from the start —
+// the mode cannot be added later, and admission saying so is checked here
+// too — exposed through LoadBalancers and asking for a ServiceMonitor, with
+// Bolt in plaintext. That it bootstraps at all proves the members reach each
+// other over mutual TLS: the coordinator leader health-checks every instance
+// over the management RPC and the replicas replicate from MAIN. Then
+// spec.tls.bolt is added and the ordered roll watched: the roll is the hard
+// part for Bolt, because the coordinators are restarted last and the operator
+// has to keep reaching them in whichever mode each still speaks, and it is
+// the roll intra-cluster TLS has to carry, because every step waits on
+// replication over the TLS channel. Afterwards a TLS routing driver on the
 // host writes and reads through the coordinators' external address, a
 // plaintext driver is refused, the ServiceMonitor names https, and the metrics
-// port answers over TLS. The certificate is minted here, with the pod-DNS
-// wildcards a verifying in-cluster client would need; no cert-manager runs.
-var _ = Describe("MemgraphCluster serving Bolt over TLS", Ordered, func() {
+// port answers over TLS. Both certificates are minted here from one
+// throwaway CA, with the pod-DNS wildcards a verifying client would need; no
+// cert-manager runs.
+var _ = Describe("MemgraphCluster serving TLS", Ordered, func() {
 	const tlsNamespace = "memgraph-e2e-tls"
 	const tlsClusterName = "secured"
 	const tlsSecretName = "bolt-tls"
+	const intraSecretName = "intra-cluster-tls"
 
 	plain := clusterUnderTest{
 		namespace: tlsNamespace, name: tlsClusterName, coordinators: 3, dataInstances: 2,
@@ -73,14 +81,20 @@ var _ = Describe("MemgraphCluster serving Bolt over TLS", Ordered, func() {
 		By("creating the enterprise license Secret")
 		createLicenseSecret(tlsNamespace, license, organization)
 
-		By("minting a CA and a Bolt certificate covering both roles' pod DNS names")
-		cert, key := mintBoltCertificate(
+		By("minting a CA and one certificate per mode covering both roles' pod DNS names")
+		ca := mintCA()
+		dnsNames := []string{
 			fmt.Sprintf("*.%s-coordinator.%s.svc.cluster.local", tlsClusterName, tlsNamespace),
 			fmt.Sprintf("*.%s-data.%s.svc.cluster.local", tlsClusterName, tlsNamespace),
-		)
-		createTLSSecret(tlsNamespace, tlsSecretName, cert, key)
+		}
+		boltCert, boltKey := ca.mintLeaf(dnsNames, x509.ExtKeyUsageServerAuth)
+		createTLSSecret(tlsNamespace, tlsSecretName, boltCert, boltKey, "")
+		// The intra-cluster leaf is presented as both server and client on
+		// every member-to-member connection.
+		intraCert, intraKey := ca.mintLeaf(dnsNames, x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth)
+		createTLSSecret(tlsNamespace, intraSecretName, intraCert, intraKey, ca.certPEM)
 
-		By("applying a plaintext MemgraphCluster exposed through LoadBalancers with a ServiceMonitor")
+		By("applying a MemgraphCluster with intra-cluster TLS, plaintext Bolt, LoadBalancers and a ServiceMonitor")
 		manifest := fmt.Sprintf(`apiVersion: memgraph.com/v1alpha1
 kind: MemgraphCluster
 metadata:
@@ -112,8 +126,11 @@ spec:
     type: LoadBalancer
   monitoring:
     serviceMonitor: {}
+  tls:
+    intraCluster:
+      secretName: %s
 `, tlsClusterName, tlsNamespace, plain.coordinators, plain.dataInstances,
-			example.Spec.Image.Repository, example.Spec.Image.Tag, licenseSecretName)
+			example.Spec.Image.Repository, example.Spec.Image.Tag, licenseSecretName, intraSecretName)
 		cmd := exec.Command("kubectl", "apply", "-f", "-")
 		_, err := utils.RunWithInput(cmd, manifest)
 		Expect(err).NotTo(HaveOccurred(), "Failed to apply the MemgraphCluster")
@@ -130,9 +147,17 @@ spec:
 		dumpDiagnosticsOnFailure(tlsNamespace)
 	})
 
-	It("bootstraps in plaintext and converges", func() {
+	It("bootstraps over intra-cluster TLS with plaintext Bolt and converges", func() {
 		Eventually(plain.verifyRegistered, 10*time.Minute, 10*time.Second).Should(Succeed())
 		plain.awaitConverged(5 * time.Minute)
+	})
+
+	It("refuses to drop intra-cluster TLS from the live cluster", func() {
+		cmd := exec.Command("kubectl", "patch", "memgraphcluster", tlsClusterName,
+			"-n", tlsNamespace, "--type=merge", "-p", `{"spec":{"tls":null}}`)
+		out, err := utils.Run(cmd)
+		Expect(err).To(HaveOccurred(), "admission must refuse removing intraCluster on a live cluster")
+		Expect(out).To(ContainSubstring("tls.intraCluster cannot be added or removed on a live cluster"))
 	})
 
 	// Adding the block is a pod-template change and rolls the cluster. The
@@ -140,7 +165,7 @@ spec:
 	// that for the whole data-instance phase every coordinator still speaks
 	// plaintext while the spec says TLS, and the roll only completes if the
 	// operator keeps reaching them regardless.
-	It("rolls TLS on through the data instances before the coordinators", func() {
+	It("rolls Bolt TLS on through the data instances before the coordinators", func() {
 		By("recording which pods exist")
 		before, err := plain.podUIDs()
 		Expect(err).NotTo(HaveOccurred())
@@ -165,7 +190,7 @@ spec:
 			}
 		}
 
-		By("confirming the cluster converges over TLS with every member registered")
+		By("confirming the cluster converges with every member registered, reached over TLS")
 		Eventually(secured.verifyRegistered, 10*time.Minute, 10*time.Second).Should(Succeed())
 		cmd = exec.Command("kubectl", "wait", "--for=condition=Updated",
 			"memgraphcluster/"+tlsClusterName, "-n", tlsNamespace, "--timeout=5m")
@@ -233,16 +258,22 @@ spec:
 	})
 })
 
-// mintBoltCertificate returns a PEM certificate and key for a throwaway CA's
-// leaf covering the given DNS names, the shape a cert-manager Certificate would
-// produce. The CA itself is discarded: nothing in the scenario verifies, which
-// is exactly the operator's and the ServiceMonitor's contract, and a client
-// that does verify only needs the CA on its own side.
-func mintBoltCertificate(dnsNames ...string) (certPEM, keyPEM string) {
+// testCA is a throwaway CA the scenario mints both leaves from, the way one
+// cert-manager issuer would. Only the intra-cluster Secret carries its
+// certificate: that is the one place a member verifies a peer. Nothing on the
+// Bolt side verifies, which is exactly the operator's and the ServiceMonitor's
+// contract, and a client that does only needs the CA on its own side.
+type testCA struct {
+	cert    *x509.Certificate
+	key     *ecdsa.PrivateKey
+	certPEM string
+}
+
+func mintCA() testCA {
 	GinkgoHelper()
-	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	Expect(err).NotTo(HaveOccurred())
-	ca := &x509.Certificate{
+	template := &x509.Certificate{
 		SerialNumber:          big.NewInt(1),
 		Subject:               pkix.Name{CommonName: "memgraph e2e CA"},
 		NotBefore:             time.Now().Add(-time.Hour),
@@ -251,43 +282,57 @@ func mintBoltCertificate(dnsNames ...string) (certPEM, keyPEM string) {
 		BasicConstraintsValid: true,
 		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,
 	}
-	caDER, err := x509.CreateCertificate(rand.Reader, ca, ca, &caKey.PublicKey, caKey)
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
 	Expect(err).NotTo(HaveOccurred())
-	caCert, err := x509.ParseCertificate(caDER)
+	cert, err := x509.ParseCertificate(der)
 	Expect(err).NotTo(HaveOccurred())
+	return testCA{
+		cert:    cert,
+		key:     key,
+		certPEM: string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})),
+	}
+}
 
-	leafKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+// mintLeaf returns a PEM certificate and key signed by the CA, covering the
+// given DNS names and usable for the given purposes.
+func (ca testCA) mintLeaf(dnsNames []string, usages ...x509.ExtKeyUsage) (certPEM, keyPEM string) {
+	GinkgoHelper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	Expect(err).NotTo(HaveOccurred())
-	leaf := &x509.Certificate{
-		SerialNumber: big.NewInt(2),
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(time.Now().UnixNano()),
 		Subject:      pkix.Name{CommonName: dnsNames[0]},
 		DNSNames:     dnsNames,
 		NotBefore:    time.Now().Add(-time.Hour),
 		NotAfter:     time.Now().Add(24 * time.Hour),
 		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
-		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		ExtKeyUsage:  usages,
 	}
-	leafDER, err := x509.CreateCertificate(rand.Reader, leaf, caCert, &leafKey.PublicKey, caKey)
+	der, err := x509.CreateCertificate(rand.Reader, template, ca.cert, &key.PublicKey, ca.key)
 	Expect(err).NotTo(HaveOccurred())
-	keyDER, err := x509.MarshalECPrivateKey(leafKey)
+	keyDER, err := x509.MarshalECPrivateKey(key)
 	Expect(err).NotTo(HaveOccurred())
-
-	certPEM = string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leafDER}))
+	certPEM = string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
 	keyPEM = string(pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}))
 	return certPEM, keyPEM
 }
 
-// createTLSSecret applies a kubernetes.io/tls Secret, the shape the block
-// documents. The manifest is piped over stdin so the key never reaches the
-// logged command line.
-func createTLSSecret(namespace, name, certPEM, keyPEM string) {
+// createTLSSecret applies a kubernetes.io/tls Secret, the shape both blocks
+// document, with ca.crt beside the pair when given — what a cert-manager
+// Certificate from a private CA issuer writes. The manifest is piped over
+// stdin so the key never reaches the logged command line.
+func createTLSSecret(namespace, name, certPEM, keyPEM, caPEM string) {
 	GinkgoHelper()
+	data := map[string]string{"tls.crt": certPEM, "tls.key": keyPEM}
+	if caPEM != "" {
+		data["ca.crt"] = caPEM
+	}
 	secret := map[string]any{
 		"apiVersion": "v1",
 		"kind":       "Secret",
 		"type":       "kubernetes.io/tls",
 		"metadata":   map[string]any{"name": name, "namespace": namespace},
-		"stringData": map[string]string{"tls.crt": certPEM, "tls.key": keyPEM},
+		"stringData": data,
 	}
 	manifest, err := json.Marshal(secret)
 	Expect(err).NotTo(HaveOccurred(), "Failed to marshal the TLS Secret")

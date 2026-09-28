@@ -706,6 +706,70 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 			Expect(err.Error()).To(ContainSubstring(wantMessage))
 		}
 
+		// Intra-cluster TLS is all-or-nothing per process, and the operator's
+		// one-pod-at-a-time roll cannot carry a cluster across the line: the
+		// restarted replica and the not-yet-restarted MAIN can no longer talk,
+		// so the roll waits on replication forever. Its presence is therefore
+		// pinned at admission, in both directions and whether or not the tls
+		// block itself existed before; the Secret it names stays free, since
+		// a renamed Secret is an ordinary roll with every member still on TLS.
+		Context("when the cluster has intra-cluster TLS", func() {
+			const intraSecret = "intra-cluster-tls"
+			const boltSecret = "bolt-tls"
+			const pinMessage = "tls.intraCluster cannot be added or removed on a live cluster"
+
+			withIntraCluster := memgraphcomv1alpha1.MemgraphClusterSpec{
+				TLS: &memgraphcomv1alpha1.TLSSpec{
+					IntraCluster: &memgraphcomv1alpha1.IntraClusterTLSSpec{SecretName: intraSecret},
+				},
+			}
+
+			It("should reject adding the block to a cluster without a tls block", func() {
+				createAccepted("intra-add-no-tls", memgraphcomv1alpha1.MemgraphClusterSpec{})
+				expectRejectedUpdate("intra-add-no-tls", func(c *memgraphcomv1alpha1.MemgraphCluster) {
+					c.Spec.TLS = &memgraphcomv1alpha1.TLSSpec{
+						IntraCluster: &memgraphcomv1alpha1.IntraClusterTLSSpec{SecretName: intraSecret},
+					}
+				}, pinMessage)
+			})
+
+			It("should reject adding the block beside an existing bolt block", func() {
+				createAccepted("intra-add-beside-bolt", memgraphcomv1alpha1.MemgraphClusterSpec{
+					TLS: &memgraphcomv1alpha1.TLSSpec{
+						Bolt: &memgraphcomv1alpha1.BoltTLSSpec{SecretName: boltSecret},
+					},
+				})
+				expectRejectedUpdate("intra-add-beside-bolt", func(c *memgraphcomv1alpha1.MemgraphCluster) {
+					c.Spec.TLS.IntraCluster = &memgraphcomv1alpha1.IntraClusterTLSSpec{SecretName: intraSecret}
+				}, pinMessage)
+			})
+
+			It("should reject removing the block", func() {
+				createAccepted("intra-remove", withIntraCluster)
+				expectRejectedUpdate("intra-remove", func(c *memgraphcomv1alpha1.MemgraphCluster) {
+					c.Spec.TLS.IntraCluster = nil
+				}, pinMessage)
+			})
+
+			It("should reject removing the whole tls block", func() {
+				createAccepted("intra-remove-tls", withIntraCluster)
+				expectRejectedUpdate("intra-remove-tls", func(c *memgraphcomv1alpha1.MemgraphCluster) {
+					c.Spec.TLS = nil
+				}, pinMessage)
+			})
+
+			It("should accept a different Secret, and bolt coming and going", func() {
+				createAccepted("intra-secret-change", withIntraCluster)
+				Expect(update("intra-secret-change", func(c *memgraphcomv1alpha1.MemgraphCluster) {
+					c.Spec.TLS.IntraCluster.SecretName = "intra-cluster-tls-2027"
+					c.Spec.TLS.Bolt = &memgraphcomv1alpha1.BoltTLSSpec{SecretName: boltSecret}
+				})).To(Succeed())
+				Expect(update("intra-secret-change", func(c *memgraphcomv1alpha1.MemgraphCluster) {
+					c.Spec.TLS.Bolt = nil
+				})).To(Succeed())
+			})
+		})
+
 		It("should accept growing both counts in one edit", func() {
 			createAccepted("scale-up-both", memgraphcomv1alpha1.MemgraphClusterSpec{
 				Coordinators:  ptr.To(int32(3)),

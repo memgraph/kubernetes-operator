@@ -59,6 +59,16 @@ const (
 	boltTLSVolumeName = "bolt-tls"
 	boltTLSMountPath  = "/etc/memgraph/ssl"
 
+	// intraClusterTLSVolumeName and its mount path are the same for the
+	// certificate the members authenticate each other with, and for the same
+	// reasons.
+	intraClusterTLSVolumeName = "intra-cluster-tls"
+	intraClusterTLSMountPath  = "/etc/memgraph/intra_cluster_tls"
+
+	// caKey is the key the intra-cluster Secret holds its CA under, beside
+	// the two kubernetes.io/tls keys; it is the key cert-manager writes.
+	caKey = "ca.crt"
+
 	// containerName is the Memgraph container's name, and doubles as the $0 the
 	// coordinator's shell wrapper is given.
 	containerName = "memgraph"
@@ -179,7 +189,9 @@ exec %s \
 //
 // A cluster with Bolt TLS gets the certificate and key flags last. Memgraph
 // serves the metrics endpoint from the same server context, so the two flags
-// turn 9091 to https as well; nothing else about the args changes.
+// turn 9091 to https as well; nothing else about the args changes. A cluster
+// with intra-cluster TLS gets the three cluster flags after those: Memgraph
+// refuses to start with only some of them, so they always travel together.
 func commonArgs(spec normalizedSpec, role normalizedRole) []string {
 	logDestination := logFile
 	if !role.storage.createLogClaim {
@@ -204,6 +216,13 @@ func commonArgs(spec normalizedSpec, role normalizedRole) []string {
 		args = append(args,
 			"--bolt-cert-file="+boltTLSMountPath+"/"+corev1.TLSCertKey,
 			"--bolt-key-file="+boltTLSMountPath+"/"+corev1.TLSPrivateKeyKey,
+		)
+	}
+	if spec.intraClusterTLSSecret != "" {
+		args = append(args,
+			"--cluster-cert-file="+intraClusterTLSMountPath+"/"+corev1.TLSCertKey,
+			"--cluster-key-file="+intraClusterTLSMountPath+"/"+corev1.TLSPrivateKeyKey,
+			"--cluster-ca-file="+intraClusterTLSMountPath+"/"+caKey,
 		)
 	}
 	return args
@@ -337,8 +356,8 @@ func uploaderSidecar(coreDumps normalizedCoreDumps) corev1.Container {
 // volumeMounts are the Memgraph container's mounts: lib storage, the scratch
 // directory the read-only root filesystem needs, log storage unless the role
 // opted out of it, the core dumps directory when the role collects dumps, the
-// Bolt certificate when the cluster serves TLS, and last the role's own extra
-// mounts.
+// Bolt and intra-cluster certificates when the cluster has those modes, and
+// last the role's own extra mounts.
 func volumeMounts(spec normalizedSpec, role normalizedRole) []corev1.VolumeMount {
 	mounts := []corev1.VolumeMount{{Name: libVolumeName, MountPath: libMountPath}}
 	if role.storage.createLogClaim {
@@ -353,19 +372,23 @@ func volumeMounts(spec normalizedSpec, role normalizedRole) []corev1.VolumeMount
 		mounts = append(mounts,
 			corev1.VolumeMount{Name: boltTLSVolumeName, MountPath: boltTLSMountPath, ReadOnly: true})
 	}
+	if spec.intraClusterTLSSecret != "" {
+		mounts = append(mounts,
+			corev1.VolumeMount{Name: intraClusterTLSVolumeName, MountPath: intraClusterTLSMountPath, ReadOnly: true})
+	}
 	return append(mounts, role.extraMounts...)
 }
 
 // podVolumes is the scratch directory the read-only root filesystem needs, the
-// Bolt certificate Secret when the cluster serves TLS, plus the role's extra
+// certificate Secrets of the TLS modes the cluster has, plus the role's extra
 // volumes. Everything persistent comes from volumeClaimTemplates instead.
 //
-// The certificate Secret is projected by key name: tls.crt and tls.key, the
-// shape of a kubernetes.io/tls Secret. A Secret carrying more keys mounts
-// fine, and one missing either keeps the pod from starting, which is how a
-// missing license Secret is reported too.
+// The certificate Secrets are projected by key name: tls.crt and tls.key, the
+// shape of a kubernetes.io/tls Secret, plus ca.crt for the intra-cluster one.
+// A Secret carrying more keys mounts fine, and one missing a key keeps the pod
+// from starting, which is how a missing license Secret is reported too.
 func podVolumes(spec normalizedSpec, role normalizedRole) []corev1.Volume {
-	volumes := make([]corev1.Volume, 0, 2+len(role.extraVolumes))
+	volumes := make([]corev1.Volume, 0, 3+len(role.extraVolumes))
 	volumes = append(volumes, corev1.Volume{
 		Name: tmpVolumeName, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
 	})
@@ -378,6 +401,21 @@ func podVolumes(spec normalizedSpec, role normalizedRole) []corev1.Volume {
 					Items: []corev1.KeyToPath{
 						{Key: corev1.TLSCertKey, Path: corev1.TLSCertKey},
 						{Key: corev1.TLSPrivateKeyKey, Path: corev1.TLSPrivateKeyKey},
+					},
+				},
+			},
+		})
+	}
+	if spec.intraClusterTLSSecret != "" {
+		volumes = append(volumes, corev1.Volume{
+			Name: intraClusterTLSVolumeName,
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: spec.intraClusterTLSSecret,
+					Items: []corev1.KeyToPath{
+						{Key: corev1.TLSCertKey, Path: corev1.TLSCertKey},
+						{Key: corev1.TLSPrivateKeyKey, Path: corev1.TLSPrivateKeyKey},
+						{Key: caKey, Path: caKey},
 					},
 				},
 			},

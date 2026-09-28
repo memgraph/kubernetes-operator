@@ -62,12 +62,24 @@ const (
 	// it as.
 	boltTLSSecretName = "bolt-tls"
 	boltTLSVolume     = "bolt-tls"
-	shell             = "/bin/sh"
-	defaultImageRef   = memgraphcomv1alpha1.DefaultImageReference
-	coreDumpsVolume   = "core-dumps"
-	coreDumpsPath     = "/var/core/memgraph"
-	dataPath          = "/var/lib/memgraph/mg_data"
-	logFilePath       = "/var/log/memgraph/memgraph.log"
+
+	// The intra-cluster TLS Secret a fixture names, and its volume.
+	intraTLSSecretName = "intra-cluster-tls"
+	intraTLSVolume     = "intra-cluster-tls"
+
+	// The keys the TLS Secrets are projected by, and where each mode's Secret
+	// is mounted.
+	tlsCertKey      = "tls.crt"
+	tlsKeyKey       = "tls.key"
+	tlsCAKey        = "ca.crt"
+	boltTLSMount    = "/etc/memgraph/ssl"
+	intraTLSMount   = "/etc/memgraph/intra_cluster_tls"
+	shell           = "/bin/sh"
+	defaultImageRef = memgraphcomv1alpha1.DefaultImageReference
+	coreDumpsVolume = "core-dumps"
+	coreDumpsPath   = "/var/core/memgraph"
+	dataPath        = "/var/lib/memgraph/mg_data"
+	logFilePath     = "/var/log/memgraph/memgraph.log"
 
 	// The operator's identity labels, which custom labels may never override.
 	nameLabel      = "app.kubernetes.io/name"
@@ -868,7 +880,7 @@ func TestStatefulSetExtraVolumes(t *testing.T) {
 			Secret: &corev1.SecretVolumeSource{SecretName: boltTLSSecretName},
 		},
 	}
-	certMount := corev1.VolumeMount{Name: "bolt-certs", MountPath: "/etc/memgraph/ssl", ReadOnly: true}
+	certMount := corev1.VolumeMount{Name: "bolt-certs", MountPath: boltTLSMount, ReadOnly: true}
 
 	cluster := minimalCluster()
 	cluster.Spec.ExtraVolumes = memgraphcomv1alpha1.ExtraVolumesSpec{
@@ -1316,17 +1328,17 @@ func TestStatefulSetBoltTLS(t *testing.T) {
 			Secret: &corev1.SecretVolumeSource{
 				SecretName: boltTLSSecretName,
 				Items: []corev1.KeyToPath{
-					{Key: "tls.crt", Path: "tls.crt"},
-					{Key: "tls.key", Path: "tls.key"},
+					{Key: tlsCertKey, Path: tlsCertKey},
+					{Key: tlsKeyKey, Path: tlsKeyKey},
 				},
 			},
 		},
 	})
 	wantMounts := append(expectedVolumeMounts(),
-		corev1.VolumeMount{Name: boltTLSVolume, MountPath: "/etc/memgraph/ssl", ReadOnly: true})
+		corev1.VolumeMount{Name: boltTLSVolume, MountPath: boltTLSMount, ReadOnly: true})
 	tlsFlags := []string{
-		"--bolt-cert-file=/etc/memgraph/ssl/tls.crt",
-		"--bolt-key-file=/etc/memgraph/ssl/tls.key",
+		"--bolt-cert-file=" + boltTLSMount + "/" + tlsCertKey,
+		"--bolt-key-file=" + boltTLSMount + "/" + tlsKeyKey,
 	}
 
 	t.Run(dataComponent, func(t *testing.T) {
@@ -1373,8 +1385,112 @@ func TestStatefulSetBoltTLSAfterExtras(t *testing.T) {
 	certFlags := slices.DeleteFunc(slices.Clone(args), func(arg string) bool {
 		return !strings.HasPrefix(arg, "--bolt-cert-file=")
 	})
-	want := []string{"--bolt-cert-file=/etc/memgraph/ssl/tls.crt", "--bolt-cert-file=/elsewhere/cert.pem"}
+	want := []string{"--bolt-cert-file=" + boltTLSMount + "/" + tlsCertKey, "--bolt-cert-file=/elsewhere/cert.pem"}
 	if diff := cmp.Diff(want, certFlags); diff != "" {
 		t.Errorf("--bolt-cert-file order mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestStatefulSetIntraClusterTLS pins what spec.tls.intraCluster adds to both
+// roles: the Secret mounted read-only under the HA chart's path with the two
+// kubernetes.io/tls keys and the CA projected by name, and the three cluster
+// flags, which Memgraph insists arrive together. It is independent of bolt:
+// this fixture has no Bolt TLS, so none of its volume, mount or flags appear.
+func TestStatefulSetIntraClusterTLS(t *testing.T) {
+	cluster := minimalCluster()
+	cluster.Spec.TLS = &memgraphcomv1alpha1.TLSSpec{
+		IntraCluster: &memgraphcomv1alpha1.IntraClusterTLSSpec{SecretName: intraTLSSecretName},
+	}
+
+	wantVolumes := append(expectedVolumes(), corev1.Volume{
+		Name: intraTLSVolume,
+		VolumeSource: corev1.VolumeSource{
+			Secret: &corev1.SecretVolumeSource{
+				SecretName: intraTLSSecretName,
+				Items: []corev1.KeyToPath{
+					{Key: tlsCertKey, Path: tlsCertKey},
+					{Key: tlsKeyKey, Path: tlsKeyKey},
+					{Key: tlsCAKey, Path: tlsCAKey},
+				},
+			},
+		},
+	})
+	wantMounts := append(expectedVolumeMounts(),
+		corev1.VolumeMount{Name: intraTLSVolume, MountPath: intraTLSMount, ReadOnly: true})
+	tlsFlags := []string{
+		"--cluster-cert-file=" + intraTLSMount + "/" + tlsCertKey,
+		"--cluster-key-file=" + intraTLSMount + "/" + tlsKeyKey,
+		"--cluster-ca-file=" + intraTLSMount + "/" + tlsCAKey,
+	}
+
+	t.Run(dataComponent, func(t *testing.T) {
+		podSpec := dataStatefulSet(cluster).Spec.Template.Spec
+		if diff := cmp.Diff(wantVolumes, podSpec.Volumes); diff != "" {
+			t.Errorf("volumes mismatch (-want +got):\n%s", diff)
+		}
+		if diff := cmp.Diff(wantMounts, podSpec.Containers[0].VolumeMounts); diff != "" {
+			t.Errorf("volume mounts mismatch (-want +got):\n%s", diff)
+		}
+		if diff := cmp.Diff(expectedArgs(logFilePath, tlsFlags...), podSpec.Containers[0].Args); diff != "" {
+			t.Errorf("args mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run(coordinatorComponent, func(t *testing.T) {
+		podSpec := coordinatorStatefulSet(cluster).Spec.Template.Spec
+		if diff := cmp.Diff(wantVolumes, podSpec.Volumes); diff != "" {
+			t.Errorf("volumes mismatch (-want +got):\n%s", diff)
+		}
+		if diff := cmp.Diff(wantMounts, podSpec.Containers[0].VolumeMounts); diff != "" {
+			t.Errorf("volume mounts mismatch (-want +got):\n%s", diff)
+		}
+		if diff := cmp.Diff(expectedCoordinatorArgs(logFilePath, tlsFlags...), podSpec.Containers[0].Args); diff != "" {
+			t.Errorf("args mismatch (-want +got):\n%s", diff)
+		}
+	})
+}
+
+// TestStatefulSetBothTLSModes pins the order the two modes land in when a
+// cluster has both: bolt first, intra-cluster second, in volumes, mounts and
+// flags alike, so the two never shadow each other.
+func TestStatefulSetBothTLSModes(t *testing.T) {
+	cluster := minimalCluster()
+	cluster.Spec.TLS = &memgraphcomv1alpha1.TLSSpec{
+		Bolt:         &memgraphcomv1alpha1.BoltTLSSpec{SecretName: boltTLSSecretName},
+		IntraCluster: &memgraphcomv1alpha1.IntraClusterTLSSpec{SecretName: intraTLSSecretName},
+	}
+
+	podSpec := dataStatefulSet(cluster).Spec.Template.Spec
+
+	volumes := make([]string, 0, len(podSpec.Volumes))
+	for _, volume := range podSpec.Volumes {
+		volumes = append(volumes, volume.Name)
+	}
+	if diff := cmp.Diff([]string{tmpVolume, boltTLSVolume, intraTLSVolume}, volumes); diff != "" {
+		t.Errorf("volume order mismatch (-want +got):\n%s", diff)
+	}
+
+	mounts := make([]string, 0, len(podSpec.Containers[0].VolumeMounts))
+	for _, mount := range podSpec.Containers[0].VolumeMounts {
+		mounts = append(mounts, mount.MountPath)
+	}
+	wantMounts := make([]string, 0, len(expectedVolumeMounts())+2)
+	for _, mount := range expectedVolumeMounts() {
+		wantMounts = append(wantMounts, mount.MountPath)
+	}
+	wantMounts = append(wantMounts, boltTLSMount, intraTLSMount)
+	if diff := cmp.Diff(wantMounts, mounts); diff != "" {
+		t.Errorf("mount order mismatch (-want +got):\n%s", diff)
+	}
+
+	wantArgs := expectedArgs(logFilePath,
+		"--bolt-cert-file="+boltTLSMount+"/"+tlsCertKey,
+		"--bolt-key-file="+boltTLSMount+"/"+tlsKeyKey,
+		"--cluster-cert-file="+intraTLSMount+"/"+tlsCertKey,
+		"--cluster-key-file="+intraTLSMount+"/"+tlsKeyKey,
+		"--cluster-ca-file="+intraTLSMount+"/"+tlsCAKey,
+	)
+	if diff := cmp.Diff(wantArgs, podSpec.Containers[0].Args); diff != "" {
+		t.Errorf("args mismatch (-want +got):\n%s", diff)
 	}
 }

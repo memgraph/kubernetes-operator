@@ -327,6 +327,22 @@ spec:
   # files — followed by RELOAD BOLT SERVER TLS on every instance; a different
   # secretName rolls the cluster instead. Removing the block rolls back to
   # plaintext.
+  #
+  # intraCluster makes the members authenticate each other over mutual TLS —
+  # replication, the coordinators' management RPC and Raft — from one Secret
+  # holding tls.crt, tls.key and ca.crt (what a cert-manager Certificate from
+  # a private CA issuer writes), mounted by every pod of both roles. It proves
+  # membership, not identity: Memgraph checks the chain and demands a client
+  # certificate but no hostname, so one shared certificate is enough; carry the
+  # same two pod-DNS wildcards in its SANs anyway. Decide at creation: the
+  # block cannot be added to or removed from a live cluster, because a member
+  # with it cannot talk to one without and the one-pod-at-a-time restart would
+  # wait on replication forever; admission refuses it. A different secretName
+  # rolls the cluster, and a CA change needs ca.crt in both Secrets to hold
+  # both CAs. Renewal is an in-place Secret update followed by RELOAD
+  # INTRA_CLUSTER TLS on every instance.
   # tls:
   #   bolt:
   #     secretName: bolt-tls
+  #   intraCluster:
+  #     secretName: intra-cluster-tls

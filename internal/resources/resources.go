@@ -129,6 +129,9 @@ type normalizedSpec struct {
 	// boltTLSSecret names the Secret both roles serve Bolt and metrics with,
 	// and is empty for a cluster that serves them in plaintext.
 	boltTLSSecret string
+	// intraClusterTLSSecret names the Secret the members authenticate each
+	// other with, and is empty for a cluster whose members talk in plaintext.
+	intraClusterTLSSecret string
 }
 
 // normalizedMonitoring is the monitoring block with each optional object
@@ -303,6 +306,9 @@ func normalize(spec memgraphcomv1alpha1.MemgraphClusterSpec) normalizedSpec {
 	}
 	if spec.TLS != nil && spec.TLS.Bolt != nil {
 		n.boltTLSSecret = spec.TLS.Bolt.SecretName
+	}
+	if spec.TLS != nil && spec.TLS.IntraCluster != nil {
+		n.intraClusterTLSSecret = spec.TLS.IntraCluster.SecretName
 	}
 	if spec.Coordinators != nil {
 		n.coordinators = *spec.Coordinators
