@@ -1463,7 +1463,8 @@ spec:
               tls:
                 description: |-
                   tls turns on the cluster's TLS modes from certificates in Secrets the
-                  user supplies. Absent, every port speaks plaintext.
+                  user supplies. Absent, every port speaks plaintext. bolt may be added or
+                  removed on a live cluster; intraCluster may not.
                 properties:
                   bolt:
                     description: |-
@@ -1484,6 +1485,26 @@ spec:
                     required:
                     - secretName
                     type: object
+                  intraCluster:
+                    description: |-
+                      intraCluster makes the members talk to each other over mutual TLS from
+                      the certificate and CA in the named Secret. It cannot be added to or
+                      removed from a live cluster; see IntraClusterTLSSpec.
+                    properties:
+                      secretName:
+                        description: |-
+                          secretName names a Secret in the cluster's namespace holding the
+                          certificate under tls.crt, the private key under tls.key and the CA to
+                          verify peers against under ca.crt — what a cert-manager Certificate
+                          issued by a private CA writes. Every pod of both roles mounts it
+                          read-only.
+                        maxLength: 253
+                        minLength: 1
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                        type: string
+                    required:
+                    - secretName
+                    type: object
                 type: object
             type: object
             x-kubernetes-validations:
@@ -1493,6 +1514,14 @@ spec:
                 || !has(self.externalAccess.gateway.dataPortBase) || !has(self.dataInstances)
                 || self.externalAccess.gateway.dataPortBase + self.dataInstances <=
                 65536'
+            - message: 'tls.intraCluster cannot be added or removed on a live cluster:
+                a member with intra-cluster TLS cannot talk to one without it, so
+                restarting pods one at a time would deadlock waiting for replication
+                that can no longer happen. Delete the MemgraphCluster (its claims
+                are retained under the default retention policy) and recreate it with
+                the new setting'
+              rule: (has(self.tls) && has(self.tls.intraCluster)) == (has(oldSelf.tls)
+                && has(oldSelf.tls.intraCluster))
           status:
             description: status defines the observed state of MemgraphCluster
             properties:
