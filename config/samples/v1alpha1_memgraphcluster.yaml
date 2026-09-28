@@ -349,6 +349,22 @@ spec:
       # - name: my-debugger
       #   image: docker.io/library/busybox:1.37.0
       #   command: ["sh", "-c", "echo hi; sleep 10000"]
+  # Init containers of your own in a role's pods — the HA chart's
+  # initContainers: seed a volume, fetch a query module, wait on a dependency.
+  # Plain core/v1 containers run after the operator's own init containers
+  # (init-sysctl, init-core-pattern, init-fix-perms, whichever are on) and
+  # before Memgraph, so they see volumes the ownership container has already
+  # fixed and may mount any volume the pod has. Stored without schema
+  # validation like userContainers, with the same securityContext fill: one
+  # naming none gets Memgraph's locked-down one, so the example below runs
+  # under PodSecurity "restricted"; name your own to run as root. A failing
+  # init container keeps the pod from ever starting Memgraph.
+  initContainers:
+    coordinators: []
+    data: []
+      # - name: seed-modules
+      #   image: docker.io/library/busybox:1.37.0
+      #   command: ["sh", "-c", "echo hello world"]
   # Reach the cluster from outside Kubernetes. Clients outside need two things:
   # a way in, and a routing table whose addresses they can reach — the
   # coordinators hand every client the bolt address each instance was registered

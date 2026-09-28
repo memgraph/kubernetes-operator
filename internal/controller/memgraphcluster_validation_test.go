@@ -425,6 +425,29 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 			Expect(stored.Spec.UserContainers.Data).To(BeEmpty())
 		})
 
+		// The initContainers entries are schemaless like userContainers; the
+		// same round trip proves the nested fields survive.
+		It("should preserve a schemaless init container through a round trip", func() {
+			container := corev1.Container{
+				Name:    "seed-modules",
+				Image:   "docker.io/library/busybox:1.37.0",
+				Command: []string{"sh", "-c", "echo hello world"},
+				Env:     []corev1.EnvVar{{Name: "SOURCE", Value: "s3://modules"}},
+				VolumeMounts: []corev1.VolumeMount{{
+					Name: "lib-storage", MountPath: "/var/lib/memgraph",
+				}},
+				SecurityContext: &corev1.SecurityContext{RunAsUser: ptr.To(int64(0))},
+			}
+			stored := createAccepted("valid-init-containers", memgraphcomv1alpha1.MemgraphClusterSpec{
+				InitContainers: memgraphcomv1alpha1.InitContainersSpec{
+					Data: []corev1.Container{container},
+				},
+			})
+
+			Expect(stored.Spec.InitContainers.Data).To(Equal([]corev1.Container{container}))
+			Expect(stored.Spec.InitContainers.Coordinators).To(BeEmpty())
+		})
+
 		// The extraVolumes entries are schemaless, so nothing but this spec
 		// proves the API server keeps an arbitrary volume source intact instead
 		// of pruning the fields it has no schema for.

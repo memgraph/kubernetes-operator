@@ -1108,6 +1108,46 @@ type UserContainersSpec struct {
 	Data []corev1.Container `json:"data,omitempty"`
 }
 
+// InitContainersSpec adds init containers of the user's own to a role's
+// pods, mirroring the memgraph-high-availability Helm chart's initContainers
+// block: seeding a volume, fetching a query module, waiting on a dependency,
+// whatever must finish before Memgraph starts. Each entry is a core/v1
+// Container appended after the operator's own init containers (init-sysctl,
+// init-core-pattern, init-fix-perms, whichever the spec asked for), in the
+// chart's order, so a user container sees volumes the ownership container has
+// already fixed and may mount any volume the pod has, extraVolumes included.
+//
+// The entries are schemaless for the reason userContainers and extraVolumes
+// are: a core/v1 Container schema inlined per role grows this CRD past the
+// size a client-side kubectl apply can carry. The API server keeps the YAML
+// verbatim without validating it, so a malformed container, or one named like
+// a container the pod already has, is caught when the operator applies the
+// StatefulSet and surfaces on this resource as the ApplyFailed condition
+// rather than as an admission error.
+//
+// As with userContainers, a container that names no securityContext gets the
+// same locked-down one as the Memgraph container, so the chart's own example
+// runs in a namespace enforcing the restricted Pod Security Standard; one that
+// names its own keeps it as written, which is how a container that must run
+// as root or write to its root filesystem says so.
+//
+// An init container that fails keeps the pod from ever starting Memgraph, and
+// so from ever being registered. A change to this block is a pod-template
+// change the rolling restart carries.
+type InitContainersSpec struct {
+	// coordinators are run by every coordinator pod before Memgraph.
+	// +kubebuilder:validation:Schemaless
+	// +kubebuilder:pruning:PreserveUnknownFields
+	// +optional
+	Coordinators []corev1.Container `json:"coordinators,omitempty"`
+
+	// data are run by every data instance pod before Memgraph.
+	// +kubebuilder:validation:Schemaless
+	// +kubebuilder:pruning:PreserveUnknownFields
+	// +optional
+	Data []corev1.Container `json:"data,omitempty"`
+}
+
 // ExtraArgsSpec passes additional Memgraph flags to a role, so any flag is
 // usable without waiting for a typed field. The flags are appended after the
 // ones the operator derives, and Memgraph takes the last occurrence of a
@@ -1603,6 +1643,11 @@ type MemgraphClusterSpec struct {
 	// the Memgraph container.
 	// +optional
 	UserContainers UserContainersSpec `json:"userContainers,omitzero"`
+
+	// initContainers adds init containers of your own to both roles' pods,
+	// run after the operator's own and before Memgraph.
+	// +optional
+	InitContainers InitContainersSpec `json:"initContainers,omitzero"`
 
 	// externalAccess exposes the cluster outside Kubernetes and registers the
 	// exposed instances with the addresses clients reach them at. Absent, the
