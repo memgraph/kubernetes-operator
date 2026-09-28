@@ -53,20 +53,11 @@ func defaultRoleStorage() memgraphcomv1alpha1.RoleStorageSpec {
 	}
 }
 
-// defaultRoleCoreDumps is one role's core dumps block as the CRD schema
-// defaults materialize it: off, but with the size it would ask for.
-func defaultRoleCoreDumps() memgraphcomv1alpha1.RoleCoreDumpsSpec {
-	return memgraphcomv1alpha1.RoleCoreDumpsSpec{
-		Size: ptr.To(resource.MustParse(memgraphcomv1alpha1.DefaultCoreDumpsSize)),
-	}
-}
-
 // defaultCoreDumps is the whole core dumps block as the CRD schema defaults
-// materialize it.
+// materialize it: the role blocks are presence-based and stay absent, so only
+// the cluster-wide toggle is filled in.
 func defaultCoreDumps() memgraphcomv1alpha1.CoreDumpsSpec {
 	return memgraphcomv1alpha1.CoreDumpsSpec{
-		Coordinators:         defaultRoleCoreDumps(),
-		Data:                 defaultRoleCoreDumps(),
 		ConfigureCorePattern: ptr.To(memgraphcomv1alpha1.DefaultConfigureCorePattern),
 	}
 }
@@ -319,12 +310,26 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 			}, "topologyKey")
 		})
 
+		// The sysctl block is presence-based: an empty spec must not grow it, and
+		// an empty block must be filled with the floor Memgraph checks for.
+		It("should leave the sysctl init container block absent and default its floor when present", func() {
+			absent := createAccepted("no-sysctl", memgraphcomv1alpha1.MemgraphClusterSpec{})
+			Expect(absent.Spec.SysctlInitContainer).To(BeNil(),
+				"the block is presence-based: no schema default may conjure it")
+
+			present := createAccepted("empty-sysctl", memgraphcomv1alpha1.MemgraphClusterSpec{
+				SysctlInitContainer: &memgraphcomv1alpha1.SysctlInitContainerSpec{},
+			})
+			Expect(present.Spec.SysctlInitContainer).To(HaveValue(Equal(memgraphcomv1alpha1.SysctlInitContainerSpec{
+				MaxMapCount: memgraphcomv1alpha1.DefaultMaxMapCount,
+			})))
+		})
+
 		It("should accept core dumps with an uploader and default what it leaves out", func() {
 			stored := createAccepted("valid-core-dumps-uploader", memgraphcomv1alpha1.MemgraphClusterSpec{
 				CoreDumps: memgraphcomv1alpha1.CoreDumpsSpec{
-					Data: memgraphcomv1alpha1.RoleCoreDumpsSpec{
-						Enabled: true,
-						Size:    ptr.To(resource.MustParse("200Gi")),
+					Data: &memgraphcomv1alpha1.RoleCoreDumpsSpec{
+						Size: ptr.To(resource.MustParse("200Gi")),
 					},
 					Uploader: &memgraphcomv1alpha1.CoreDumpsUploaderSpec{
 						Image:          uploaderImage,
@@ -335,13 +340,21 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 			})
 
 			dumps := stored.Spec.CoreDumps
-			Expect(dumps.Data.Enabled).To(BeTrue())
-			Expect(dumps.Data.Size).To(HaveValue(Equal(resource.MustParse("200Gi"))))
+			Expect(dumps.Data).To(HaveValue(Equal(memgraphcomv1alpha1.RoleCoreDumpsSpec{
+				Size: ptr.To(resource.MustParse("200Gi")),
+			})))
 			Expect(dumps.ConfigureCorePattern).To(HaveValue(BeTrue()))
 			Expect(dumps.Uploader.PullPolicy).To(Equal(memgraphcomv1alpha1.DefaultImagePullPolicy))
-			// Whether a role collects at all, and how much room it needs, stays
-			// its own decision: the coordinators asked for neither.
-			Expect(dumps.Coordinators).To(Equal(defaultRoleCoreDumps()))
+			// Whether a role collects at all is its block being present: the
+			// coordinators wrote none, and no schema default may conjure one.
+			Expect(dumps.Coordinators).To(BeNil())
+
+			empty := createAccepted("valid-core-dumps-empty-block", memgraphcomv1alpha1.MemgraphClusterSpec{
+				CoreDumps: memgraphcomv1alpha1.CoreDumpsSpec{Coordinators: &memgraphcomv1alpha1.RoleCoreDumpsSpec{}},
+			})
+			Expect(empty.Spec.CoreDumps.Coordinators).To(HaveValue(Equal(memgraphcomv1alpha1.RoleCoreDumpsSpec{
+				Size: ptr.To(resource.MustParse(memgraphcomv1alpha1.DefaultCoreDumpsSize)),
+			})), "an empty role block must be filled with the default size")
 		})
 
 		// The extraVolumes entries are schemaless, so nothing but this spec
@@ -450,6 +463,11 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 					},
 				},
 				"licenseKey and organizationKey must name different keys of the Secret"),
+			Entry("a zero vm.max_map_count floor", "invalid-max-map-count-zero",
+				memgraphcomv1alpha1.MemgraphClusterSpec{
+					SysctlInitContainer: &memgraphcomv1alpha1.SysctlInitContainerSpec{MaxMapCount: -1},
+				},
+				"should be greater than or equal to 1"),
 			Entry("a retention policy outside the enum", "invalid-retention-policy",
 				memgraphcomv1alpha1.MemgraphClusterSpec{
 					Storage: memgraphcomv1alpha1.StorageSpec{RetentionPolicy: "Purge"},
@@ -490,11 +508,11 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 						Uploader: &memgraphcomv1alpha1.CoreDumpsUploaderSpec{Image: uploaderImage},
 					},
 				},
-				"uploader requires core dumps enabled for at least one role"),
+				"uploader requires core dumps for at least one role"),
 			Entry("an uploader without an image", "invalid-uploader-no-image",
 				memgraphcomv1alpha1.MemgraphClusterSpec{
 					CoreDumps: memgraphcomv1alpha1.CoreDumpsSpec{
-						Data:     memgraphcomv1alpha1.RoleCoreDumpsSpec{Enabled: true},
+						Data:     &memgraphcomv1alpha1.RoleCoreDumpsSpec{},
 						Uploader: &memgraphcomv1alpha1.CoreDumpsUploaderSpec{},
 					},
 				},
@@ -502,7 +520,7 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 			Entry("an uploader shadowing the core dumps path variable", "invalid-uploader-env",
 				memgraphcomv1alpha1.MemgraphClusterSpec{
 					CoreDumps: memgraphcomv1alpha1.CoreDumpsSpec{
-						Coordinators: memgraphcomv1alpha1.RoleCoreDumpsSpec{Enabled: true},
+						Coordinators: &memgraphcomv1alpha1.RoleCoreDumpsSpec{},
 						Uploader: &memgraphcomv1alpha1.CoreDumpsUploaderSpec{
 							Image: uploaderImage,
 							Env: []memgraphcomv1alpha1.EnvVar{{
@@ -896,46 +914,50 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 			})).To(Succeed())
 		})
 
-		// Whether a role collects core dumps decides its StatefulSet's volume
-		// claim templates, which Kubernetes forbids changing in place, so the
-		// flip is refused at admission with the procedure that works instead of
-		// being accepted and rejected forever by the apply.
-		DescribeTable("should reject switching a role's core dumps on or off",
-			func(name string, enabledAtCreation bool, mutate func(*memgraphcomv1alpha1.MemgraphCluster)) {
+		// Whether a role collects core dumps — its block being present — decides
+		// its StatefulSet's volume claim templates, which Kubernetes forbids
+		// changing in place, so adding or removing the block is refused at
+		// admission with the procedure that works instead of being accepted and
+		// rejected forever by the apply. The rule has to sit on coreDumps: one on
+		// the role block would never fire for the block appearing or vanishing.
+		DescribeTable("should reject adding or removing a role's core dumps block",
+			func(name string, presentAtCreation bool, mutate func(*memgraphcomv1alpha1.MemgraphCluster)) {
+				var role *memgraphcomv1alpha1.RoleCoreDumpsSpec
+				if presentAtCreation {
+					role = &memgraphcomv1alpha1.RoleCoreDumpsSpec{}
+				}
 				createAccepted(name, memgraphcomv1alpha1.MemgraphClusterSpec{
-					CoreDumps: memgraphcomv1alpha1.CoreDumpsSpec{
-						Coordinators: memgraphcomv1alpha1.RoleCoreDumpsSpec{Enabled: enabledAtCreation},
-						Data:         memgraphcomv1alpha1.RoleCoreDumpsSpec{Enabled: enabledAtCreation},
-					},
+					CoreDumps: memgraphcomv1alpha1.CoreDumpsSpec{Coordinators: role, Data: role},
 				})
 
-				expectRejectedUpdate(name, mutate, "coreDumps enabled cannot be changed on a live cluster")
+				expectRejectedUpdate(name, mutate, "cannot be added or removed on a live cluster")
 			},
-			Entry("enabling coordinator dumps", "core-dumps-on-coordinators", false,
-				func(c *memgraphcomv1alpha1.MemgraphCluster) { c.Spec.CoreDumps.Coordinators.Enabled = true }),
-			Entry("enabling data instance dumps", "core-dumps-on-data", false,
-				func(c *memgraphcomv1alpha1.MemgraphCluster) { c.Spec.CoreDumps.Data.Enabled = true }),
-			Entry("disabling coordinator dumps", "core-dumps-off-coordinators", true,
-				func(c *memgraphcomv1alpha1.MemgraphCluster) { c.Spec.CoreDumps.Coordinators.Enabled = false }),
-			Entry("disabling data instance dumps", "core-dumps-off-data", true,
-				func(c *memgraphcomv1alpha1.MemgraphCluster) { c.Spec.CoreDumps.Data.Enabled = false }),
+			Entry("adding coordinator dumps", "core-dumps-on-coordinators", false,
+				func(c *memgraphcomv1alpha1.MemgraphCluster) {
+					c.Spec.CoreDumps.Coordinators = &memgraphcomv1alpha1.RoleCoreDumpsSpec{}
+				}),
+			Entry("adding data instance dumps", "core-dumps-on-data", false,
+				func(c *memgraphcomv1alpha1.MemgraphCluster) {
+					c.Spec.CoreDumps.Data = &memgraphcomv1alpha1.RoleCoreDumpsSpec{}
+				}),
+			Entry("removing coordinator dumps", "core-dumps-off-coordinators", true,
+				func(c *memgraphcomv1alpha1.MemgraphCluster) { c.Spec.CoreDumps.Coordinators = nil }),
+			Entry("removing data instance dumps", "core-dumps-off-data", true,
+				func(c *memgraphcomv1alpha1.MemgraphCluster) { c.Spec.CoreDumps.Data = nil }),
 		)
 
-		// The rule pins the switch, nothing around it: the rest of the block
-		// stays editable, and an update that does not touch core dumps at all
-		// must not trip over the defaulted empty block.
+		// The rules pin the blocks and what backs their claims, nothing around
+		// them: the rest stays editable, and an update that does not touch core
+		// dumps at all must not trip over the defaulted empty block.
 		It("should accept an update that leaves core dumps as they are", func() {
 			createAccepted("core-dumps-unchanged", memgraphcomv1alpha1.MemgraphClusterSpec{
 				CoreDumps: memgraphcomv1alpha1.CoreDumpsSpec{
-					Data: memgraphcomv1alpha1.RoleCoreDumpsSpec{Enabled: true},
+					Data: &memgraphcomv1alpha1.RoleCoreDumpsSpec{},
 				},
 			})
 
 			Expect(update("core-dumps-unchanged", func(c *memgraphcomv1alpha1.MemgraphCluster) {
 				c.Spec.Image.Tag = customImageTag
-				// The coordinators collect no dumps, so their size backs no claim
-				// and stays free to change.
-				c.Spec.CoreDumps.Coordinators.Size = ptr.To(resource.MustParse("20Gi"))
 				c.Spec.CoreDumps.ConfigureCorePattern = ptr.To(false)
 			})).To(Succeed())
 		})
@@ -996,14 +1018,14 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 				}, "logPVCSize cannot be changed on a live cluster while the log claim exists"),
 			Entry("the core dumps size while the role collects dumps", "claims-core-dumps-size",
 				memgraphcomv1alpha1.MemgraphClusterSpec{CoreDumps: memgraphcomv1alpha1.CoreDumpsSpec{
-					Data: memgraphcomv1alpha1.RoleCoreDumpsSpec{Enabled: true},
+					Data: &memgraphcomv1alpha1.RoleCoreDumpsSpec{},
 				}},
 				func(c *memgraphcomv1alpha1.MemgraphCluster) {
 					c.Spec.CoreDumps.Data.Size = ptr.To(resource.MustParse("20Gi"))
 				}, "coreDumps size cannot be changed on a live cluster while the role collects dumps"),
 			Entry("the core dumps storage class while a role collects dumps", "claims-core-dumps-class",
 				memgraphcomv1alpha1.MemgraphClusterSpec{CoreDumps: memgraphcomv1alpha1.CoreDumpsSpec{
-					Coordinators: memgraphcomv1alpha1.RoleCoreDumpsSpec{Enabled: true},
+					Coordinators: &memgraphcomv1alpha1.RoleCoreDumpsSpec{},
 				}},
 				func(c *memgraphcomv1alpha1.MemgraphCluster) {
 					c.Spec.CoreDumps.StorageClassName = ptr.To(customStorageClassName)
@@ -1033,10 +1055,11 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 					c.Spec.Storage.Data.LogStorageClassName = ptr.To(customStorageClassName)
 					c.Spec.Storage.Data.LogStorageAccessMode = corev1.ReadWriteMany
 				}),
-			Entry("the core dumps size and class while no role collects dumps", "claims-core-dumps-disabled",
+			// A role without a block has no size to edit, so the class is the one
+			// core dumps knob that backs no claim here.
+			Entry("the core dumps storage class while no role collects dumps", "claims-core-dumps-disabled",
 				memgraphcomv1alpha1.MemgraphClusterSpec{},
 				func(c *memgraphcomv1alpha1.MemgraphCluster) {
-					c.Spec.CoreDumps.Data.Size = ptr.To(resource.MustParse("20Gi"))
 					c.Spec.CoreDumps.StorageClassName = ptr.To(customStorageClassName)
 				}),
 			Entry("the retention policy, which is no claim template field", "claims-retention",

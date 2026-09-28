@@ -97,8 +97,8 @@ spec:
               coreDumps:
                 default: {}
                 description: |-
-                  coreDumps optionally collects crash dumps of either role onto a volume of
-                  its own.
+                  coreDumps collects crash dumps of the roles whose blocks are present onto
+                  a volume of their own.
                 properties:
                   configureCorePattern:
                     default: true
@@ -117,24 +117,14 @@ spec:
                       and mounts the volumes, trusting the node to already point at them.
                     type: boolean
                   coordinators:
-                    default: {}
                     description: |-
-                      coordinators decides whether every coordinator pod collects dumps, and
-                      how much room it gets for them.
+                      coordinators, when present, makes every coordinator pod collect dumps
+                      onto a volume of the size it names. It is a create-time choice: once the
+                      cluster exists the block cannot be added or removed, and an edit that
+                      tries is rejected at admission with the procedure that works — delete the
+                      MemgraphCluster, whose claims the default Retain policy keeps, and
+                      recreate it.
                     properties:
-                      enabled:
-                        default: false
-                        description: |-
-                          enabled provisions a core dumps volume for every pod of the role and
-                          mounts it at /var/core/memgraph. It is off by default: a crashing Memgraph
-                          is not the normal case, and the volume costs a third
-                          PersistentVolumeClaim per pod.
-
-                          It is a create-time choice: once the cluster exists it cannot be switched
-                          on or off, and an edit that tries is rejected at admission with the
-                          procedure that works — delete the MemgraphCluster, whose claims the
-                          default Retain policy keeps, and recreate it.
-                        type: boolean
                       size:
                         anyOf:
                         - type: integer
@@ -149,41 +139,21 @@ spec:
                         x-kubernetes-int-or-string: true
                     type: object
                     x-kubernetes-validations:
-                    - message: 'coreDumps enabled cannot be changed on a live cluster:
-                        the core dumps volume is a StatefulSet volumeClaimTemplate,
-                        which Kubernetes forbids adding or removing in place. Delete
-                        the MemgraphCluster (its claims are retained under the default
-                        retention policy) and recreate it with the new setting'
-                      rule: (has(self.enabled) && self.enabled) == (has(oldSelf.enabled)
-                        && oldSelf.enabled)
                     - message: 'coreDumps size cannot be changed on a live cluster
                         while the role collects dumps: it is part of a StatefulSet
                         volumeClaimTemplate, which Kubernetes forbids changing in
                         place. Delete the MemgraphCluster (its claims are retained
                         under the default retention policy) and recreate it with the
                         new value'
-                      rule: '!(has(self.enabled) && self.enabled) || (has(self.size)
-                        == has(oldSelf.size) && (!has(self.size) || quantity(string(self.size)).compareTo(quantity(string(oldSelf.size)))
-                        == 0))'
+                      rule: has(self.size) == has(oldSelf.size) && (!has(self.size)
+                        || quantity(string(self.size)).compareTo(quantity(string(oldSelf.size)))
+                        == 0)
                   data:
-                    default: {}
                     description: |-
-                      data decides whether every data instance pod collects dumps, and how much
-                      room it gets for them.
+                      data, when present, makes every data instance pod collect dumps onto a
+                      volume of the size it names. Like coordinators it is a create-time
+                      choice.
                     properties:
-                      enabled:
-                        default: false
-                        description: |-
-                          enabled provisions a core dumps volume for every pod of the role and
-                          mounts it at /var/core/memgraph. It is off by default: a crashing Memgraph
-                          is not the normal case, and the volume costs a third
-                          PersistentVolumeClaim per pod.
-
-                          It is a create-time choice: once the cluster exists it cannot be switched
-                          on or off, and an edit that tries is rejected at admission with the
-                          procedure that works — delete the MemgraphCluster, whose claims the
-                          default Retain policy keeps, and recreate it.
-                        type: boolean
                       size:
                         anyOf:
                         - type: integer
@@ -198,22 +168,15 @@ spec:
                         x-kubernetes-int-or-string: true
                     type: object
                     x-kubernetes-validations:
-                    - message: 'coreDumps enabled cannot be changed on a live cluster:
-                        the core dumps volume is a StatefulSet volumeClaimTemplate,
-                        which Kubernetes forbids adding or removing in place. Delete
-                        the MemgraphCluster (its claims are retained under the default
-                        retention policy) and recreate it with the new setting'
-                      rule: (has(self.enabled) && self.enabled) == (has(oldSelf.enabled)
-                        && oldSelf.enabled)
                     - message: 'coreDumps size cannot be changed on a live cluster
                         while the role collects dumps: it is part of a StatefulSet
                         volumeClaimTemplate, which Kubernetes forbids changing in
                         place. Delete the MemgraphCluster (its claims are retained
                         under the default retention policy) and recreate it with the
                         new value'
-                      rule: '!(has(self.enabled) && self.enabled) || (has(self.size)
-                        == has(oldSelf.size) && (!has(self.size) || quantity(string(self.size)).compareTo(quantity(string(oldSelf.size)))
-                        == 0))'
+                      rule: has(self.size) == has(oldSelf.size) && (!has(self.size)
+                        || quantity(string(self.size)).compareTo(quantity(string(oldSelf.size)))
+                        == 0)
                   storageClassName:
                     description: |-
                       storageClassName is the StorageClass backing every core dumps claim of
@@ -373,20 +336,29 @@ spec:
                       rule: '!has(self.env) || self.env.all(e, e.name != ''CORE_DUMPS_DIR'')'
                 type: object
                 x-kubernetes-validations:
-                - message: uploader requires core dumps enabled for at least one role
-                    — there would be no volume for it to read
-                  rule: '!has(self.uploader) || (has(self.coordinators) && has(self.coordinators.enabled)
-                    && self.coordinators.enabled) || (has(self.data) && has(self.data.enabled)
-                    && self.data.enabled)'
+                - message: 'coreDumps.coordinators cannot be added or removed on a
+                    live cluster: the core dumps volume is a StatefulSet volumeClaimTemplate,
+                    which Kubernetes forbids adding or removing in place. Delete the
+                    MemgraphCluster (its claims are retained under the default retention
+                    policy) and recreate it with the new setting'
+                  rule: has(self.coordinators) == has(oldSelf.coordinators)
+                - message: 'coreDumps.data cannot be added or removed on a live cluster:
+                    the core dumps volume is a StatefulSet volumeClaimTemplate, which
+                    Kubernetes forbids adding or removing in place. Delete the MemgraphCluster
+                    (its claims are retained under the default retention policy) and
+                    recreate it with the new setting'
+                  rule: has(self.data) == has(oldSelf.data)
+                - message: uploader requires core dumps for at least one role — there
+                    would be no volume for it to read
+                  rule: '!has(self.uploader) || has(self.coordinators) || has(self.data)'
                 - message: 'coreDumps storageClassName cannot be changed on a live
                     cluster while a role collects dumps: it is part of a StatefulSet
                     volumeClaimTemplate, which Kubernetes forbids changing in place.
                     Delete the MemgraphCluster (its claims are retained under the
                     default retention policy) and recreate it with the new value'
-                  rule: '!((has(self.coordinators) && has(self.coordinators.enabled)
-                    && self.coordinators.enabled) || (has(self.data) && has(self.data.enabled)
-                    && self.data.enabled)) || (has(self.storageClassName) == has(oldSelf.storageClassName)
-                    && (!has(self.storageClassName) || self.storageClassName == oldSelf.storageClassName))'
+                  rule: '!(has(self.coordinators) || has(self.data)) || (has(self.storageClassName)
+                    == has(oldSelf.storageClassName) && (!has(self.storageClassName)
+                    || self.storageClassName == oldSelf.storageClassName))'
               dataInstances:
                 default: 2
                 description: |-
@@ -2717,6 +2689,28 @@ spec:
                     - Retain
                     - Delete
                     type: string
+                type: object
+              sysctlInitContainer:
+                description: |-
+                  sysctlInitContainer raises the node's vm.max_map_count from a privileged
+                  init container in every pod, as the memgraph-high-availability Helm
+                  chart does. Absent, no such container runs and Memgraph warns at startup
+                  if the node's value is below what it needs; leave it out where privileged
+                  containers are not allowed.
+                properties:
+                  maxMapCount:
+                    default: 524288
+                    description: |-
+                      maxMapCount is the vm.max_map_count the node is raised to. It is a floor:
+                      a node already at or above it is left alone, so the operator never lowers
+                      a value an administrator set higher for something else on the node. The
+                      default is the value Memgraph itself checks for and the one its docs
+                      recommend for up to 64 GB of RAM; larger nodes want about one map area
+                      per 128 KB of memory, see
+                      https://memgraph.com/docs/database-management/system-configuration.
+                    format: int64
+                    minimum: 1
+                    type: integer
                 type: object
               tls:
                 description: |-

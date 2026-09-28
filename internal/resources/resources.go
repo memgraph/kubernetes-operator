@@ -139,6 +139,9 @@ type normalizedSpec struct {
 	// podAntiAffinity is the operator's own anti-affinity rule with its knobs
 	// resolved, and nil for a cluster that asked for none.
 	podAntiAffinity *normalizedPodAntiAffinity
+	// maxMapCount is the vm.max_map_count floor the sysctl init container
+	// raises every node to, and zero for a cluster that asked for none.
+	maxMapCount int64
 }
 
 // normalizedPodAntiAffinity is the scheduling.podAntiAffinity block with every
@@ -211,9 +214,9 @@ type normalizedRole struct {
 }
 
 // normalizedCoreDumps is one role's core dump configuration with every optional
-// field resolved to its CRD schema default. Everything hangs off enabled: with
-// it false the rest is unused, and no claim, mount, init container or sidecar
-// reaches the role's pods.
+// field resolved to its CRD schema default. Everything hangs off enabled, which
+// is the role's block being present: without it the rest is unused, and no
+// claim, mount, init container or sidecar reaches the role's pods.
 type normalizedCoreDumps struct {
 	enabled          bool
 	size             resource.Quantity
@@ -258,6 +261,7 @@ func normalize(spec memgraphcomv1alpha1.MemgraphClusterSpec) normalizedSpec {
 		clusterDomain:   spec.ClusterDomain,
 		retentionPolicy: spec.Storage.RetentionPolicy,
 		readinessProbe:  normalizeProbe(spec.ReadinessProbe),
+		maxMapCount:     normalizeMaxMapCount(spec.SysctlInitContainer),
 		coordinatorRole: normalizeRole(roleSpec{
 			storage:      spec.Storage.Coordinators,
 			coreDumps:    normalizeCoreDumps(spec.CoreDumps, spec.CoreDumps.Coordinators),
@@ -465,22 +469,36 @@ func normalizeStorage(spec memgraphcomv1alpha1.RoleStorageSpec) normalizedStorag
 	return n
 }
 
+// normalizeMaxMapCount resolves the sysctl init container block to the one
+// number the builder needs: the floor to raise vm.max_map_count to, or zero
+// for a cluster without the block.
+func normalizeMaxMapCount(spec *memgraphcomv1alpha1.SysctlInitContainerSpec) int64 {
+	if spec == nil {
+		return 0
+	}
+	if spec.MaxMapCount > 0 {
+		return spec.MaxMapCount
+	}
+	return memgraphcomv1alpha1.DefaultMaxMapCount
+}
+
 // normalizeCoreDumps folds the cluster-wide core dump settings together with
-// the role's own into the single view the builders work from. Nothing is
-// resolved eagerly for a disabled role beyond its defaults: the builders check
-// enabled before reading the rest.
+// the role's own into the single view the builders work from. A role collects
+// dumps when its block is present; nothing is resolved eagerly for a role
+// without one beyond its defaults, and the builders check enabled before
+// reading the rest.
 func normalizeCoreDumps(
 	shared memgraphcomv1alpha1.CoreDumpsSpec,
-	role memgraphcomv1alpha1.RoleCoreDumpsSpec,
+	role *memgraphcomv1alpha1.RoleCoreDumpsSpec,
 ) normalizedCoreDumps {
 	n := normalizedCoreDumps{
-		enabled:          role.Enabled,
+		enabled:          role != nil,
 		size:             resource.MustParse(memgraphcomv1alpha1.DefaultCoreDumpsSize),
 		class:            shared.StorageClassName,
 		configurePattern: memgraphcomv1alpha1.DefaultConfigureCorePattern,
 		uploader:         shared.Uploader,
 	}
-	if role.Size != nil {
+	if role != nil && role.Size != nil {
 		n.size = *role.Size
 	}
 	if shared.ConfigureCorePattern != nil {

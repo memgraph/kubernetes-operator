@@ -30,3 +30,10 @@ spec:
     name: memgraph-secrets
     licenseKey: MEMGRAPH_ENTERPRISE_LICENSE
     organizationKey: MEMGRAPH_ORGANIZATION_NAME
+  # Memgraph wants the node's vm.max_map_count at 524288 or more and warns at
+  # startup below that. The operator raises it from a privileged init container
+  # when this block is present — the HA chart's sysctlInitContainer — which is
+  # left out here because the e2e suite proves this file under the restricted
+  # Pod Security Standard, where no privileged container may run. On a cluster
+  # that allows one, uncomment it:
+  # sysctlInitContainer: {}
