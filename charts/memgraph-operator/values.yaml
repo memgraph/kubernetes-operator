@@ -68,7 +68,11 @@ priorityClassName: ""
 terminationGracePeriodSeconds: 10
 
 # The operator image is distroless and runs as uid/gid 65532, which satisfies
-# the restricted Pod Security Standard. Overriding these is unsupported.
+# the restricted Pod Security Standard. The one supported change is for a
+# platform that assigns the identity itself: OpenShift's restricted-v2 SCC
+# rejects a pod naming a uid outside the namespace's range, so there drop
+# runAsUser and runAsGroup (--set podSecurityContext.runAsUser=null
+# --set podSecurityContext.runAsGroup=null) and keep the rest.
 podSecurityContext:
   runAsNonRoot: true
   runAsUser: 65532

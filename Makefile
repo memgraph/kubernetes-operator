@@ -239,6 +239,8 @@ helm-lint: ## Lint the install chart and render it with defaults and with the to
 	"$(HELM)" template "$(CHART_RELEASE)" "$(CHART_DIR)" --namespace "$(CHART_NAMESPACE)" \
 		--set metrics.enabled=false --set leaderElection.enabled=false \
 		--set-string namespaceOverride=elsewhere --set-string image.tag=v9.9.9 > /dev/null
+	"$(HELM)" template "$(CHART_RELEASE)" "$(CHART_DIR)" --namespace "$(CHART_NAMESPACE)" \
+		--set podSecurityContext.runAsUser=null --set podSecurityContext.runAsGroup=null > /dev/null
 
 .PHONY: test-chart
 test-chart: chart-sync ## Install/uninstall the chart on a throwaway Kind cluster; never run against a real cluster.

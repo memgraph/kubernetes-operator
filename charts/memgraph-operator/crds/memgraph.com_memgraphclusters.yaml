@@ -786,6 +786,13 @@ spec:
                     description: data are added to every data instance pod.
                     x-kubernetes-preserve-unknown-fields: true
                 type: object
+              fixOwnershipInitContainer:
+                description: |-
+                  fixOwnershipInitContainer chowns every pod's volume mount points to the
+                  memgraph user from a root init container before Memgraph starts, as the
+                  memgraph-high-availability Helm chart does, for storage drivers that do
+                  not honor the pod's fsGroup. Absent, no such container runs.
+                type: object
               image:
                 default: {}
                 description: image selects the Memgraph container image run by all
@@ -2385,6 +2392,38 @@ spec:
                     of the Secret
                   rule: '!has(self.licenseKey) || !has(self.organizationKey) || self.licenseKey
                     != self.organizationKey'
+              securityContext:
+                description: |-
+                  securityContext is the uid, gid and fsGroup every pod of both roles runs
+                  under. Absent, the operator writes the Memgraph images' 101, 103 and 103;
+                  present, exactly the fields written and no other, so an empty block
+                  leaves all three to the platform, which is what OpenShift's restricted-v2
+                  SCC requires.
+                properties:
+                  fsGroup:
+                    description: |-
+                      fsGroup is the group the pod's volumes are made owned by and writable
+                      to. Absent, the pod names none, and a driver that honors fsGroup does
+                      nothing to the volume's ownership.
+                    format: int64
+                    minimum: 0
+                    type: integer
+                  runAsGroup:
+                    description: |-
+                      runAsGroup is the primary gid every container of the pod runs as.
+                      Absent, the pod names none.
+                    format: int64
+                    minimum: 0
+                    type: integer
+                  runAsUser:
+                    description: |-
+                      runAsUser is the uid every container of the pod runs as. Absent, the
+                      pod names none and the image's user (or the platform's assignment)
+                      decides.
+                    format: int64
+                    minimum: 0
+                    type: integer
+                type: object
               storage:
                 default: {}
                 description: |-
@@ -2788,6 +2827,13 @@ spec:
                 the new setting'
               rule: (has(self.tls) && has(self.tls.intraCluster)) == (has(oldSelf.tls)
                 && has(oldSelf.tls.intraCluster))
+            - message: 'fixOwnershipInitContainer needs securityContext to name runAsUser
+                and one of runAsGroup or fsGroup: the container can only chown the
+                volumes to an identity the cluster names, not to one the platform
+                assigns at admission'
+              rule: '!has(self.fixOwnershipInitContainer) || !has(self.securityContext)
+                || (has(self.securityContext.runAsUser) && (has(self.securityContext.runAsGroup)
+                || has(self.securityContext.fsGroup)))'
           status:
             description: status defines the observed state of MemgraphCluster
             properties:

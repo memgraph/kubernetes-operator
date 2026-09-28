@@ -642,6 +642,85 @@ type SysctlInitContainerSpec struct {
 	MaxMapCount int64 `json:"maxMapCount,omitempty"`
 }
 
+// PodSecurityContextSpec is the identity every pod of both roles runs under:
+// the three fields of a core/v1 PodSecurityContext that decide who owns the
+// process and the volumes. It is the memgraph-high-availability Helm chart's
+// memgraphUserId and memgraphGroupId, reshaped so that a platform assigning
+// the identity itself can be told to.
+//
+// The block is presence-based, and presence means the user owns these three
+// fields. Absent, the operator writes the identity baked into the Memgraph
+// images: uid 101, gid 103 and fsGroup 103, which is what makes a claim
+// writable to the non-root process on a driver that honors fsGroup. Present,
+// exactly the fields written land on the pod and no other: an empty block
+// writes none of the three, which is what OpenShift's restricted-v2 SCC
+// wants, since it assigns runAsUser and fsGroup from the namespace's range at
+// admission and rejects a pod naming values outside it. Naming values covers
+// a uid inside that range or a service account granted anyuid. Memgraph
+// itself needs no particular uid: its one check is that the process owns the
+// data directory, which it creates.
+//
+// runAsNonRoot and the seccomp profile are not here and stay set: every Pod
+// Security Standard and SCC the operator targets requires both.
+//
+// Changing runAsUser on a cluster that already has data makes the next roll
+// fail Memgraph's ownership check, because the data directory still belongs
+// to the old uid; fixOwnershipInitContainer is what moves it. The field is
+// deliberately not pinned, so that move stays possible.
+type PodSecurityContextSpec struct {
+	// runAsUser is the uid every container of the pod runs as. Absent, the
+	// pod names none and the image's user (or the platform's assignment)
+	// decides.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	RunAsUser *int64 `json:"runAsUser,omitempty"`
+
+	// runAsGroup is the primary gid every container of the pod runs as.
+	// Absent, the pod names none.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	RunAsGroup *int64 `json:"runAsGroup,omitempty"`
+
+	// fsGroup is the group the pod's volumes are made owned by and writable
+	// to. Absent, the pod names none, and a driver that honors fsGroup does
+	// nothing to the volume's ownership.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	FSGroup *int64 `json:"fsGroup,omitempty"`
+}
+
+// FixOwnershipInitContainerSpec is the memgraph-high-availability Helm chart's
+// fixOwnershipInitContainer block: an init container, run as root after the
+// node-tuning ones in every pod of both roles, that chowns the pod's volume
+// mount points to the memgraph user before Memgraph starts. Every pod sets
+// fsGroup to the memgraph group, which is how a volume normally arrives
+// writable, but some storage drivers (rancher.io/local-path among them) do
+// not honor it and hand over a volume root owned by root:root. Memgraph runs
+// as the non-root memgraph user and cannot create its data directory or its
+// log file there; and a data directory that does exist but is owned by
+// another user fails its startup check, "The process is running as user
+// memgraph, but '...' is owned by user ...". The container chowns the lib
+// mount, the log mount when the role has a log claim, and the core dumps
+// mount when the role collects dumps, recursively, to the uid and gid the
+// pods run as: the images' 101:103 unless securityContext names others, in
+// which case runAsUser and runAsGroup (or fsGroup when no runAsGroup is
+// named) are the target. That is where the chart's memgraphUserId and
+// memgraphGroupId live; the block itself has no knobs.
+//
+// The block is presence-based like every other optional block of the
+// resource, so there is no enabled knob and it has no fields: present, the
+// container runs; absent, which matches the chart's default, the pods trust
+// fsGroup. The chart's image knobs are dropped as they are for the sysctl
+// container: this runs the cluster's own Memgraph image, already on the
+// node. It is root but not privileged, holding only CAP_CHOWN, so a
+// namespace enforcing the baseline Pod Security Standard admits it while
+// one enforcing "restricted" does not (that forbids running as root); there
+// the driver has to honor fsGroup. The same goes for a platform that assigns
+// the pod's identity at admission, such as OpenShift under restricted-v2:
+// the container can only chown to a uid the cluster names, so it is rejected
+// beside a securityContext block that leaves runAsUser out.
+type FixOwnershipInitContainerSpec struct{}
+
 // ReadinessProbeSpec tunes the timings of the one probe every pod of the
 // cluster carries, its readiness probe. The probe type itself is not
 // configurable: it is a TCP-socket check against the role's own port (the
@@ -1404,6 +1483,7 @@ type TLSSpec struct {
 //
 // +kubebuilder:validation:XValidation:rule="!has(self.externalAccess) || !has(self.externalAccess.gateway) || !has(self.externalAccess.gateway.dataPortBase) || !has(self.dataInstances) || self.externalAccess.gateway.dataPortBase + self.dataInstances <= 65536",message="externalAccess.gateway.dataPortBase + dataInstances must not exceed 65536: every data instance listens on dataPortBase + its ordinal"
 // +kubebuilder:validation:XValidation:rule="(has(self.tls) && has(self.tls.intraCluster)) == (has(oldSelf.tls) && has(oldSelf.tls.intraCluster))",message="tls.intraCluster cannot be added or removed on a live cluster: a member with intra-cluster TLS cannot talk to one without it, so restarting pods one at a time would deadlock waiting for replication that can no longer happen. Delete the MemgraphCluster (its claims are retained under the default retention policy) and recreate it with the new setting"
+// +kubebuilder:validation:XValidation:rule="!has(self.fixOwnershipInitContainer) || !has(self.securityContext) || (has(self.securityContext.runAsUser) && (has(self.securityContext.runAsGroup) || has(self.securityContext.fsGroup)))",message="fixOwnershipInitContainer needs securityContext to name runAsUser and one of runAsGroup or fsGroup: the container can only chown the volumes to an identity the cluster names, not to one the platform assigns at admission"
 type MemgraphClusterSpec struct {
 	// coordinators is the number of Raft coordinator instances. It must be odd
 	// so the Raft quorum cannot split, and at least three, which is the
@@ -1455,6 +1535,21 @@ type MemgraphClusterSpec struct {
 	// containers are not allowed.
 	// +optional
 	SysctlInitContainer *SysctlInitContainerSpec `json:"sysctlInitContainer,omitempty"`
+
+	// securityContext is the uid, gid and fsGroup every pod of both roles runs
+	// under. Absent, the operator writes the Memgraph images' 101, 103 and 103;
+	// present, exactly the fields written and no other, so an empty block
+	// leaves all three to the platform, which is what OpenShift's restricted-v2
+	// SCC requires.
+	// +optional
+	SecurityContext *PodSecurityContextSpec `json:"securityContext,omitempty"`
+
+	// fixOwnershipInitContainer chowns every pod's volume mount points to the
+	// memgraph user from a root init container before Memgraph starts, as the
+	// memgraph-high-availability Helm chart does, for storage drivers that do
+	// not honor the pod's fsGroup. Absent, no such container runs.
+	// +optional
+	FixOwnershipInitContainer *FixOwnershipInitContainerSpec `json:"fixOwnershipInitContainer,omitempty"`
 
 	// clusterDomain is the Kubernetes cluster domain the advertised FQDN
 	// addresses are built from: <pod>.<service>.<namespace>.svc.<clusterDomain>.

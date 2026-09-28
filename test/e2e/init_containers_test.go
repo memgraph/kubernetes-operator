@@ -32,16 +32,20 @@ import (
 	"github.com/memgraph/kubernetes-operator/test/utils"
 )
 
-// The two privileged init containers — the sysctl one raising the node's
-// vm.max_map_count and the core pattern one pointing the kernel at the dumps
-// volume — cannot run under the restricted Pod Security Standard every other
+// The three optional init containers — the sysctl one raising the node's
+// vm.max_map_count, the core pattern one pointing the kernel at the dumps
+// volume, both privileged, and the ownership one chowning the volumes as root
+// — cannot run under the restricted Pod Security Standard every other
 // scenario's namespace enforces, which is exactly why the quickstart carries
-// neither. This scenario is the one place they run: a namespace without the
-// label, a cluster asking for both, and the proof read from inside the pods
-// rather than from the operator, because what these containers change is the
-// node. It never waits for registration: both containers have done their work
-// by the time Memgraph is listening.
-var _ = Describe("MemgraphCluster with privileged init containers", Ordered, func() {
+// none. This scenario is the one place they run: a namespace without the
+// label, a cluster asking for all three, and the proof read from inside the
+// pods rather than from the operator, because what these containers change
+// is the node and the volume. Kind's default storage class is
+// rancher.io/local-path, the very driver that ignores fsGroup, so the
+// ownership container has real work to do here. It never waits for
+// registration: every container has done its work by the time Memgraph is
+// listening.
+var _ = Describe("MemgraphCluster with root init containers", Ordered, func() {
 	const initNamespace = "memgraph-e2e-init"
 	const initCluster = "tuned"
 
@@ -76,8 +80,8 @@ var _ = Describe("MemgraphCluster with privileged init containers", Ordered, fun
 		_, _ = utils.Run(cmd)
 	})
 
-	It("raises vm.max_map_count and sets the core pattern before Memgraph starts", func() {
-		By("applying a MemgraphCluster asking for both init containers on the data role")
+	It("raises vm.max_map_count, sets the core pattern and fixes volume ownership before Memgraph starts", func() {
+		By("applying a MemgraphCluster asking for all three init containers on the data role")
 		manifest := fmt.Sprintf(`apiVersion: memgraph.com/v1alpha1
 kind: MemgraphCluster
 metadata:
@@ -93,6 +97,7 @@ spec:
     name: %s
   sysctlInitContainer:
     maxMapCount: %d
+  fixOwnershipInitContainer: {}
   coreDumps:
     data: {}
 `, initCluster, initNamespace, example.Spec.Image.Repository, example.Spec.Image.Tag,
@@ -115,9 +120,9 @@ spec:
 			return "the data pod never became ready; its events:\n" + describePod(initNamespace, dataPod)
 		})
 
-		By("confirming both init containers ran, sysctl first, and exited cleanly")
+		By("confirming all three init containers ran, sysctl first and ownership last, and exited cleanly")
 		Expect(initContainerResults(initNamespace, dataPod)).To(Equal(
-			"init-sysctl=0 init-core-pattern=0"))
+			"init-sysctl=0 init-core-pattern=0 init-fix-perms=0"))
 
 		By("reading vm.max_map_count from inside the Memgraph container")
 		value, err := readInPod(initNamespace, dataPod, "/proc/sys/vm/max_map_count")
@@ -133,10 +138,20 @@ spec:
 		Expect(err).NotTo(HaveOccurred())
 		Expect(pattern).To(Equal("/var/core/memgraph/core.%e.%p.%t.%s"))
 
-		// The sysctl block is cluster-wide and the core dumps one per role: the
-		// coordinators asked for no dumps and get the sysctl container alone.
-		By("confirming the coordinators run only the sysctl container")
-		Expect(initContainerResults(initNamespace, coordinatorPod)).To(Equal("init-sysctl=0"))
+		By("reading the ownership of every mounted volume from inside the Memgraph container")
+		for _, path := range []string{"/var/lib/memgraph", "/var/log/memgraph", "/var/core/memgraph"} {
+			owner, err := execInPod(initNamespace, dataPod, "stat", "-c", "%u:%g", path)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(owner).To(Equal("101:103"),
+				"%s is not owned by the memgraph user; init-fix-perms said:\n%s",
+				path, containerLogs(initNamespace, dataPod, "init-fix-perms"))
+		}
+
+		// The sysctl and ownership blocks are cluster-wide and the core dumps
+		// one per role: the coordinators asked for no dumps and get no core
+		// pattern container.
+		By("confirming the coordinators run the sysctl and ownership containers alone")
+		Expect(initContainerResults(initNamespace, coordinatorPod)).To(Equal("init-sysctl=0 init-fix-perms=0"))
 	})
 })
 
@@ -155,7 +170,14 @@ func initContainerResults(namespace, pod string) string {
 // readInPod returns the trimmed contents of a file as the Memgraph container
 // of a pod sees it.
 func readInPod(namespace, pod, path string) (string, error) {
-	cmd := exec.Command("kubectl", "exec", pod, "-n", namespace, "-c", "memgraph", "--", "cat", path)
+	return execInPod(namespace, pod, "cat", path)
+}
+
+// execInPod runs a command in the Memgraph container of a pod and returns its
+// trimmed output.
+func execInPod(namespace, pod string, command ...string) (string, error) {
+	args := append([]string{"exec", pod, "-n", namespace, "-c", "memgraph", "--"}, command...)
+	cmd := exec.Command("kubectl", args...)
 	output, err := utils.Run(cmd)
 	return strings.TrimSpace(output), err
 }

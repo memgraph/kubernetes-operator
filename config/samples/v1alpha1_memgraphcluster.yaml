@@ -142,6 +142,37 @@ spec:
   # with configureCorePattern above) or on nodes the platform tunes itself.
   sysctlInitContainer:
     maxMapCount: 524288
+  # The identity every pod of both roles runs under, the HA chart's
+  # memgraphUserId and memgraphGroupId. Absent, the operator writes the
+  # Memgraph images' own: runAsUser 101, runAsGroup 103, fsGroup 103. Present,
+  # exactly the fields written land on the pod and no other, so an empty block
+  # names none of the three and leaves them to the platform — what OpenShift's
+  # restricted-v2 SCC requires, since it assigns runAsUser and fsGroup from the
+  # namespace's range at admission and rejects a pod naming values outside it.
+  # Memgraph needs no particular uid, only to own the data directory it
+  # creates. runAsNonRoot and the seccomp profile are not here and stay set.
+  # Changing runAsUser on a cluster with data makes the next roll fail
+  # Memgraph's ownership check until fixOwnershipInitContainer below moves the
+  # volumes over.
+  # securityContext: {}
+  
+  # Every pod sets fsGroup to the memgraph group, which is how a volume normally
+  # arrives writable to the non-root memgraph user. Some storage drivers
+  # (rancher.io/local-path among them) do not honor it and hand over a volume
+  # root owned by root:root, where Memgraph can neither create its data
+  # directory nor its log file, and a data directory owned by another user
+  # fails its startup check. With this block present — the HA chart's
+  # fixOwnershipInitContainer — every pod of both roles runs one more init
+  # container, after the node-tuning ones, that chowns the lib, log and core
+  # dumps mount points to the pod's identity (securityContext above, or the
+  # images' 101:103) before Memgraph starts. It runs as root with CAP_CHOWN
+  # alone on the cluster's own Memgraph image, not privileged, so the baseline
+  # Pod Security Standard admits it and "restricted" does not; and it needs
+  # securityContext to name runAsUser and a group, since it cannot chown to an
+  # identity the platform assigns later. Off when absent, as in the chart; the
+  # block has no fields.
+  # fixOwnershipInitContainer: {}
+  
   # The cluster domain is part of every advertised address the operator
   # registers with the cluster. The internal ports are fixed: Bolt 7687,
   # management 10000, replication 20000, and coordinator 12000.

@@ -325,6 +325,47 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 			})))
 		})
 
+		// The ownership block is presence-based and has no fields: an empty spec
+		// must not grow it, and an empty block must survive the round trip as
+		// present, since presence is the whole signal.
+		It("should leave the ownership init container block absent and keep it when present", func() {
+			absent := createAccepted("no-fix-ownership", memgraphcomv1alpha1.MemgraphClusterSpec{})
+			Expect(absent.Spec.FixOwnershipInitContainer).To(BeNil(),
+				"the block is presence-based: no schema default may conjure it")
+
+			present := createAccepted("empty-fix-ownership", memgraphcomv1alpha1.MemgraphClusterSpec{
+				FixOwnershipInitContainer: &memgraphcomv1alpha1.FixOwnershipInitContainerSpec{},
+			})
+			Expect(present.Spec.FixOwnershipInitContainer).NotTo(BeNil(),
+				"an empty block must round-trip as present, or the container can never be asked for")
+		})
+
+		// The identity block is presence-based and every field in it optional
+		// without a default: an empty block must round-trip as present and
+		// empty, since that is the OpenShift shape.
+		It("should keep an empty security context block present and empty", func() {
+			absent := createAccepted("no-security-context", memgraphcomv1alpha1.MemgraphClusterSpec{})
+			Expect(absent.Spec.SecurityContext).To(BeNil(),
+				"the block is presence-based: no schema default may conjure it")
+
+			present := createAccepted("empty-security-context", memgraphcomv1alpha1.MemgraphClusterSpec{
+				SecurityContext: &memgraphcomv1alpha1.PodSecurityContextSpec{},
+			})
+			Expect(present.Spec.SecurityContext).To(HaveValue(Equal(memgraphcomv1alpha1.PodSecurityContextSpec{})),
+				"no field of the block may be defaulted, or the platform can never be left to assign it")
+		})
+
+		It("should accept the ownership container beside a security context naming the identity", func() {
+			stored := createAccepted("fix-ownership-named-identity", memgraphcomv1alpha1.MemgraphClusterSpec{
+				FixOwnershipInitContainer: &memgraphcomv1alpha1.FixOwnershipInitContainerSpec{},
+				SecurityContext: &memgraphcomv1alpha1.PodSecurityContextSpec{
+					RunAsUser: ptr.To(int64(1000)),
+					FSGroup:   ptr.To(int64(1000)),
+				},
+			})
+			Expect(stored.Spec.SecurityContext.RunAsUser).To(HaveValue(Equal(int64(1000))))
+		})
+
 		It("should accept core dumps with an uploader and default what it leaves out", func() {
 			stored := createAccepted("valid-core-dumps-uploader", memgraphcomv1alpha1.MemgraphClusterSpec{
 				CoreDumps: memgraphcomv1alpha1.CoreDumpsSpec{
@@ -495,6 +536,25 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 					SysctlInitContainer: &memgraphcomv1alpha1.SysctlInitContainerSpec{MaxMapCount: -1},
 				},
 				"should be greater than or equal to 1"),
+			Entry("a negative uid", "invalid-negative-uid",
+				memgraphcomv1alpha1.MemgraphClusterSpec{
+					SecurityContext: &memgraphcomv1alpha1.PodSecurityContextSpec{RunAsUser: ptr.To(int64(-1))},
+				},
+				"should be greater than or equal to 0"),
+			// The chown target has to be named: a platform-assigned uid is not
+			// known when the pod template is built.
+			Entry("the ownership container beside an identity left to the platform", "invalid-fix-ownership-no-uid",
+				memgraphcomv1alpha1.MemgraphClusterSpec{
+					FixOwnershipInitContainer: &memgraphcomv1alpha1.FixOwnershipInitContainerSpec{},
+					SecurityContext:           &memgraphcomv1alpha1.PodSecurityContextSpec{},
+				},
+				"fixOwnershipInitContainer needs securityContext to name runAsUser"),
+			Entry("the ownership container beside a uid without a group", "invalid-fix-ownership-no-gid",
+				memgraphcomv1alpha1.MemgraphClusterSpec{
+					FixOwnershipInitContainer: &memgraphcomv1alpha1.FixOwnershipInitContainerSpec{},
+					SecurityContext:           &memgraphcomv1alpha1.PodSecurityContextSpec{RunAsUser: ptr.To(int64(1000))},
+				},
+				"fixOwnershipInitContainer needs securityContext to name runAsUser"),
 			Entry("a retention policy outside the enum", "invalid-retention-policy",
 				memgraphcomv1alpha1.MemgraphClusterSpec{
 					Storage: memgraphcomv1alpha1.StorageSpec{RetentionPolicy: "Purge"},
