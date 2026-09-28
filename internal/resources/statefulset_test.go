@@ -248,6 +248,56 @@ func expectedContainerSecurityContext() *corev1.SecurityContext {
 	}
 }
 
+// expectedPrivilegedSecurityContext is what the init containers that write
+// under /proc/sys run with: privileged root, and a read-only root filesystem
+// plus the default seccomp profile all the same.
+func expectedPrivilegedSecurityContext() *corev1.SecurityContext {
+	return &corev1.SecurityContext{
+		Privileged:               ptr.To(true),
+		AllowPrivilegeEscalation: ptr.To(true),
+		ReadOnlyRootFilesystem:   ptr.To(true),
+		RunAsUser:                ptr.To(int64(0)),
+		RunAsNonRoot:             ptr.To(false),
+		SeccompProfile:           &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
+	}
+}
+
+// expectedSysctlInitContainer is the init container every pod of a cluster
+// with the sysctlInitContainer block runs first: it raises vm.max_map_count to
+// the floor, and only raises, on the cluster's own image.
+func expectedSysctlInitContainer(maxMapCount int64) corev1.Container {
+	return corev1.Container{
+		Name:            "init-sysctl",
+		Image:           defaultImageRef,
+		ImagePullPolicy: corev1.PullIfNotPresent,
+		Command: expectedCommand(fmt.Sprintf(`want=%d; have=$(cat /proc/sys/vm/max_map_count)
+if [ "$have" -lt "$want" ]; then echo "$want" | tee /proc/sys/vm/max_map_count; else echo "vm.max_map_count is $have, keeping it"; fi`,
+			maxMapCount)),
+		SecurityContext: expectedPrivilegedSecurityContext(),
+	}
+}
+
+// expectedCorePatternInitContainer is the init container a role collecting
+// dumps runs to point the node's kernel at its volume.
+func expectedCorePatternInitContainer() corev1.Container {
+	return corev1.Container{
+		Name:            "init-core-pattern",
+		Image:           defaultImageRef,
+		ImagePullPolicy: corev1.PullIfNotPresent,
+		Command: expectedCommand(
+			"echo '/var/core/memgraph/core.%e.%p.%t.%s' | tee /proc/sys/kernel/core_pattern"),
+		SecurityContext: expectedPrivilegedSecurityContext(),
+	}
+}
+
+// sysctlCluster is a minimal cluster with the sysctlInitContainer block
+// present and empty, the way the quickstart example carries it.
+func sysctlCluster() *memgraphcomv1alpha1.MemgraphCluster {
+	cluster := minimalCluster()
+	cluster.Spec.SysctlInitContainer = &memgraphcomv1alpha1.SysctlInitContainerSpec{}
+	return cluster
+}
+
 func expectedVolumeMounts() []corev1.VolumeMount {
 	return []corev1.VolumeMount{
 		{Name: "lib-storage", MountPath: "/var/lib/memgraph"},
@@ -707,15 +757,14 @@ func TestStatefulSetCoreDumpsDisabledByDefault(t *testing.T) {
 	}
 }
 
-// TestStatefulSetCoreDumps covers the enabled path end to end for one role
+// TestStatefulSetCoreDumps covers a role with the block present end to end
 // while the other stays untouched: the claim, the Memgraph container's mount,
 // and the privileged init container that points the node's kernel at it.
 func TestStatefulSetCoreDumps(t *testing.T) {
 	cluster := minimalCluster()
 	cluster.Spec.CoreDumps = memgraphcomv1alpha1.CoreDumpsSpec{
-		Data: memgraphcomv1alpha1.RoleCoreDumpsSpec{
-			Enabled: true,
-			Size:    ptr.To(resource.MustParse("20Gi")),
+		Data: &memgraphcomv1alpha1.RoleCoreDumpsSpec{
+			Size: ptr.To(resource.MustParse("20Gi")),
 		},
 		StorageClassName: ptr.To("cheap-hdd"),
 	}
@@ -738,21 +787,7 @@ func TestStatefulSetCoreDumps(t *testing.T) {
 
 		// The init container has to be privileged root to write a kernel sysctl,
 		// and it reuses the cluster's Memgraph image so nothing else is pulled.
-		wantInit := []corev1.Container{{
-			Name:            "init-core-pattern",
-			Image:           defaultImageRef,
-			ImagePullPolicy: corev1.PullIfNotPresent,
-			Command: expectedCommand(
-				"echo '/var/core/memgraph/core.%e.%p.%t.%s' | tee /proc/sys/kernel/core_pattern"),
-			SecurityContext: &corev1.SecurityContext{
-				Privileged:               ptr.To(true),
-				AllowPrivilegeEscalation: ptr.To(true),
-				ReadOnlyRootFilesystem:   ptr.To(true),
-				RunAsUser:                ptr.To(int64(0)),
-				RunAsNonRoot:             ptr.To(false),
-				SeccompProfile:           &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
-			},
-		}}
+		wantInit := []corev1.Container{expectedCorePatternInitContainer()}
 		if diff := cmp.Diff(wantInit, podSpec.InitContainers); diff != "" {
 			t.Errorf("init containers mismatch (-want +got):\n%s", diff)
 		}
@@ -761,7 +796,7 @@ func TestStatefulSetCoreDumps(t *testing.T) {
 		}
 	})
 
-	// The knob is per role: coordinators asked for nothing and get nothing.
+	// The block is per role: coordinators have none and get nothing.
 	t.Run(coordinatorComponent, func(t *testing.T) {
 		sts := coordinatorStatefulSet(cluster)
 
@@ -780,7 +815,7 @@ func TestStatefulSetCoreDumps(t *testing.T) {
 func TestStatefulSetCoreDumpsWithoutCorePattern(t *testing.T) {
 	cluster := minimalCluster()
 	cluster.Spec.CoreDumps = memgraphcomv1alpha1.CoreDumpsSpec{
-		Data:                 memgraphcomv1alpha1.RoleCoreDumpsSpec{Enabled: true},
+		Data:                 &memgraphcomv1alpha1.RoleCoreDumpsSpec{},
 		ConfigureCorePattern: ptr.To(false),
 	}
 
@@ -803,6 +838,56 @@ func TestStatefulSetCoreDumpsWithoutCorePattern(t *testing.T) {
 	}
 }
 
+// TestStatefulSetSysctlInitContainer covers the presence-based sysctl block:
+// present, both roles run the container first with the default or the given
+// floor; absent, which the minimal cluster is, no init container at all.
+func TestStatefulSetSysctlInitContainer(t *testing.T) {
+	t.Run("absent by default", func(t *testing.T) {
+		for _, sts := range []*appsv1.StatefulSet{coordinatorStatefulSet(minimalCluster()), dataStatefulSet(minimalCluster())} {
+			if got := sts.Spec.Template.Spec.InitContainers; len(got) != 0 {
+				t.Errorf("%s init containers = %v, want none without the block", sts.Name, got)
+			}
+		}
+	})
+
+	t.Run("empty block takes the default floor on both roles", func(t *testing.T) {
+		cluster := sysctlCluster()
+
+		want := []corev1.Container{expectedSysctlInitContainer(memgraphcomv1alpha1.DefaultMaxMapCount)}
+		for _, sts := range []*appsv1.StatefulSet{coordinatorStatefulSet(cluster), dataStatefulSet(cluster)} {
+			if diff := cmp.Diff(want, sts.Spec.Template.Spec.InitContainers); diff != "" {
+				t.Errorf("%s init containers mismatch (-want +got):\n%s", sts.Name, diff)
+			}
+		}
+	})
+
+	t.Run("floor override", func(t *testing.T) {
+		cluster := sysctlCluster()
+		cluster.Spec.SysctlInitContainer.MaxMapCount = 1048576
+
+		want := []corev1.Container{expectedSysctlInitContainer(1048576)}
+		if diff := cmp.Diff(want, dataStatefulSet(cluster).Spec.Template.Spec.InitContainers); diff != "" {
+			t.Errorf("init containers mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	// The two privileged containers run in the HA chart's order, sysctl first,
+	// and stay separate decisions: a role collecting dumps keeps its core
+	// pattern container whether or not the block is present.
+	t.Run("before the core pattern container", func(t *testing.T) {
+		cluster := sysctlCluster()
+		cluster.Spec.CoreDumps.Data = &memgraphcomv1alpha1.RoleCoreDumpsSpec{}
+
+		want := []corev1.Container{
+			expectedSysctlInitContainer(memgraphcomv1alpha1.DefaultMaxMapCount),
+			expectedCorePatternInitContainer(),
+		}
+		if diff := cmp.Diff(want, dataStatefulSet(cluster).Spec.Template.Spec.InitContainers); diff != "" {
+			t.Errorf("init containers mismatch (-want +got):\n%s", diff)
+		}
+	})
+}
+
 // TestStatefulSetCoreDumpsUploader pins the wiring the operator owns on behalf
 // of the sidecar: a read-only view of the dumps, the path as CORE_DUMPS_DIR, a
 // writable /tmp, credentials by Secret reference, and the same locked-down
@@ -812,7 +897,7 @@ func TestStatefulSetCoreDumpsUploader(t *testing.T) {
 	// The uploader is declared once for the cluster; only the role that
 	// collects dumps gets it.
 	cluster.Spec.CoreDumps = memgraphcomv1alpha1.CoreDumpsSpec{
-		Data: memgraphcomv1alpha1.RoleCoreDumpsSpec{Enabled: true},
+		Data: &memgraphcomv1alpha1.RoleCoreDumpsSpec{},
 		Uploader: &memgraphcomv1alpha1.CoreDumpsUploaderSpec{
 			Image:          "amazon/aws-cli:2.33.28",
 			Command:        []string{shell, "-c"},

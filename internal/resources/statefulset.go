@@ -73,6 +73,10 @@ const (
 	// coordinator's shell wrapper is given.
 	containerName = "memgraph"
 
+	// sysctlContainerName is the init container that raises the node's
+	// vm.max_map_count, named as the HA chart names it.
+	sysctlContainerName = "init-sysctl"
+
 	// Container names of the two optional containers core dumps bring along.
 	corePatternContainerName = "init-core-pattern"
 	uploaderContainerName    = "core-dumps-uploader"
@@ -110,7 +114,7 @@ func CoordinatorStatefulSet(
 	// The coordinator ID and advertised FQDN depend on the pod ordinal, which
 	// only the pod itself knows; a shell wrapper derives them from the pod
 	// name so all replicas share one template.
-	container.Command = []string{"/bin/sh", "-ec", coordinatorStartScript(cluster, spec)}
+	container.Command = shellCommand(coordinatorStartScript(cluster, spec))
 	// The flags are handed to the wrapper as arguments rather than interpolated
 	// into the script, so `exec ... "$@"` passes each one to Memgraph verbatim —
 	// a value carrying whitespace or shell metacharacters is never re-parsed by
@@ -265,10 +269,16 @@ func memgraphContainer(spec normalizedSpec, role normalizedRole) corev1.Containe
 	}
 }
 
+// shellCommand runs a script under the image's POSIX shell, failing on the
+// first command that fails.
+func shellCommand(script string) []string {
+	return []string{"/bin/sh", "-ec", script}
+}
+
 // restrictedSecurityContext is what every container the operator builds runs
 // under: no privilege escalation, no capabilities, a read-only root filesystem
-// and the default seccomp profile. The core pattern init container is the one
-// exception — it cannot do its job under this.
+// and the default seccomp profile. The two init containers that write under
+// /proc/sys are the exception — they cannot do their job under this.
 func restrictedSecurityContext() *corev1.SecurityContext {
 	return &corev1.SecurityContext{
 		AllowPrivilegeEscalation: ptr.To(false),
@@ -279,14 +289,38 @@ func restrictedSecurityContext() *corev1.SecurityContext {
 	}
 }
 
+// sysctlInitContainer raises the node's vm.max_map_count to the cluster's
+// floor. It runs first, before the core pattern container, as in the HA chart.
+// The value is a property of the node and not one of the namespaced sysctls a
+// pod may set for itself, so like the core pattern this takes a privileged
+// root container; it runs the cluster's own Memgraph image and writes
+// /proc/sys directly, so no sysctl binary and no second image are involved.
+// It only ever raises: a node already at or above the floor is left as the
+// administrator set it.
+func sysctlInitContainer(spec normalizedSpec) corev1.Container {
+	// tee rather than a plain redirect so the value that was set is visible in
+	// the init container's logs, and the kept value is logged for the same
+	// reason.
+	script := fmt.Sprintf(`want=%d; have=$(cat /proc/sys/vm/max_map_count)
+if [ "$have" -lt "$want" ]; then echo "$want" | tee /proc/sys/vm/max_map_count; else echo "vm.max_map_count is $have, keeping it"; fi`,
+		spec.maxMapCount)
+	return corev1.Container{
+		Name:            sysctlContainerName,
+		Image:           spec.image,
+		ImagePullPolicy: spec.pullPolicy,
+		Command:         shellCommand(script),
+		SecurityContext: privilegedRootSecurityContext(),
+	}
+}
+
 // corePatternInitContainer points the node's kernel at the role's core dumps
 // directory. It runs the cluster's own Memgraph image — already pulled on the
 // node, so core dumps need no second image to be configured or mirrored — and
-// is the only container the operator builds that breaks the restricted security
-// posture: /proc/sys is mounted read-only in an unprivileged container, so
-// writing core_pattern needs privileged plus root. Nothing else about the pod
-// is relaxed, and a namespace that forbids privileged pods can turn this off
-// and have the platform manage core_pattern on the node instead.
+// like the sysctl container breaks the restricted security posture: /proc/sys
+// is mounted read-only in an unprivileged container, so writing core_pattern
+// needs privileged plus root. Nothing else about the pod is relaxed, and a
+// namespace that forbids privileged pods can turn this off and have the
+// platform manage core_pattern on the node instead.
 func corePatternInitContainer(spec normalizedSpec) corev1.Container {
 	// %e.%p.%t.%s expand to the crashing executable, its pid, the time and the
 	// signal.
@@ -297,17 +331,25 @@ func corePatternInitContainer(spec normalizedSpec) corev1.Container {
 		ImagePullPolicy: spec.pullPolicy,
 		// tee rather than a plain redirect so the pattern that was set is
 		// visible in the init container's logs.
-		Command: []string{"/bin/sh", "-ec", fmt.Sprintf("echo '%s' | tee /proc/sys/kernel/core_pattern", pattern)},
-		SecurityContext: &corev1.SecurityContext{
-			Privileged: ptr.To(true),
-			// Kubernetes rejects a privileged container that also forbids
-			// privilege escalation, so this one cannot be false.
-			AllowPrivilegeEscalation: ptr.To(true),
-			ReadOnlyRootFilesystem:   ptr.To(true),
-			RunAsUser:                ptr.To(int64(0)),
-			RunAsNonRoot:             ptr.To(false),
-			SeccompProfile:           &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
-		},
+		Command:         []string{"/bin/sh", "-ec", fmt.Sprintf("echo '%s' | tee /proc/sys/kernel/core_pattern", pattern)},
+		SecurityContext: privilegedRootSecurityContext(),
+	}
+}
+
+// privilegedRootSecurityContext is what the two init containers that write
+// under /proc/sys run with: privileged root, but still on a read-only root
+// filesystem and the default seccomp profile. It is the only place the
+// operator relaxes the restricted posture.
+func privilegedRootSecurityContext() *corev1.SecurityContext {
+	return &corev1.SecurityContext{
+		Privileged: ptr.To(true),
+		// Kubernetes rejects a privileged container that also forbids
+		// privilege escalation, so this one cannot be false.
+		AllowPrivilegeEscalation: ptr.To(true),
+		ReadOnlyRootFilesystem:   ptr.To(true),
+		RunAsUser:                ptr.To(int64(0)),
+		RunAsNonRoot:             ptr.To(false),
+		SeccompProfile:           &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
 	}
 }
 
@@ -457,13 +499,19 @@ func podContainers(memgraph corev1.Container, role normalizedRole) []corev1.Cont
 	return containers
 }
 
-// podInitContainers is empty unless the role asked the operator to configure
-// the node's core pattern.
+// podInitContainers are the node-tuning containers a role's pods run before
+// Memgraph: the sysctl one if the cluster asked for it, then the core pattern
+// one if the role collects dumps and asked the operator to configure it. Both
+// are privileged, so a restricted namespace can have neither.
 func podInitContainers(spec normalizedSpec, role normalizedRole) []corev1.Container {
-	if !role.coreDumps.enabled || !role.coreDumps.configurePattern {
-		return nil
+	var containers []corev1.Container
+	if spec.maxMapCount > 0 {
+		containers = append(containers, sysctlInitContainer(spec))
 	}
-	return []corev1.Container{corePatternInitContainer(spec)}
+	if role.coreDumps.enabled && role.coreDumps.configurePattern {
+		containers = append(containers, corePatternInitContainer(spec))
+	}
+	return containers
 }
 
 func statefulSet(

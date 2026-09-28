@@ -1,7 +1,8 @@
 # The quickstart cluster from the repository README: three coordinators, two
-# data instances, a pinned Memgraph image, and a reference to the Secret
-# holding the enterprise license. Everything else — storage, ports, probes,
-# resources, cluster domain — takes its default; config/samples/
+# data instances, a pinned Memgraph image, a reference to the Secret holding
+# the enterprise license, and the init container that raises the node's
+# vm.max_map_count. Everything else — storage, ports, probes, resources,
+# cluster domain — takes its default; config/samples/
 # v1alpha1_memgraphcluster.yaml spells the full surface out.
 #
 # The e2e suite applies this file verbatim, so it is the manifest CI proves
@@ -30,3 +31,9 @@ spec:
     name: memgraph-secrets
     licenseKey: MEMGRAPH_ENTERPRISE_LICENSE
     organizationKey: MEMGRAPH_ORGANIZATION_NAME
+  # Raises the node's vm.max_map_count to what Memgraph needs (524288 unless
+  # maxMapCount says otherwise) from a privileged init container, as the HA
+  # chart does by default. Without it Memgraph warns at startup and can crash
+  # under load once it runs out of memory map areas. Drop the block in a
+  # namespace that forbids privileged containers.
+  sysctlInitContainer: {}

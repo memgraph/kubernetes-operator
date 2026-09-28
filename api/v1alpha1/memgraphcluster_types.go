@@ -45,6 +45,8 @@ const (
 	DefaultCoreDumpsSize        = "10Gi"
 	DefaultConfigureCorePattern = true
 
+	DefaultMaxMapCount int64 = 524288
+
 	DefaultLibPVCSize            = "1Gi"
 	DefaultLogPVCSize            = "1Gi"
 	DefaultCreateLogStorageClaim = true
@@ -435,38 +437,20 @@ type StorageSpec struct {
 }
 
 // RoleCoreDumpsSpec is the part of core dump collection that genuinely differs
-// between the roles: whether they collect at all, and how much room a dump
-// needs. Everything else — the storage class, the kernel setup, the uploader —
-// is the same decision for both and lives on CoreDumpsSpec.
+// between the roles: whether they collect at all, which is the block being
+// present, and how much room a dump needs. Everything else — the storage
+// class, the kernel setup, the uploader — is the same decision for both and
+// lives on CoreDumpsSpec.
 //
-// enabled is pinned by a transition rule because the volume it provisions is a
-// StatefulSet volumeClaimTemplate, which Kubernetes forbids adding to or
-// removing from a live StatefulSet. Without the rule the flip is accepted and
-// then rejected on every reconcile as ApplyFailed, so the resource says yes and
-// the cluster never changes. Rebuilding the StatefulSet around its pods is not an
-// answer either: the StatefulSet controller cannot reconcile adopted pods whose
-// volumes no longer match its templates and only recovers when pods are
-// deleted in ascending ordinal order, MAIN and the Raft leader first — the
-// reverse of the order a Memgraph cluster survives (kubernetes/kubernetes#141876).
-// The has() guards keep the rule evaluable against the block's empty object
-// default, which the API server checks before the field default applies.
+// The block's presence is pinned by a transition rule on CoreDumpsSpec, not
+// here: a rule on a block never fires when the block is added or removed
+// whole. The rule below fires only while the block exists in both versions,
+// which is exactly "while the role collects dumps", and pins the one field
+// that lands in the claim template. The has() guard keeps it evaluable
+// against a bare {} the API server checks before the field default applies.
 //
-// +kubebuilder:validation:XValidation:rule="(has(self.enabled) && self.enabled) == (has(oldSelf.enabled) && oldSelf.enabled)",message="coreDumps enabled cannot be changed on a live cluster: the core dumps volume is a StatefulSet volumeClaimTemplate, which Kubernetes forbids adding or removing in place. Delete the MemgraphCluster (its claims are retained under the default retention policy) and recreate it with the new setting"
-// +kubebuilder:validation:XValidation:rule="!(has(self.enabled) && self.enabled) || (has(self.size) == has(oldSelf.size) && (!has(self.size) || quantity(string(self.size)).compareTo(quantity(string(oldSelf.size))) == 0))",message="coreDumps size cannot be changed on a live cluster while the role collects dumps: it is part of a StatefulSet volumeClaimTemplate, which Kubernetes forbids changing in place. Delete the MemgraphCluster (its claims are retained under the default retention policy) and recreate it with the new value"
+// +kubebuilder:validation:XValidation:rule="has(self.size) == has(oldSelf.size) && (!has(self.size) || quantity(string(self.size)).compareTo(quantity(string(oldSelf.size))) == 0)",message="coreDumps size cannot be changed on a live cluster while the role collects dumps: it is part of a StatefulSet volumeClaimTemplate, which Kubernetes forbids changing in place. Delete the MemgraphCluster (its claims are retained under the default retention policy) and recreate it with the new value"
 type RoleCoreDumpsSpec struct {
-	// enabled provisions a core dumps volume for every pod of the role and
-	// mounts it at /var/core/memgraph. It is off by default: a crashing Memgraph
-	// is not the normal case, and the volume costs a third
-	// PersistentVolumeClaim per pod.
-	//
-	// It is a create-time choice: once the cluster exists it cannot be switched
-	// on or off, and an edit that tries is rejected at admission with the
-	// procedure that works — delete the MemgraphCluster, whose claims the
-	// default Retain policy keeps, and recreate it.
-	// +kubebuilder:default=false
-	// +optional
-	Enabled bool `json:"enabled,omitempty"`
-
 	// size is the requested size of the role's core dumps claim. A dump is
 	// roughly as large as the crashing process' resident memory, which is why
 	// this is per role: a data instance holds the graph, a coordinator holds
@@ -531,33 +515,53 @@ type CoreDumpsUploaderSpec struct {
 // whole cluster — where the volumes come from, whether the operator configures
 // the node, and what ships the dumps away.
 //
-// The memgraph-high-availability Helm chart spreads the same feature across
+// A role collects dumps when its block is present, like every other optional
+// block of this resource: there is no enabled knob. The
+// memgraph-high-availability Helm chart spreads the same feature across
 // storage.<role>.coreDumps* and a separate top-level coreDumpUploader block
-// that silently does nothing unless the per-role claim is enabled too. Here the
-// dependency is structural: an uploader with no role collecting dumps is
+// that silently does nothing unless the per-role claim is enabled too. Here
+// the dependency is structural: an uploader with no role collecting dumps is
 // rejected, not ignored.
+//
+// A role's block is pinned by a transition rule because the volume it
+// provisions is a StatefulSet volumeClaimTemplate, which Kubernetes forbids
+// adding to or removing from a live StatefulSet. Without the rule the change is
+// accepted and then rejected on every reconcile as ApplyFailed, so the
+// resource says yes and the cluster never changes. Rebuilding the StatefulSet
+// around its pods is not an answer either: the StatefulSet controller cannot
+// reconcile adopted pods whose volumes no longer match its templates and only
+// recovers when pods are deleted in ascending ordinal order, MAIN and the Raft
+// leader first — the reverse of the order a Memgraph cluster survives
+// (kubernetes/kubernetes#141876). The rules live here rather than on the role
+// block because a rule on a block never fires when the block itself is added
+// or removed.
 //
 // Dumps are for debugging a crash, not for the cluster to run: nothing in the
 // operator reads them, and the claims follow the same storage.retentionPolicy
 // as the rest of the cluster's volumes.
 //
-// The has() guards keep the rule evaluable against the block's empty object
+// The has() guards keep the rules evaluable against the block's empty object
 // default, which the API server checks before nested field defaults apply.
 //
-// +kubebuilder:validation:XValidation:rule="!has(self.uploader) || (has(self.coordinators) && has(self.coordinators.enabled) && self.coordinators.enabled) || (has(self.data) && has(self.data.enabled) && self.data.enabled)",message="uploader requires core dumps enabled for at least one role — there would be no volume for it to read"
-// +kubebuilder:validation:XValidation:rule="!((has(self.coordinators) && has(self.coordinators.enabled) && self.coordinators.enabled) || (has(self.data) && has(self.data.enabled) && self.data.enabled)) || (has(self.storageClassName) == has(oldSelf.storageClassName) && (!has(self.storageClassName) || self.storageClassName == oldSelf.storageClassName))",message="coreDumps storageClassName cannot be changed on a live cluster while a role collects dumps: it is part of a StatefulSet volumeClaimTemplate, which Kubernetes forbids changing in place. Delete the MemgraphCluster (its claims are retained under the default retention policy) and recreate it with the new value"
+// +kubebuilder:validation:XValidation:rule="has(self.coordinators) == has(oldSelf.coordinators)",message="coreDumps.coordinators cannot be added or removed on a live cluster: the core dumps volume is a StatefulSet volumeClaimTemplate, which Kubernetes forbids adding or removing in place. Delete the MemgraphCluster (its claims are retained under the default retention policy) and recreate it with the new setting"
+// +kubebuilder:validation:XValidation:rule="has(self.data) == has(oldSelf.data)",message="coreDumps.data cannot be added or removed on a live cluster: the core dumps volume is a StatefulSet volumeClaimTemplate, which Kubernetes forbids adding or removing in place. Delete the MemgraphCluster (its claims are retained under the default retention policy) and recreate it with the new setting"
+// +kubebuilder:validation:XValidation:rule="!has(self.uploader) || has(self.coordinators) || has(self.data)",message="uploader requires core dumps for at least one role — there would be no volume for it to read"
+// +kubebuilder:validation:XValidation:rule="!(has(self.coordinators) || has(self.data)) || (has(self.storageClassName) == has(oldSelf.storageClassName) && (!has(self.storageClassName) || self.storageClassName == oldSelf.storageClassName))",message="coreDumps storageClassName cannot be changed on a live cluster while a role collects dumps: it is part of a StatefulSet volumeClaimTemplate, which Kubernetes forbids changing in place. Delete the MemgraphCluster (its claims are retained under the default retention policy) and recreate it with the new value"
 type CoreDumpsSpec struct {
-	// coordinators decides whether every coordinator pod collects dumps, and
-	// how much room it gets for them.
-	// +kubebuilder:default={}
+	// coordinators, when present, makes every coordinator pod collect dumps
+	// onto a volume of the size it names. It is a create-time choice: once the
+	// cluster exists the block cannot be added or removed, and an edit that
+	// tries is rejected at admission with the procedure that works — delete the
+	// MemgraphCluster, whose claims the default Retain policy keeps, and
+	// recreate it.
 	// +optional
-	Coordinators RoleCoreDumpsSpec `json:"coordinators,omitzero"`
+	Coordinators *RoleCoreDumpsSpec `json:"coordinators,omitempty"`
 
-	// data decides whether every data instance pod collects dumps, and how much
-	// room it gets for them.
-	// +kubebuilder:default={}
+	// data, when present, makes every data instance pod collect dumps onto a
+	// volume of the size it names. Like coordinators it is a create-time
+	// choice.
 	// +optional
-	Data RoleCoreDumpsSpec `json:"data,omitzero"`
+	Data *RoleCoreDumpsSpec `json:"data,omitempty"`
 
 	// storageClassName is the StorageClass backing every core dumps claim of
 	// this cluster. Leave it unset to use the cluster's default StorageClass;
@@ -599,6 +603,43 @@ type CoreDumpsSpec struct {
 	// ever being registered.
 	// +optional
 	Uploader *CoreDumpsUploaderSpec `json:"uploader,omitempty"`
+}
+
+// SysctlInitContainerSpec is the memgraph-high-availability Helm chart's
+// sysctlInitContainer block: a privileged init container, run first in every
+// pod of both roles, that raises the node's vm.max_map_count to what Memgraph
+// needs. Memgraph checks the value at startup and prints "Max virtual memory
+// areas vm.max_map_count ... is too low" below its floor; under load the
+// symptom is a crash on bad_alloc or munmap once the process has more memory
+// mappings than the kernel allows, and the kernel's own default of 65530 is
+// far below what a graph in memory takes.
+//
+// The block is presence-based like every other optional block of the
+// resource, so there is no enabled knob: present, the container runs; absent,
+// the pods start with whatever the node has. That is the one place this
+// departs from the chart, which runs the container unless told not to, and it
+// is why the sample and the quickstart example carry the block written out.
+// Leave it out in a namespace that forbids privileged containers (PodSecurity
+// "restricted") or on nodes the platform already tunes.
+//
+// vm.max_map_count is a property of the node, not the pod: it is not one of
+// the namespaced sysctls a pod's securityContext.sysctls can set, so the only
+// way to set it from inside a pod is a privileged root container, exactly as
+// the chart does. The chart's image knobs are dropped: the container runs the
+// cluster's own Memgraph image, already on the node, and writes /proc/sys
+// directly so no sysctl binary is needed.
+type SysctlInitContainerSpec struct {
+	// maxMapCount is the vm.max_map_count the node is raised to. It is a floor:
+	// a node already at or above it is left alone, so the operator never lowers
+	// a value an administrator set higher for something else on the node. The
+	// default is the value Memgraph itself checks for and the one its docs
+	// recommend for up to 64 GB of RAM; larger nodes want about one map area
+	// per 128 KB of memory, see
+	// https://memgraph.com/docs/database-management/system-configuration.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:default=524288
+	// +optional
+	MaxMapCount int64 `json:"maxMapCount,omitempty"`
 }
 
 // ReadinessProbeSpec tunes the timings of the one probe every pod of the
@@ -1356,11 +1397,19 @@ type MemgraphClusterSpec struct {
 	// +optional
 	Storage StorageSpec `json:"storage,omitzero"`
 
-	// coreDumps optionally collects crash dumps of either role onto a volume of
-	// its own.
+	// coreDumps collects crash dumps of the roles whose blocks are present onto
+	// a volume of their own.
 	// +kubebuilder:default={}
 	// +optional
 	CoreDumps CoreDumpsSpec `json:"coreDumps,omitzero"`
+
+	// sysctlInitContainer raises the node's vm.max_map_count from a privileged
+	// init container in every pod, as the memgraph-high-availability Helm
+	// chart does. Absent, no such container runs and Memgraph warns at startup
+	// if the node's value is below what it needs; leave it out where privileged
+	// containers are not allowed.
+	// +optional
+	SysctlInitContainer *SysctlInitContainerSpec `json:"sysctlInitContainer,omitempty"`
 
 	// clusterDomain is the Kubernetes cluster domain the advertised FQDN
 	// addresses are built from: <pod>.<service>.<namespace>.svc.<clusterDomain>.

@@ -71,30 +71,28 @@ spec:
       logPVCSize: 1Gi
       logStorageAccessMode: ReadWriteOnce
       # logStorageClassName: standard
-  # Core dumps are off by default. Enabling them for a role provisions a third
-  # claim per pod, mounts it at /var/core/memgraph — a fixed path, since only
-  # the kernel writes it and only the uploader reads it, and the operator points
-  # both at it — and, unless configureCorePattern is false, runs a privileged
-  # init container that sets the node's core pattern. Two things that catch
-  # people: core_pattern is a property of the node, so it applies to everything
-  # that crashes there, and the privileged init container is rejected in a
-  # namespace running PodSecurity "restricted". Set configureCorePattern: false
-  # there and have the platform point core_pattern at that directory itself.
-  # Whether a role collects dumps is decided when the cluster is created: the
-  # claim is a StatefulSet volumeClaimTemplate, which Kubernetes forbids adding
-  # or removing in place, so flipping enabled on a live cluster is rejected. To
-  # change it, delete the MemgraphCluster (the default retention policy keeps
-  # every claim) and recreate it with the new setting.
+  # A role collects core dumps when its block below is present. That provisions
+  # a third claim per pod, mounts it at /var/core/memgraph — a fixed path, since
+  # only the kernel writes it and only the uploader reads it, and the operator
+  # points both at it — and, unless configureCorePattern is false, runs a
+  # privileged init container that sets the node's core pattern. Two things that
+  # catch people: core_pattern is a property of the node, so it applies to
+  # everything that crashes there, and the privileged init container is rejected
+  # in a namespace running PodSecurity "restricted". Set configureCorePattern:
+  # false there and have the platform point core_pattern at that directory
+  # itself. Whether a role collects dumps is decided when the cluster is
+  # created: the claim is a StatefulSet volumeClaimTemplate, which Kubernetes
+  # forbids adding or removing in place, so adding or removing a role's block on
+  # a live cluster is rejected. To change it, delete the MemgraphCluster (the
+  # default retention policy keeps every claim) and recreate it.
   coreDumps:
     # Per role, because only these two answers differ between them: whether the
-    # role collects dumps at all, and how much room one needs — a dump is about
-    # as large as the crashing process' memory, and a data instance holds the
-    # graph while a coordinator holds Raft state.
+    # role collects dumps at all — the block being present — and how much room
+    # one needs; a dump is about as large as the crashing process' memory, and a
+    # data instance holds the graph while a coordinator holds Raft state.
     coordinators:
-      enabled: true
       size: 10Gi
     data:
-      enabled: true
       size: 10Gi
     # The rest is one decision for the cluster, so it is stated once.
     # storageClassName: standard
@@ -129,6 +127,21 @@ spec:
     #   resources:
     #     requests:
     #       memory: 64Mi
+  # With this block present, every pod of both roles first runs a privileged
+  # init container that raises the node's vm.max_map_count to maxMapCount — the
+  # HA chart's sysctlInitContainer. Memgraph checks the value at startup and
+  # prints "Max virtual memory areas vm.max_map_count ... is too low" below its
+  # floor; under load, too few map areas surface as a crash on bad_alloc or
+  # munmap. The value is a property of the node and not a namespaced sysctl, so
+  # a privileged root container is the only way to set it from a pod — it runs
+  # the cluster's own Memgraph image and only ever raises, never lowering a node
+  # an administrator tuned higher. The default is the floor Memgraph checks for
+  # and the value its docs recommend up to 64 GB of RAM; larger nodes want about
+  # one map area per 128 KB of memory. Unlike the chart, the block is off when
+  # absent: leave it out in a namespace running PodSecurity "restricted" (as
+  # with configureCorePattern above) or on nodes the platform tunes itself.
+  sysctlInitContainer:
+    maxMapCount: 524288
   # The cluster domain is part of every advertised address the operator
   # registers with the cluster. The internal ports are fixed: Bolt 7687,
   # management 10000, replication 20000, and coordinator 12000.
