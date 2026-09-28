@@ -1494,3 +1494,257 @@ func TestStatefulSetBothTLSModes(t *testing.T) {
 		t.Errorf("args mismatch (-want +got):\n%s", diff)
 	}
 }
+
+// TestStatefulSetCarriesNoSchedulingByDefault pins that a cluster without a
+// scheduling block leaves the whole surface unset: no affinity of any kind, no
+// node selector, no tolerations, no spread constraints, no priority class. The
+// operator's spread rule is presence-based like every other optional block,
+// so the scheduler places these pods by free capacity alone.
+func TestStatefulSetCarriesNoSchedulingByDefault(t *testing.T) {
+	cluster := minimalCluster()
+	for _, sts := range []*appsv1.StatefulSet{coordinatorStatefulSet(cluster), dataStatefulSet(cluster)} {
+		t.Run(sts.Name, func(t *testing.T) {
+			pod := sts.Spec.Template.Spec
+			if pod.Affinity != nil {
+				t.Errorf("affinity = %+v, want none", pod.Affinity)
+			}
+			if pod.NodeSelector != nil || pod.Tolerations != nil || pod.TopologySpreadConstraints != nil {
+				t.Errorf("node selector %v, tolerations %v, spread constraints %v: want none",
+					pod.NodeSelector, pod.Tolerations, pod.TopologySpreadConstraints)
+			}
+			if pod.PriorityClassName != "" {
+				t.Errorf("priorityClassName = %q, want none", pod.PriorityClassName)
+			}
+		})
+	}
+}
+
+// antiAffinityTerm is the operator's rule as it lands on a pod template: one
+// term selecting on the operator's identity labels over the given topology.
+func antiAffinityTerm(selector map[string]string, topologyKey string) corev1.PodAffinityTerm {
+	return corev1.PodAffinityTerm{
+		LabelSelector: &metav1.LabelSelector{MatchLabels: selector},
+		TopologyKey:   topologyKey,
+	}
+}
+
+// clusterScopeSelector is the identity label set without the role: what a
+// scope cluster rule selects on, so every pod of the cluster repels every other.
+func clusterScopeSelector() map[string]string {
+	return map[string]string{nameLabel: "memgraph", instanceLabel: clusterName}
+}
+
+// TestStatefulSetPodAntiAffinity pins what each corner of the operator's rule
+// lands on, on both roles: the empty block is the HA chart's default (a
+// preferred term, weight 100, per role, over hostname), required with scope
+// role is the chart's parity, required with scope cluster is its unique, and
+// the topology key is passed through.
+func TestStatefulSetPodAntiAffinity(t *testing.T) {
+	const zoneKey = "topology.kubernetes.io/zone"
+	tests := []struct {
+		name string
+		rule memgraphcomv1alpha1.PodAntiAffinitySpec
+		want func(component string) *corev1.PodAntiAffinity
+	}{
+		{
+			name: "empty block is preferred per role over hostname",
+			rule: memgraphcomv1alpha1.PodAntiAffinitySpec{},
+			want: func(component string) *corev1.PodAntiAffinity {
+				return &corev1.PodAntiAffinity{
+					PreferredDuringSchedulingIgnoredDuringExecution: []corev1.WeightedPodAffinityTerm{{
+						Weight:          100,
+						PodAffinityTerm: antiAffinityTerm(expectedSelectorLabels(component), "kubernetes.io/hostname"),
+					}},
+				}
+			},
+		},
+		{
+			name: "required per role is the chart's parity",
+			rule: memgraphcomv1alpha1.PodAntiAffinitySpec{Type: memgraphcomv1alpha1.PodAntiAffinityRequired},
+			want: func(component string) *corev1.PodAntiAffinity {
+				return &corev1.PodAntiAffinity{
+					RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{
+						antiAffinityTerm(expectedSelectorLabels(component), "kubernetes.io/hostname"),
+					},
+				}
+			},
+		},
+		{
+			name: "required per cluster is the chart's unique",
+			rule: memgraphcomv1alpha1.PodAntiAffinitySpec{
+				Type:  memgraphcomv1alpha1.PodAntiAffinityRequired,
+				Scope: memgraphcomv1alpha1.PodAntiAffinityScopeCluster,
+			},
+			want: func(string) *corev1.PodAntiAffinity {
+				return &corev1.PodAntiAffinity{
+					RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{
+						antiAffinityTerm(clusterScopeSelector(), "kubernetes.io/hostname"),
+					},
+				}
+			},
+		},
+		{
+			name: "preferred per cluster over a zone label",
+			rule: memgraphcomv1alpha1.PodAntiAffinitySpec{
+				Scope:       memgraphcomv1alpha1.PodAntiAffinityScopeCluster,
+				TopologyKey: zoneKey,
+			},
+			want: func(string) *corev1.PodAntiAffinity {
+				return &corev1.PodAntiAffinity{
+					PreferredDuringSchedulingIgnoredDuringExecution: []corev1.WeightedPodAffinityTerm{{
+						Weight:          100,
+						PodAffinityTerm: antiAffinityTerm(clusterScopeSelector(), zoneKey),
+					}},
+				}
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cluster := minimalCluster()
+			cluster.Spec.Scheduling.PodAntiAffinity = &tc.rule
+			for component, sts := range map[string]*appsv1.StatefulSet{
+				coordinatorComponent: coordinatorStatefulSet(cluster),
+				dataComponent:        dataStatefulSet(cluster),
+			} {
+				want := &corev1.Affinity{PodAntiAffinity: tc.want(component)}
+				if diff := cmp.Diff(want, sts.Spec.Template.Spec.Affinity); diff != "" {
+					t.Errorf("%s affinity mismatch (-want +got):\n%s", component, diff)
+				}
+			}
+		})
+	}
+}
+
+// TestStatefulSetPodAntiAffinityAppendsRoleTerms pins the merge rule: a
+// role's own anti-affinity is appended after the operator's term, list by
+// list, and never replaces it — and without the operator's rule the role's
+// own terms are the whole affinity.
+func TestStatefulSetPodAntiAffinityAppendsRoleTerms(t *testing.T) {
+	ownRequired := antiAffinityTerm(map[string]string{"app": "noisy-neighbour"}, "kubernetes.io/hostname")
+	ownPreferred := corev1.WeightedPodAffinityTerm{
+		Weight:          10,
+		PodAffinityTerm: antiAffinityTerm(map[string]string{"app": "batch"}, "topology.kubernetes.io/zone"),
+	}
+	own := &corev1.PodAntiAffinity{
+		RequiredDuringSchedulingIgnoredDuringExecution:  []corev1.PodAffinityTerm{ownRequired},
+		PreferredDuringSchedulingIgnoredDuringExecution: []corev1.WeightedPodAffinityTerm{ownPreferred},
+	}
+	operatorTerm := corev1.WeightedPodAffinityTerm{
+		Weight:          100,
+		PodAffinityTerm: antiAffinityTerm(expectedSelectorLabels(dataComponent), "kubernetes.io/hostname"),
+	}
+
+	t.Run("appended after the operator's rule", func(t *testing.T) {
+		cluster := minimalCluster()
+		cluster.Spec.Scheduling.PodAntiAffinity = &memgraphcomv1alpha1.PodAntiAffinitySpec{}
+		cluster.Spec.Scheduling.Data.PodAntiAffinity = own
+
+		want := &corev1.Affinity{PodAntiAffinity: &corev1.PodAntiAffinity{
+			RequiredDuringSchedulingIgnoredDuringExecution:  []corev1.PodAffinityTerm{ownRequired},
+			PreferredDuringSchedulingIgnoredDuringExecution: []corev1.WeightedPodAffinityTerm{operatorTerm, ownPreferred},
+		}}
+		if diff := cmp.Diff(want, dataStatefulSet(cluster).Spec.Template.Spec.Affinity); diff != "" {
+			t.Errorf("data affinity mismatch (-want +got):\n%s", diff)
+		}
+		// The coordinators asked for nothing of their own and get the rule alone.
+		wantCoordinator := &corev1.Affinity{PodAntiAffinity: &corev1.PodAntiAffinity{
+			PreferredDuringSchedulingIgnoredDuringExecution: []corev1.WeightedPodAffinityTerm{{
+				Weight:          100,
+				PodAffinityTerm: antiAffinityTerm(expectedSelectorLabels(coordinatorComponent), "kubernetes.io/hostname"),
+			}},
+		}}
+		if diff := cmp.Diff(wantCoordinator, coordinatorStatefulSet(cluster).Spec.Template.Spec.Affinity); diff != "" {
+			t.Errorf("coordinator affinity mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("the whole affinity without the operator's rule", func(t *testing.T) {
+		cluster := minimalCluster()
+		cluster.Spec.Scheduling.Data.PodAntiAffinity = own
+
+		want := &corev1.Affinity{PodAntiAffinity: own}
+		if diff := cmp.Diff(want, dataStatefulSet(cluster).Spec.Template.Spec.Affinity); diff != "" {
+			t.Errorf("data affinity mismatch (-want +got):\n%s", diff)
+		}
+		if got := coordinatorStatefulSet(cluster).Spec.Template.Spec.Affinity; got != nil {
+			t.Errorf("coordinator affinity = %+v, want none", got)
+		}
+	})
+}
+
+// nodeRoleLabel is the node label the HA chart's nodeSelection mode keyed on.
+const nodeRoleLabel = "role"
+
+// TestStatefulSetSchedulingPassthrough pins that the per-role node selector,
+// tolerations and priority class land on that role's pod template verbatim
+// and on no other, and that a spread constraint naming no labelSelector is
+// given the role's own pod selector while one naming its own keeps it.
+func TestStatefulSetSchedulingPassthrough(t *testing.T) {
+	const zoneKey = "topology.kubernetes.io/zone"
+	coordinatorToleration := corev1.Toleration{
+		Key: "memgraph", Operator: corev1.TolerationOpEqual, Value: "coordinator", Effect: corev1.TaintEffectNoSchedule,
+	}
+	ownSelector := &metav1.LabelSelector{MatchLabels: map[string]string{"team": platformTeam}}
+
+	cluster := minimalCluster()
+	cluster.Spec.Scheduling.Coordinators = memgraphcomv1alpha1.RoleSchedulingSpec{
+		NodeSelector:      map[string]string{nodeRoleLabel: "coordinator-node"},
+		Tolerations:       []corev1.Toleration{coordinatorToleration},
+		PriorityClassName: "system-cluster-critical",
+		TopologySpreadConstraints: []corev1.TopologySpreadConstraint{
+			{MaxSkew: 1, TopologyKey: zoneKey, WhenUnsatisfiable: corev1.DoNotSchedule},
+		},
+	}
+	cluster.Spec.Scheduling.Data = memgraphcomv1alpha1.RoleSchedulingSpec{
+		NodeSelector: map[string]string{nodeRoleLabel: "data-node"},
+		TopologySpreadConstraints: []corev1.TopologySpreadConstraint{
+			{MaxSkew: 2, TopologyKey: zoneKey, WhenUnsatisfiable: corev1.ScheduleAnyway, LabelSelector: ownSelector},
+		},
+	}
+
+	t.Run(coordinatorComponent, func(t *testing.T) {
+		pod := coordinatorStatefulSet(cluster).Spec.Template.Spec
+		if diff := cmp.Diff(map[string]string{nodeRoleLabel: "coordinator-node"}, pod.NodeSelector); diff != "" {
+			t.Errorf("node selector mismatch (-want +got):\n%s", diff)
+		}
+		if diff := cmp.Diff([]corev1.Toleration{coordinatorToleration}, pod.Tolerations); diff != "" {
+			t.Errorf("tolerations mismatch (-want +got):\n%s", diff)
+		}
+		if pod.PriorityClassName != "system-cluster-critical" {
+			t.Errorf("priorityClassName = %q, want system-cluster-critical", pod.PriorityClassName)
+		}
+		wantSpread := []corev1.TopologySpreadConstraint{{
+			MaxSkew:           1,
+			TopologyKey:       zoneKey,
+			WhenUnsatisfiable: corev1.DoNotSchedule,
+			LabelSelector:     &metav1.LabelSelector{MatchLabels: expectedSelectorLabels(coordinatorComponent)},
+		}}
+		if diff := cmp.Diff(wantSpread, pod.TopologySpreadConstraints); diff != "" {
+			t.Errorf("spread constraints mismatch (-want +got):\n%s", diff)
+		}
+		if pod.Affinity != nil {
+			t.Errorf("affinity = %+v, want none: the passthrough fields write no anti-affinity", pod.Affinity)
+		}
+	})
+
+	t.Run(dataComponent, func(t *testing.T) {
+		pod := dataStatefulSet(cluster).Spec.Template.Spec
+		if diff := cmp.Diff(map[string]string{nodeRoleLabel: "data-node"}, pod.NodeSelector); diff != "" {
+			t.Errorf("node selector mismatch (-want +got):\n%s", diff)
+		}
+		if pod.Tolerations != nil || pod.PriorityClassName != "" {
+			t.Errorf("tolerations %v, priorityClassName %q: the coordinators' settings must not leak",
+				pod.Tolerations, pod.PriorityClassName)
+		}
+		wantSpread := []corev1.TopologySpreadConstraint{{
+			MaxSkew:           2,
+			TopologyKey:       zoneKey,
+			WhenUnsatisfiable: corev1.ScheduleAnyway,
+			LabelSelector:     ownSelector,
+		}}
+		if diff := cmp.Diff(wantSpread, pod.TopologySpreadConstraints); diff != "" {
+			t.Errorf("spread constraints mismatch (-want +got):\n%s", diff)
+		}
+	})
+}

@@ -184,6 +184,67 @@ spec:
       podLabels: {}
       statefulSetLabels: {}
       serviceLabels: {}
+  # Where the pods land. Present, podAntiAffinity is the one rule the operator
+  # writes into both roles' pod templates: it keeps the members of a role
+  # apart, and the block below tunes it for the whole cluster. Comment the
+  # block out and the operator writes no rule, leaving placement to the
+  # scheduler's free-capacity balancing alone — which is right on a
+  # single-node kind, where there is nothing to spread over, and wrong on a
+  # cluster whose three coordinators may then land on one node. An empty
+  # block is the HA chart's default: preferred, so a cluster larger than the
+  # node pool still comes up. The per-role blocks pass the rest of the
+  # scheduling surface through untouched, in the core/v1 vocabulary.
+  #
+  # A scheduling change only lands when a pod is recreated. Both StatefulSets
+  # restart nothing on their own, so the operator rolls the cluster for it,
+  # data instances before coordinators, exactly as for any other pod-template
+  # change — Updated reports the progress.
+  scheduling:
+    podAntiAffinity:
+      # preferred (the default) is a soft rule. required refuses to
+      # co-locate: with too few nodes the surplus pods stay Pending, so use it
+      # on clusters sized for it.
+      type: preferred
+      # role, the default, keeps coordinators off coordinators and data off
+      # data; with type required that is the chart's parity, one coordinator
+      # and one data instance per node at most. cluster keeps every pod of
+      # this resource off every other; with type required that is the chart's
+      # unique, one pod per node, and needs coordinators + dataInstances nodes.
+      scope: role
+      # The node label the rule spreads over. hostname means distinct nodes;
+      # a zone label means distinct zones, which for more pods than zones is
+      # better said with topologySpreadConstraints below.
+      topologyKey: kubernetes.io/hostname
+    # Per role and passed through as written. nodeSelector and tolerations pin
+    # a role to a node pool (the chart's nodeSelection is a nodeSelector of
+    # role: coordinator-node on one role and role: data-node on the other),
+    # topologySpreadConstraints spread a role over zones, and podAntiAffinity
+    # is appended to the operator's rule rather than replacing it — comment
+    # the rule out above to take full control. The operator sets the pod
+    # labels these select on, app.kubernetes.io/instance for the cluster and
+    # app.kubernetes.io/component for the role, and fills an empty
+    # labelSelector on a spread constraint with them.
+    coordinators:
+      nodeSelector: {}
+        # role: coordinator-node
+      tolerations: []
+        # - key: memgraph
+        #   operator: Equal
+        #   value: coordinator
+        #   effect: NoSchedule
+      topologySpreadConstraints: []
+        # - maxSkew: 1
+        #   topologyKey: topology.kubernetes.io/zone
+        #   whenUnsatisfiable: DoNotSchedule
+      # podAntiAffinity: {}
+      # priorityClassName: system-cluster-critical
+    data:
+      nodeSelector: {}
+        # role: data-node
+      tolerations: []
+      topologySpreadConstraints: []
+      # podAntiAffinity: {}
+      # priorityClassName: ""
   # Literal, non-secret environment variables only: there is no valueFrom, so
   # the CR stays safe to commit. The license and the organization name come from
   # the secrets block above, and admission rejects an entry that tries to shadow

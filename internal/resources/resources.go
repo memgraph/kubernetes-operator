@@ -94,16 +94,20 @@ func DataPodSelector(cluster *memgraphcomv1alpha1.MemgraphCluster) map[string]st
 	return selectorLabels(cluster, dataComponent)
 }
 
-// instanceLabel carries the cluster's name on every object of the cluster.
-const instanceLabel = "app.kubernetes.io/instance"
+// instanceLabel carries the cluster's name on every object of the cluster,
+// and componentLabel the role.
+const (
+	instanceLabel  = "app.kubernetes.io/instance"
+	componentLabel = "app.kubernetes.io/component"
+)
 
 // selectorLabels returns the immutable subset of labels used as StatefulSet
 // and Service selectors.
 func selectorLabels(cluster *memgraphcomv1alpha1.MemgraphCluster, component string) map[string]string {
 	return map[string]string{
-		"app.kubernetes.io/name":      "memgraph",
-		instanceLabel:                 cluster.Name,
-		"app.kubernetes.io/component": component,
+		"app.kubernetes.io/name": "memgraph",
+		instanceLabel:            cluster.Name,
+		componentLabel:           component,
 	}
 }
 
@@ -132,6 +136,17 @@ type normalizedSpec struct {
 	// intraClusterTLSSecret names the Secret the members authenticate each
 	// other with, and is empty for a cluster whose members talk in plaintext.
 	intraClusterTLSSecret string
+	// podAntiAffinity is the operator's own anti-affinity rule with its knobs
+	// resolved, and nil for a cluster that asked for none.
+	podAntiAffinity *normalizedPodAntiAffinity
+}
+
+// normalizedPodAntiAffinity is the scheduling.podAntiAffinity block with every
+// optional field resolved to its CRD schema default.
+type normalizedPodAntiAffinity struct {
+	typ         memgraphcomv1alpha1.PodAntiAffinityType
+	scope       memgraphcomv1alpha1.PodAntiAffinityScope
+	topologyKey string
 }
 
 // normalizedMonitoring is the monitoring block with each optional object
@@ -192,6 +207,7 @@ type normalizedRole struct {
 	extraArgs         []string
 	extraVolumes      []corev1.Volume
 	extraMounts       []corev1.VolumeMount
+	scheduling        memgraphcomv1alpha1.RoleSchedulingSpec
 }
 
 // normalizedCoreDumps is one role's core dump configuration with every optional
@@ -251,6 +267,7 @@ func normalize(spec memgraphcomv1alpha1.MemgraphClusterSpec) normalizedSpec {
 			extraArgs:    spec.ExtraArgs.Coordinators,
 			extraVolumes: spec.ExtraVolumes.Coordinators,
 			extraMounts:  spec.ExtraVolumeMounts.Coordinators,
+			scheduling:   spec.Scheduling.Coordinators,
 		}),
 		dataRole: normalizeRole(roleSpec{
 			storage:      spec.Storage.Data,
@@ -261,6 +278,7 @@ func normalize(spec memgraphcomv1alpha1.MemgraphClusterSpec) normalizedSpec {
 			extraArgs:    spec.ExtraArgs.Data,
 			extraVolumes: spec.ExtraVolumes.Data,
 			extraMounts:  spec.ExtraVolumeMounts.Data,
+			scheduling:   spec.Scheduling.Data,
 		}),
 	}
 	if spec.ExternalAccess != nil {
@@ -310,6 +328,22 @@ func normalize(spec memgraphcomv1alpha1.MemgraphClusterSpec) normalizedSpec {
 	if spec.TLS != nil && spec.TLS.IntraCluster != nil {
 		n.intraClusterTLSSecret = spec.TLS.IntraCluster.SecretName
 	}
+	if rule := spec.Scheduling.PodAntiAffinity; rule != nil {
+		n.podAntiAffinity = &normalizedPodAntiAffinity{
+			typ:         rule.Type,
+			scope:       rule.Scope,
+			topologyKey: rule.TopologyKey,
+		}
+		if n.podAntiAffinity.typ == "" {
+			n.podAntiAffinity.typ = memgraphcomv1alpha1.DefaultPodAntiAffinityType
+		}
+		if n.podAntiAffinity.scope == "" {
+			n.podAntiAffinity.scope = memgraphcomv1alpha1.DefaultPodAntiAffinityScope
+		}
+		if n.podAntiAffinity.topologyKey == "" {
+			n.podAntiAffinity.topologyKey = memgraphcomv1alpha1.DefaultPodAntiAffinityTopologyKey
+		}
+	}
 	if spec.Coordinators != nil {
 		n.coordinators = *spec.Coordinators
 	}
@@ -353,6 +387,7 @@ type roleSpec struct {
 	extraArgs    []string
 	extraVolumes []corev1.Volume
 	extraMounts  []corev1.VolumeMount
+	scheduling   memgraphcomv1alpha1.RoleSchedulingSpec
 }
 
 func normalizeRole(role roleSpec) normalizedRole {
@@ -367,6 +402,7 @@ func normalizeRole(role roleSpec) normalizedRole {
 		extraArgs:         role.extraArgs,
 		extraVolumes:      role.extraVolumes,
 		extraMounts:       role.extraMounts,
+		scheduling:        role.scheduling,
 	}
 }
 
