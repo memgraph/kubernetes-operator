@@ -1275,6 +1275,66 @@ func TestStatefulSetUserContainers(t *testing.T) {
 	})
 }
 
+// TestStatefulSetInitContainers covers the passthrough of the user's init
+// containers: a role's join its pods after the operator's own and only its
+// pods, a container naming no securityContext gets the restricted one, and
+// one naming its own keeps it.
+func TestStatefulSetInitContainers(t *testing.T) {
+	seeder := corev1.Container{
+		Name:    "seed-modules",
+		Image:   "docker.io/library/busybox:1.37.0",
+		Command: []string{"sh", "-c", "echo hello world"},
+	}
+	fetcher := corev1.Container{
+		Name:  "fetch-snapshot",
+		Image: "docker.io/curlimages/curl:8.14.1",
+		VolumeMounts: []corev1.VolumeMount{{
+			Name: libVolume, MountPath: libPath,
+		}},
+		SecurityContext: &corev1.SecurityContext{RunAsUser: ptr.To(int64(0))},
+	}
+
+	cluster := minimalCluster()
+	cluster.Spec.InitContainers = memgraphcomv1alpha1.InitContainersSpec{
+		Data: []corev1.Container{seeder, fetcher},
+	}
+
+	t.Run(dataComponent, func(t *testing.T) {
+		lockedSeeder := seeder
+		lockedSeeder.SecurityContext = expectedContainerSecurityContext()
+		want := []corev1.Container{lockedSeeder, fetcher}
+		if diff := cmp.Diff(want, dataStatefulSet(cluster).Spec.Template.Spec.InitContainers); diff != "" {
+			t.Errorf("init containers mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run(coordinatorComponent, func(t *testing.T) {
+		if got := coordinatorStatefulSet(cluster).Spec.Template.Spec.InitContainers; len(got) != 0 {
+			t.Errorf("init containers = %v, want none on the role that declared none", got)
+		}
+	})
+
+	// The operator's own init containers keep their place ahead of the user's,
+	// so a user container runs on volumes the ownership one already fixed.
+	t.Run("after the operator's own", func(t *testing.T) {
+		cluster := minimalCluster()
+		cluster.Spec.SysctlInitContainer = &memgraphcomv1alpha1.SysctlInitContainerSpec{}
+		cluster.Spec.CoreDumps.Data = &memgraphcomv1alpha1.RoleCoreDumpsSpec{}
+		cluster.Spec.FixOwnershipInitContainer = &memgraphcomv1alpha1.FixOwnershipInitContainerSpec{}
+		cluster.Spec.InitContainers.Data = []corev1.Container{seeder}
+
+		containers := dataStatefulSet(cluster).Spec.Template.Spec.InitContainers
+		names := make([]string, 0, len(containers))
+		for _, c := range containers {
+			names = append(names, c.Name)
+		}
+		want := []string{"init-sysctl", "init-core-pattern", "init-fix-perms", "seed-modules"}
+		if diff := cmp.Diff(want, names); diff != "" {
+			t.Errorf("init container order mismatch (-want +got):\n%s", diff)
+		}
+	})
+}
+
 // TestStatefulSetRetentionPolicy pins the mapping from the spec's retention
 // policy onto the StatefulSet machinery that is the only deleter of this
 // cluster's storage. Both whenDeleted and whenScaled follow it: the claim of a

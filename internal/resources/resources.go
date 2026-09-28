@@ -243,6 +243,7 @@ type normalizedRole struct {
 	extraVolumes      []corev1.Volume
 	extraMounts       []corev1.VolumeMount
 	userContainers    []corev1.Container
+	initContainers    []corev1.Container
 	scheduling        memgraphcomv1alpha1.RoleSchedulingSpec
 }
 
@@ -307,6 +308,7 @@ func normalize(spec memgraphcomv1alpha1.MemgraphClusterSpec) normalizedSpec {
 			extraVolumes:   spec.ExtraVolumes.Coordinators,
 			extraMounts:    spec.ExtraVolumeMounts.Coordinators,
 			userContainers: spec.UserContainers.Coordinators,
+			initContainers: spec.InitContainers.Coordinators,
 			scheduling:     spec.Scheduling.Coordinators,
 		}),
 		dataRole: normalizeRole(roleSpec{
@@ -319,6 +321,7 @@ func normalize(spec memgraphcomv1alpha1.MemgraphClusterSpec) normalizedSpec {
 			extraVolumes:   spec.ExtraVolumes.Data,
 			extraMounts:    spec.ExtraVolumeMounts.Data,
 			userContainers: spec.UserContainers.Data,
+			initContainers: spec.InitContainers.Data,
 			scheduling:     spec.Scheduling.Data,
 		}),
 	}
@@ -429,6 +432,7 @@ type roleSpec struct {
 	extraVolumes   []corev1.Volume
 	extraMounts    []corev1.VolumeMount
 	userContainers []corev1.Container
+	initContainers []corev1.Container
 	scheduling     memgraphcomv1alpha1.RoleSchedulingSpec
 }
 
@@ -445,6 +449,7 @@ func normalizeRole(role roleSpec) normalizedRole {
 		extraVolumes:      role.extraVolumes,
 		extraMounts:       role.extraMounts,
 		userContainers:    role.userContainers,
+		initContainers:    role.initContainers,
 		scheduling:        role.scheduling,
 	}
 }

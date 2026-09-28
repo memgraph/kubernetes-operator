@@ -832,6 +832,19 @@ spec:
                     pattern: ^[a-zA-Z0-9_][a-zA-Z0-9._-]*$
                     type: string
                 type: object
+              initContainers:
+                description: |-
+                  initContainers adds init containers of your own to both roles' pods,
+                  run after the operator's own and before Memgraph.
+                properties:
+                  coordinators:
+                    description: coordinators are run by every coordinator pod before
+                      Memgraph.
+                    x-kubernetes-preserve-unknown-fields: true
+                  data:
+                    description: data are run by every data instance pod before Memgraph.
+                    x-kubernetes-preserve-unknown-fields: true
+                type: object
               labels:
                 description: labels adds custom labels to both roles' pods, StatefulSets
                   and Services.

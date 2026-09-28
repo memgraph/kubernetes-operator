@@ -560,11 +560,12 @@ func podContainers(memgraph corev1.Container, role normalizedRole) []corev1.Cont
 	return containers
 }
 
-// userContainer passes a user container through as written, filling in the
-// one thing the pod's security posture needs from it: a container naming no
-// securityContext gets the same restricted one as Memgraph, so the chart's
-// busybox example runs under the restricted Pod Security Standard. A
-// container that names one has said what it needs and keeps it.
+// userContainer passes a user container, sidecar or init, through as
+// written, filling in the one thing the pod's security posture needs from it:
+// a container naming no securityContext gets the same restricted one as
+// Memgraph, so the chart's busybox example runs under the restricted Pod
+// Security Standard. A container that names one has said what it needs and
+// keeps it.
 func userContainer(container corev1.Container) corev1.Container {
 	if container.SecurityContext == nil {
 		container.SecurityContext = restrictedSecurityContext()
@@ -575,9 +576,11 @@ func userContainer(container corev1.Container) corev1.Container {
 // podInitContainers are the containers a role's pods run before Memgraph, in
 // the HA chart's order: the sysctl one if the cluster asked for it, then the
 // core pattern one if the role collects dumps and asked the operator to
-// configure it, then the ownership one if the cluster asked for it. The first
-// two are privileged and the third runs as root, so a restricted namespace
-// can have none of them.
+// configure it, then the ownership one if the cluster asked for it, then the
+// role's own init containers. The first two are privileged and the third runs
+// as root, so a restricted namespace can have none of them; the user's are
+// passed through like the user containers, filling the restricted security
+// context on any naming none.
 func podInitContainers(spec normalizedSpec, role normalizedRole) []corev1.Container {
 	var containers []corev1.Container
 	if spec.maxMapCount > 0 {
@@ -592,6 +595,9 @@ func podInitContainers(spec normalizedSpec, role normalizedRole) []corev1.Contai
 	// an identity nobody named.
 	if uid, gid, ok := spec.securityContext.chownTarget(); spec.fixOwnership && ok {
 		containers = append(containers, fixOwnershipInitContainer(spec, role, uid, gid))
+	}
+	for _, container := range role.initContainers {
+		containers = append(containers, userContainer(container))
 	}
 	return containers
 }
