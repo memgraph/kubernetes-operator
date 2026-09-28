@@ -155,6 +155,7 @@ spec:
   # Memgraph's ownership check until fixOwnershipInitContainer below moves the
   # volumes over.
   # securityContext: {}
+  
   # Every pod sets fsGroup to the memgraph group, which is how a volume normally
   # arrives writable to the non-root memgraph user. Some storage drivers
   # (rancher.io/local-path among them) do not honor it and hand over a volume
