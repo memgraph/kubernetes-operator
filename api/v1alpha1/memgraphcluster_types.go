@@ -969,8 +969,10 @@ type ExternalAccessSpec struct {
 // The object always lives in the cluster's namespace. Owner references cannot
 // cross namespaces, and the operator garbage-collects and prunes through them,
 // so there is no namespace knob; a Prometheus in another namespace is pointed
-// at this one with its serviceMonitorNamespaceSelector. Scheme and TLS
-// settings arrive with TLS support, driven by the same spec that turns it on.
+// at this one with its serviceMonitorNamespaceSelector. The scheme is not a
+// knob either: it follows spec.tls.bolt, because Memgraph serves metrics from
+// the Bolt server context, so the endpoint is http until that block is set
+// and https with verification skipped from then on.
 type ServiceMonitorSpec struct {
 	// labels are added to the ServiceMonitor. They are what a Prometheus
 	// selects ServiceMonitors by — with kube-prometheus-stack, the release
@@ -1041,6 +1043,60 @@ type MonitoringSpec struct {
 	// as a ConfigMap a Grafana sidecar loads.
 	// +optional
 	GrafanaDashboard *GrafanaDashboardSpec `json:"grafanaDashboard,omitempty"`
+}
+
+// BoltTLSSpec makes both roles serve Bolt — and with it the metrics endpoint,
+// which Memgraph serves from the same server context — over TLS from a
+// certificate the user supplies. It is one-way, server-authenticated TLS:
+// Memgraph presents the certificate and never asks a client for one, so what
+// a client gets is confidentiality of every Bolt byte and, if it verifies,
+// proof it reached the real cluster. Verification is the client's business
+// and needs the CA on the client's side, never on Memgraph's.
+//
+// One Secret serves every pod of both roles. A StatefulSet has one pod
+// template, so per-pod Secrets cannot be expressed, and per-pod certificates
+// would buy nothing: a Bolt certificate carries as many SANs as its clients
+// dial, and no client tells one member from another by certificate. The SANs
+// must therefore cover every address a verifying client dials: the external
+// address the operator announces as bolt_server on an exposed cluster, and
+// for clients inside Kubernetes the pod DNS names, which one wildcard per
+// role covers (*.<cluster>-coordinator.<namespace>.svc.<clusterDomain> and
+// *.<cluster>-data.<namespace>.svc.<clusterDomain>).
+//
+// Three things follow from the block, all derived and none a knob. The
+// operator dials the coordinators over TLS without verifying the certificate:
+// verifying would force every Bolt certificate to carry a CA and pod-DNS SANs,
+// and buys nothing while Bolt is unauthenticated. The ServiceMonitor, when
+// asked for, scrapes over https with verification skipped, for the same
+// reason. And the block may be added to or removed from a live cluster: it is
+// an ordinary pod-template change, rolled one pod at a time, during which the
+// operator dials whichever of the two modes a coordinator still speaks.
+//
+// Rotation is not the operator's job. The Secret is mounted without subPath,
+// so an in-place update reaches every pod's files within the kubelet's sync
+// period; Memgraph then picks them up on RELOAD BOLT SERVER TLS, issued on
+// every instance. Pointing at a differently named Secret is a pod-template
+// change and rolls the cluster instead.
+type BoltTLSSpec struct {
+	// secretName names a Secret in the cluster's namespace holding the
+	// certificate under tls.crt and the private key under tls.key — the shape
+	// of a kubernetes.io/tls Secret, which kubectl create secret tls and a
+	// cert-manager Certificate both produce. Both roles mount it read-only and
+	// serve Bolt and metrics with it.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
+	// +required
+	SecretName string `json:"secretName"`
+}
+
+// TLSSpec holds the cluster's TLS modes, each an optional presence-based block
+// like externalAccess and monitoring: present, the mode is on; absent, off.
+type TLSSpec struct {
+	// bolt serves Bolt and the metrics endpoint over TLS on both roles, from
+	// the certificate in the named Secret.
+	// +optional
+	Bolt *BoltTLSSpec `json:"bolt,omitempty"`
 }
 
 // MemgraphClusterSpec defines the desired state of MemgraphCluster.
@@ -1150,6 +1206,11 @@ type MemgraphClusterSpec struct {
 	// point a stack at it.
 	// +optional
 	Monitoring *MonitoringSpec `json:"monitoring,omitempty"`
+
+	// tls turns on the cluster's TLS modes from certificates in Secrets the
+	// user supplies. Absent, every port speaks plaintext.
+	// +optional
+	TLS *TLSSpec `json:"tls,omitempty"`
 }
 
 // ExternalAddress is the external address one member, or the coordinators

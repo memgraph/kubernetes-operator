@@ -253,3 +253,25 @@ func TestUsesGrafanaDashboard(t *testing.T) {
 		t.Error("UsesGrafanaDashboard() = false for a cluster with the block")
 	}
 }
+
+// TestServiceMonitorBoltTLS pins what spec.tls.bolt does to the endpoint:
+// Memgraph serves metrics from the Bolt server context, so the scrape must go
+// over https the moment the block is set, and it goes unverified — Prometheus
+// scrapes pod IPs, which no user-facing certificate names.
+func TestServiceMonitorBoltTLS(t *testing.T) {
+	cluster := monitoredCluster()
+	cluster.Spec.TLS = &memgraphcomv1alpha1.TLSSpec{
+		Bolt: &memgraphcomv1alpha1.BoltTLSSpec{SecretName: boltTLSSecretName},
+	}
+
+	want := expectedServiceMonitor()
+	want.Spec.Endpoints[0].Scheme = ptr.To(monitoringv1.SchemeHTTPS)
+	want.Spec.Endpoints[0].TLSConfig = &monitoringv1.TLSConfig{
+		SafeTLSConfig: monitoringv1.SafeTLSConfig{InsecureSkipVerify: ptr.To(true)},
+	}
+
+	got := resources.ServiceMonitor(cluster)
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("ServiceMonitor() mismatch (-want +got):\n%s", diff)
+	}
+}

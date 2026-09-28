@@ -129,6 +129,11 @@ type CoordinatorEndpoint struct {
 	Name string
 	// Address is its pod's bolt "host:port".
 	Address string
+	// TLS is whether the spec has the coordinator serving Bolt over TLS, and
+	// so the mode the operator should dial first. During the roll that turns
+	// TLS on or off a coordinator may still speak the other mode, which the
+	// connector falls back to.
+	TLS bool
 }
 
 // CoordinatorEndpoints is every coordinator pod the operator currently runs,
@@ -143,6 +148,7 @@ func CoordinatorEndpoints(cluster *memgraphcomv1alpha1.MemgraphCluster, running 
 		endpoints = append(endpoints, CoordinatorEndpoint{
 			Name:    CoordinatorInstanceName(ordinal),
 			Address: hostPort(podFQDN(cluster, CoordinatorName(cluster), spec, ordinal), memgraphcomv1alpha1.BoltPort),
+			TLS:     spec.boltTLSSecret != "",
 		})
 	}
 	return endpoints

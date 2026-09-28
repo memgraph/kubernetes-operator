@@ -18,6 +18,7 @@ package memgraph
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -34,16 +35,43 @@ func NewBoltConnector() Connector {
 
 type boltConnector struct{}
 
-func (boltConnector) Connect(ctx context.Context, address string) (Client, error) {
-	driver, err := neo4j.NewDriverWithContext("bolt://"+address, neo4j.NoAuth())
-	if err != nil {
-		return nil, fmt.Errorf("creating bolt driver for %s: %w", address, err)
+// The two URI schemes the connector dials with. bolt+ssc is TLS with the
+// certificate accepted unverified: the operator dials coordinators on pod DNS,
+// and verifying would force every Bolt certificate to carry a CA and pod-DNS
+// SANs while buying nothing on an unauthenticated Bolt — anyone positioned to
+// impersonate a coordinator to the operator can talk to the real one directly.
+// Bolt auth is the trigger for revisiting that.
+const (
+	schemePlain = "bolt"
+	schemeTLS   = "bolt+ssc"
+)
+
+// dialSchemes is the order the connector tries the two modes in: the one the
+// spec asks for first, the other as the fallback that carries a pass through
+// the roll turning TLS on or off, when a coordinator not yet restarted still
+// speaks the old mode.
+func dialSchemes(tls bool) []string {
+	if tls {
+		return []string{schemeTLS, schemePlain}
 	}
-	if err := driver.VerifyConnectivity(ctx); err != nil {
-		_ = driver.Close(ctx)
-		return nil, fmt.Errorf("connecting to %s: %w", address, err)
+	return []string{schemePlain, schemeTLS}
+}
+
+func (boltConnector) Connect(ctx context.Context, address string, tls bool) (Client, error) {
+	var errs []error
+	for _, scheme := range dialSchemes(tls) {
+		driver, err := neo4j.NewDriverWithContext(scheme+"://"+address, neo4j.NoAuth())
+		if err != nil {
+			return nil, fmt.Errorf("creating bolt driver for %s: %w", address, err)
+		}
+		if err := driver.VerifyConnectivity(ctx); err != nil {
+			_ = driver.Close(ctx)
+			errs = append(errs, fmt.Errorf("%s: %w", scheme, err))
+			continue
+		}
+		return &boltClient{driver: driver}, nil
 	}
-	return &boltClient{driver: driver}, nil
+	return nil, fmt.Errorf("connecting to %s: %w", address, errors.Join(errs...))
 }
 
 type boltClient struct {

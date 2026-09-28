@@ -103,6 +103,24 @@ type clusterUnderTest struct {
 	name          string
 	coordinators  int32
 	dataInstances int32
+	// tls is whether the cluster serves Bolt over TLS, which every mgconsole
+	// invocation the helpers make inside its pods has to know: mgconsole
+	// dials plaintext unless told otherwise.
+	tls bool
+}
+
+// mgconsole is the shell pipeline that runs a query through mgconsole inside
+// one of the cluster's pods, in whichever Bolt mode the cluster serves. Extra
+// flags go to mgconsole verbatim.
+func (c clusterUnderTest) mgconsole(query string, flags ...string) string {
+	command := "mgconsole"
+	if c.tls {
+		command += " --use-ssl=true"
+	}
+	for _, flag := range flags {
+		command += " " + flag
+	}
+	return fmt.Sprintf("echo '%s' | %s", query, command)
 }
 
 // withTopology returns the same cluster with a different declared topology,
@@ -1096,7 +1114,7 @@ func wipeInstanceRegistration(name string) error {
 		return fmt.Errorf("no coordinator leader found to unregister %s: %w", name, err)
 	}
 	cmd := exec.Command("kubectl", "exec", pod, "-n", clusterNamespace, "-c", "memgraph", "--",
-		"bash", "-c", fmt.Sprintf("echo 'UNREGISTER INSTANCE %s;' | mgconsole", name))
+		"bash", "-c", quickstartCluster.mgconsole(fmt.Sprintf("UNREGISTER INSTANCE %s;", name)))
 	if _, err := utils.Run(cmd); err != nil {
 		return fmt.Errorf("unregistering %s on %s: %w", name, pod, err)
 	}
@@ -1122,7 +1140,7 @@ func removeCoordinatorRegistration() (string, error) {
 	}
 	name := resources.CoordinatorInstanceName(ordinal)
 	cmd := exec.Command("kubectl", "exec", pod, "-n", clusterNamespace, "-c", "memgraph", "--",
-		"bash", "-c", fmt.Sprintf("echo 'REMOVE COORDINATOR %d;' | mgconsole", ordinal))
+		"bash", "-c", quickstartCluster.mgconsole(fmt.Sprintf("REMOVE COORDINATOR %d;", ordinal)))
 	if _, err := utils.Run(cmd); err != nil {
 		return "", fmt.Errorf("removing %s on %s: %w", name, pod, err)
 	}
@@ -1311,7 +1329,7 @@ func (c clusterUnderTest) makeMain(name string) error {
 	}
 	query := fmt.Sprintf("DEMOTE INSTANCE %s; SET INSTANCE %s TO MAIN;", main, name)
 	cmd := exec.Command("kubectl", "exec", pod, "-n", c.namespace, "-c", "memgraph", "--",
-		"bash", "-c", fmt.Sprintf("echo '%s' | mgconsole", query))
+		"bash", "-c", c.mgconsole(query))
 	if _, err := utils.Run(cmd); err != nil {
 		return fmt.Errorf("moving MAIN from %s to %s on %s: %w", main, name, pod, err)
 	}
@@ -1334,7 +1352,7 @@ func (c clusterUnderTest) makeLeader(names ...string) error {
 		return nil
 	}
 	cmd := exec.Command("kubectl", "exec", pod, "-n", c.namespace, "-c", "memgraph", "--",
-		"bash", "-c", "echo 'YIELD LEADERSHIP;' | mgconsole")
+		"bash", "-c", c.mgconsole("YIELD LEADERSHIP;"))
 	if _, err := utils.Run(cmd); err != nil {
 		return fmt.Errorf("yielding leadership on %s: %w", pod, err)
 	}
@@ -1377,7 +1395,7 @@ func instanceNames(view []instanceRow) []string {
 // output.
 func (c clusterUnderTest) showInstances(pod string) ([]instanceRow, error) {
 	cmd := exec.Command("kubectl", "exec", pod, "-n", c.namespace, "-c", "memgraph", "--",
-		"bash", "-c", "echo 'SHOW INSTANCES;' | mgconsole --output-format=csv")
+		"bash", "-c", c.mgconsole("SHOW INSTANCES;", "--output-format=csv"))
 	output, err := utils.Run(cmd)
 	if err != nil {
 		return nil, err

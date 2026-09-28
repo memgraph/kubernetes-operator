@@ -56,13 +56,18 @@ const (
 	statefulSetKind = "StatefulSet"
 	serviceKind     = "Service"
 
-	tmpVolume       = "tmp"
-	shell           = "/bin/sh"
-	defaultImageRef = memgraphcomv1alpha1.DefaultImageReference
-	coreDumpsVolume = "core-dumps"
-	coreDumpsPath   = "/var/core/memgraph"
-	dataPath        = "/var/lib/memgraph/mg_data"
-	logFilePath     = "/var/log/memgraph/memgraph.log"
+	tmpVolume = "tmp"
+
+	// The Bolt TLS Secret a fixture names, and the volume the builder mounts
+	// it as.
+	boltTLSSecretName = "bolt-tls"
+	boltTLSVolume     = "bolt-tls"
+	shell             = "/bin/sh"
+	defaultImageRef   = memgraphcomv1alpha1.DefaultImageReference
+	coreDumpsVolume   = "core-dumps"
+	coreDumpsPath     = "/var/core/memgraph"
+	dataPath          = "/var/lib/memgraph/mg_data"
+	logFilePath       = "/var/log/memgraph/memgraph.log"
 
 	// The operator's identity labels, which custom labels may never override.
 	nameLabel      = "app.kubernetes.io/name"
@@ -253,13 +258,13 @@ func expectedCommand(script string) []string {
 }
 
 // expectedArgs are the flags a role is started with: the shared ones in the
-// order the builder emits them, then the fixture's extra args. The ports vary
-// per fixture and a role that opted out of log storage gets an empty
-// --log-file, so both are parameters.
-func expectedArgs(boltPort, managementPort int32, logDestination string, extra ...string) []string {
+// order the builder emits them, then the fixture's extra args. The ports are
+// the fixed internal ones; a role that opted out of log storage gets an empty
+// --log-file, so that is a parameter.
+func expectedArgs(logDestination string, extra ...string) []string {
 	return append([]string{
-		fmt.Sprintf("--bolt-port=%d", boltPort),
-		fmt.Sprintf("--management-port=%d", managementPort),
+		fmt.Sprintf("--bolt-port=%d", memgraphcomv1alpha1.BoltPort),
+		fmt.Sprintf("--management-port=%d", memgraphcomv1alpha1.ManagementPort),
 		fmt.Sprintf("--metrics-port=%d", memgraphcomv1alpha1.MetricsPort),
 		"--metrics-format=OpenMetrics",
 		"--data-directory=" + dataPath,
@@ -273,8 +278,8 @@ func expectedArgs(boltPort, managementPort int32, logDestination string, extra .
 // expectedCoordinatorArgs are the same flags as arguments to the coordinator's
 // shell wrapper, which forwards them with "$@" — so they are never parsed by
 // the shell. The leading element is the wrapper's $0, not a flag.
-func expectedCoordinatorArgs(boltPort, managementPort int32, logDestination string, extra ...string) []string {
-	return append([]string{memgraphName}, expectedArgs(boltPort, managementPort, logDestination, extra...)...)
+func expectedCoordinatorArgs(logDestination string, extra ...string) []string {
+	return append([]string{memgraphName}, expectedArgs(logDestination, extra...)...)
 }
 
 // expectedVolumes covers only the ephemeral scratch volume: lib and log
@@ -387,8 +392,7 @@ func TestCoordinatorStatefulSetDefaults(t *testing.T) {
 						Image:           defaultImageRef,
 						ImagePullPolicy: corev1.PullIfNotPresent,
 						Command:         expectedCommand(expectedCoordinatorScript),
-						Args: expectedCoordinatorArgs(memgraphcomv1alpha1.BoltPort,
-							memgraphcomv1alpha1.ManagementPort, logFilePath),
+						Args:            expectedCoordinatorArgs(logFilePath),
 						Env: append([]corev1.EnvVar{{
 							Name: "POD_NAME",
 							ValueFrom: &corev1.EnvVarSource{
@@ -449,9 +453,8 @@ func TestDataStatefulSetDefaults(t *testing.T) {
 						Name:            memgraphName,
 						Image:           defaultImageRef,
 						ImagePullPolicy: corev1.PullIfNotPresent,
-						Args: expectedArgs(memgraphcomv1alpha1.BoltPort,
-							memgraphcomv1alpha1.ManagementPort, logFilePath),
-						Env: licenseEnv("memgraph-secrets", "MEMGRAPH_ENTERPRISE_LICENSE", "MEMGRAPH_ORGANIZATION_NAME"),
+						Args:            expectedArgs(logFilePath),
+						Env:             licenseEnv("memgraph-secrets", "MEMGRAPH_ENTERPRISE_LICENSE", "MEMGRAPH_ORGANIZATION_NAME"),
 						Ports: []corev1.ContainerPort{
 							{Name: boltPortName, ContainerPort: memgraphcomv1alpha1.BoltPort},
 							{Name: managementPortName, ContainerPort: memgraphcomv1alpha1.ManagementPort},
@@ -644,8 +647,7 @@ func TestStatefulSetWithoutLogStorageClaim(t *testing.T) {
 		if diff := cmp.Diff(wantCommand, container.Command); diff != "" {
 			t.Errorf("start script mismatch (-want +got):\n%s", diff)
 		}
-		wantArgs := expectedCoordinatorArgs(memgraphcomv1alpha1.BoltPort,
-			memgraphcomv1alpha1.ManagementPort, "")
+		wantArgs := expectedCoordinatorArgs("")
 		if diff := cmp.Diff(wantArgs, container.Args); diff != "" {
 			t.Errorf("args mismatch (-want +got):\n%s", diff)
 		}
@@ -863,7 +865,7 @@ func TestStatefulSetExtraVolumes(t *testing.T) {
 	certVolume := corev1.Volume{
 		Name: "bolt-certs",
 		VolumeSource: corev1.VolumeSource{
-			Secret: &corev1.SecretVolumeSource{SecretName: "bolt-tls"},
+			Secret: &corev1.SecretVolumeSource{SecretName: boltTLSSecretName},
 		},
 	}
 	certMount := corev1.VolumeMount{Name: "bolt-certs", MountPath: "/etc/memgraph/ssl", ReadOnly: true}
@@ -981,8 +983,7 @@ exec /usr/lib/memgraph/memgraph \
 // metacharacters from being re-parsed by the shell. spec.extraArgs.coordinators
 // comes last so it wins.
 func expectedTunedCoordinatorArgs() []string {
-	return expectedCoordinatorArgs(memgraphcomv1alpha1.BoltPort, memgraphcomv1alpha1.ManagementPort,
-		logFilePath, "--log-level=WARNING")
+	return expectedCoordinatorArgs(logFilePath, "--log-level=WARNING")
 }
 
 // TestStatefulSetFixedPortsAndClusterDomain pins the fixed ports and configured
@@ -1028,7 +1029,7 @@ func TestStatefulSetFixedPortsAndClusterDomain(t *testing.T) {
 		if diff := cmp.Diff(wantPorts, container.Ports); diff != "" {
 			t.Errorf("container ports mismatch (-want +got):\n%s", diff)
 		}
-		wantArgs := expectedArgs(memgraphcomv1alpha1.BoltPort, memgraphcomv1alpha1.ManagementPort, logFilePath,
+		wantArgs := expectedArgs(logFilePath,
 			"--storage-snapshot-on-exit=true", "--memory-limit=2048")
 		if diff := cmp.Diff(wantArgs, container.Args); diff != "" {
 			t.Errorf("args mismatch (-want +got):\n%s", diff)
@@ -1294,5 +1295,86 @@ func TestStatefulSetExtraEnv(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestStatefulSetBoltTLS pins what spec.tls.bolt adds to both roles: the
+// Secret mounted read-only under the HA chart's path with the two
+// kubernetes.io/tls keys projected by name, and the two flags that turn Bolt —
+// and with it the metrics endpoint — to TLS. The default-off case is pinned by
+// the defaults tests, which expect exactly the volumes and mounts a plaintext
+// cluster carries.
+func TestStatefulSetBoltTLS(t *testing.T) {
+	cluster := minimalCluster()
+	cluster.Spec.TLS = &memgraphcomv1alpha1.TLSSpec{
+		Bolt: &memgraphcomv1alpha1.BoltTLSSpec{SecretName: boltTLSSecretName},
+	}
+
+	wantVolumes := append(expectedVolumes(), corev1.Volume{
+		Name: boltTLSVolume,
+		VolumeSource: corev1.VolumeSource{
+			Secret: &corev1.SecretVolumeSource{
+				SecretName: boltTLSSecretName,
+				Items: []corev1.KeyToPath{
+					{Key: "tls.crt", Path: "tls.crt"},
+					{Key: "tls.key", Path: "tls.key"},
+				},
+			},
+		},
+	})
+	wantMounts := append(expectedVolumeMounts(),
+		corev1.VolumeMount{Name: boltTLSVolume, MountPath: "/etc/memgraph/ssl", ReadOnly: true})
+	tlsFlags := []string{
+		"--bolt-cert-file=/etc/memgraph/ssl/tls.crt",
+		"--bolt-key-file=/etc/memgraph/ssl/tls.key",
+	}
+
+	t.Run(dataComponent, func(t *testing.T) {
+		podSpec := dataStatefulSet(cluster).Spec.Template.Spec
+		if diff := cmp.Diff(wantVolumes, podSpec.Volumes); diff != "" {
+			t.Errorf("volumes mismatch (-want +got):\n%s", diff)
+		}
+		if diff := cmp.Diff(wantMounts, podSpec.Containers[0].VolumeMounts); diff != "" {
+			t.Errorf("volume mounts mismatch (-want +got):\n%s", diff)
+		}
+		wantArgs := expectedArgs(logFilePath, tlsFlags...)
+		if diff := cmp.Diff(wantArgs, podSpec.Containers[0].Args); diff != "" {
+			t.Errorf("args mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run(coordinatorComponent, func(t *testing.T) {
+		podSpec := coordinatorStatefulSet(cluster).Spec.Template.Spec
+		if diff := cmp.Diff(wantVolumes, podSpec.Volumes); diff != "" {
+			t.Errorf("volumes mismatch (-want +got):\n%s", diff)
+		}
+		if diff := cmp.Diff(wantMounts, podSpec.Containers[0].VolumeMounts); diff != "" {
+			t.Errorf("volume mounts mismatch (-want +got):\n%s", diff)
+		}
+		wantArgs := expectedCoordinatorArgs(logFilePath, tlsFlags...)
+		if diff := cmp.Diff(wantArgs, podSpec.Containers[0].Args); diff != "" {
+			t.Errorf("args mismatch (-want +got):\n%s", diff)
+		}
+	})
+}
+
+// TestStatefulSetBoltTLSAfterExtras pins the order the TLS flags and mount
+// land in relative to a role's extras: the flags come before the role's extra
+// args, so a user-supplied --bolt-cert-file still wins as the last occurrence,
+// and the mount comes before the role's extra mounts.
+func TestStatefulSetBoltTLSAfterExtras(t *testing.T) {
+	cluster := minimalCluster()
+	cluster.Spec.TLS = &memgraphcomv1alpha1.TLSSpec{
+		Bolt: &memgraphcomv1alpha1.BoltTLSSpec{SecretName: boltTLSSecretName},
+	}
+	cluster.Spec.ExtraArgs.Data = []string{"--bolt-cert-file=/elsewhere/cert.pem"}
+
+	args := dataStatefulSet(cluster).Spec.Template.Spec.Containers[0].Args
+	certFlags := slices.DeleteFunc(slices.Clone(args), func(arg string) bool {
+		return !strings.HasPrefix(arg, "--bolt-cert-file=")
+	})
+	want := []string{"--bolt-cert-file=/etc/memgraph/ssl/tls.crt", "--bolt-cert-file=/elsewhere/cert.pem"}
+	if diff := cmp.Diff(want, certFlags); diff != "" {
+		t.Errorf("--bolt-cert-file order mismatch (-want +got):\n%s", diff)
 	}
 }

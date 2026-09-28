@@ -2083,6 +2083,60 @@ var _ = Describe("MemgraphCluster Controller", func() {
 		})
 	})
 
+	// Bolt TLS changes nothing about what the operator says to a coordinator,
+	// only how it dials: the intent travels with every connect, and the fake,
+	// which speaks neither mode, records it. Everything else the block does —
+	// the mount, the flags, the ServiceMonitor's scheme — is pure builder
+	// output, pinned by the builder tests.
+	Context("when serving Bolt over TLS", func() {
+		const resourceName = "mgc-bolt-tls"
+
+		cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+
+		BeforeEach(func() {
+			resource := &memgraphcomv1alpha1.MemgraphCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: resourceNamespace},
+				Spec: memgraphcomv1alpha1.MemgraphClusterSpec{
+					TLS: &memgraphcomv1alpha1.TLSSpec{
+						Bolt: &memgraphcomv1alpha1.BoltTLSSpec{SecretName: "bolt-tls"},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+			get(resourceName, cluster)
+		})
+
+		AfterEach(func() {
+			Expect(k8sClient.Delete(ctx, cluster)).To(Succeed())
+			deleteOwned(resourceName)
+		})
+
+		It("should dial every coordinator with the TLS intent", func() {
+			reconcileCluster(resourceName)
+			markWorkloadsReady(resourceName)
+			reconcileCluster(resourceName)
+
+			Expect(fake.connects()).NotTo(BeZero(), "the bootstrap pass must have dialed a coordinator")
+			Expect(fake.tlsConnects()).To(Equal(fake.connects()),
+				"every dial on a cluster serving Bolt TLS must ask for TLS first")
+		})
+
+		It("should drop the TLS intent when the block is removed", func() {
+			reconcileCluster(resourceName)
+			markWorkloadsReady(resourceName)
+			reconcileCluster(resourceName)
+			dialedWithTLS := fake.tlsConnects()
+
+			get(resourceName, cluster)
+			cluster.Spec.TLS = nil
+			Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
+			reconcileCluster(resourceName)
+
+			Expect(fake.connects()).To(BeNumerically(">", dialedWithTLS), "the pass after the edit must dial again")
+			Expect(fake.tlsConnects()).To(Equal(dialedWithTLS), "a plaintext cluster is dialed plaintext first")
+		})
+	})
+
 	Context("when exposing the cluster through a Gateway", func() {
 		const resourceName = "mgc-gateway"
 

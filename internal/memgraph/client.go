@@ -210,6 +210,11 @@ type Client interface {
 
 // Connector opens a Client to a coordinator's "host:port" Bolt address. The
 // controller depends on this interface so tests can substitute a fake cluster.
+//
+// tls is the mode the spec says the coordinator serves, and so the one to dial
+// first. It is an intent rather than a fact: while a roll turns Bolt TLS on or
+// off, a coordinator not yet restarted still speaks the other mode, and the
+// connector is expected to fall back to it rather than fail the pass.
 type Connector interface {
-	Connect(ctx context.Context, address string) (Client, error)
+	Connect(ctx context.Context, address string, tls bool) (Client, error)
 }

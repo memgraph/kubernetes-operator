@@ -48,6 +48,10 @@ type fakeMemgraph struct {
 	// exceptional state a test opts into.
 	behind          map[string]int64
 	connectAttempts int
+	// tlsConnectAttempts counts the connects the operator asked to be over
+	// TLS, which is the whole of what the fake can say about the mode: it
+	// speaks neither.
+	tlsConnectAttempts int
 	// connectErr, when set, makes every Connect fail — the operator's view of a
 	// cluster whose coordinators do not yet answer Bolt.
 	connectErr error
@@ -65,10 +69,13 @@ func newFakeMemgraph() *fakeMemgraph {
 	return &fakeMemgraph{}
 }
 
-func (f *fakeMemgraph) Connect(_ context.Context, address string) (memgraph.Client, error) {
+func (f *fakeMemgraph) Connect(_ context.Context, address string, tls bool) (memgraph.Client, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.connectAttempts++
+	if tls {
+		f.tlsConnectAttempts++
+	}
 	if f.connectErr != nil {
 		return nil, f.connectErr
 	}
@@ -96,6 +103,13 @@ func (f *fakeMemgraph) connects() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.connectAttempts
+}
+
+// tlsConnects is how many connects the operator asked to be over TLS.
+func (f *fakeMemgraph) tlsConnects() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.tlsConnectAttempts
 }
 
 func (f *fakeMemgraph) executedCommands() []string {
