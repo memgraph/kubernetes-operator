@@ -77,6 +77,7 @@ const (
 	shell           = "/bin/sh"
 	defaultImageRef = memgraphcomv1alpha1.DefaultImageReference
 	coreDumpsVolume = "core-dumps"
+	libVolume       = "lib-storage"
 	logVolume       = "log-storage"
 	uploaderImage   = "amazon/aws-cli:2.33.28"
 	libPath         = "/var/lib/memgraph"
@@ -297,11 +298,11 @@ func expectedCorePatternInitContainer() corev1.Container {
 // expectedFixOwnershipInitContainer is the init container every pod of a
 // cluster with the fixOwnershipInitContainer block runs last: root with
 // CAP_CHOWN alone, on the cluster's own image, chowning each of the given
-// mounts to the memgraph user and group.
-func expectedFixOwnershipInitContainer(mounts ...corev1.VolumeMount) corev1.Container {
+// mounts to the pod's identity.
+func expectedFixOwnershipInitContainer(owner string, mounts ...corev1.VolumeMount) corev1.Container {
 	lines := make([]string, 0, len(mounts))
 	for _, mount := range mounts {
-		lines = append(lines, "chown -R 101:103 "+mount.MountPath)
+		lines = append(lines, "chown -R "+owner+" "+mount.MountPath)
 	}
 	return corev1.Container{
 		Name:            "init-fix-perms",
@@ -333,7 +334,7 @@ func sysctlCluster() *memgraphcomv1alpha1.MemgraphCluster {
 
 func expectedVolumeMounts() []corev1.VolumeMount {
 	return []corev1.VolumeMount{
-		{Name: "lib-storage", MountPath: libPath},
+		{Name: libVolume, MountPath: libPath},
 		{Name: logVolume, MountPath: logPath},
 		{Name: tmpVolume, MountPath: "/tmp"},
 	}
@@ -926,7 +927,7 @@ func TestStatefulSetSysctlInitContainer(t *testing.T) {
 // claims Memgraph will use mounted; absent, which the minimal cluster is, no
 // init container at all.
 func TestStatefulSetFixOwnershipInitContainer(t *testing.T) {
-	libMount := corev1.VolumeMount{Name: "lib-storage", MountPath: libPath}
+	libMount := corev1.VolumeMount{Name: libVolume, MountPath: libPath}
 	logMount := corev1.VolumeMount{Name: logVolume, MountPath: logPath}
 	coreDumpsMount := corev1.VolumeMount{Name: coreDumpsVolume, MountPath: coreDumpsPath}
 
@@ -947,7 +948,7 @@ func TestStatefulSetFixOwnershipInitContainer(t *testing.T) {
 	t.Run("chowns the lib and log volumes of both roles", func(t *testing.T) {
 		cluster := withBlock()
 
-		want := []corev1.Container{expectedFixOwnershipInitContainer(libMount, logMount)}
+		want := []corev1.Container{expectedFixOwnershipInitContainer("101:103", libMount, logMount)}
 		for _, sts := range []*appsv1.StatefulSet{coordinatorStatefulSet(cluster), dataStatefulSet(cluster)} {
 			if diff := cmp.Diff(want, sts.Spec.Template.Spec.InitContainers); diff != "" {
 				t.Errorf("%s init containers mismatch (-want +got):\n%s", sts.Name, diff)
@@ -960,7 +961,7 @@ func TestStatefulSetFixOwnershipInitContainer(t *testing.T) {
 		cluster := withBlock()
 		cluster.Spec.Storage.Data.CreateLogStorageClaim = ptr.To(false)
 
-		want := []corev1.Container{expectedFixOwnershipInitContainer(libMount)}
+		want := []corev1.Container{expectedFixOwnershipInitContainer("101:103", libMount)}
 		if diff := cmp.Diff(want, dataStatefulSet(cluster).Spec.Template.Spec.InitContainers); diff != "" {
 			t.Errorf("init containers mismatch (-want +got):\n%s", diff)
 		}
@@ -977,10 +978,105 @@ func TestStatefulSetFixOwnershipInitContainer(t *testing.T) {
 		want := []corev1.Container{
 			expectedSysctlInitContainer(memgraphcomv1alpha1.DefaultMaxMapCount),
 			expectedCorePatternInitContainer(),
-			expectedFixOwnershipInitContainer(libMount, logMount, coreDumpsMount),
+			expectedFixOwnershipInitContainer("101:103", libMount, logMount, coreDumpsMount),
 		}
 		if diff := cmp.Diff(want, dataStatefulSet(cluster).Spec.Template.Spec.InitContainers); diff != "" {
 			t.Errorf("init containers mismatch (-want +got):\n%s", diff)
+		}
+	})
+}
+
+// TestStatefulSetSecurityContext covers the presence-based identity block:
+// absent, the images' uid and gid on both roles; present, exactly the fields
+// written and no other, so an empty block leaves all three to the platform;
+// and the ownership container chowning to whatever the block resolved to.
+func TestStatefulSetSecurityContext(t *testing.T) {
+	libMount := corev1.VolumeMount{Name: libVolume, MountPath: libPath}
+	logMount := corev1.VolumeMount{Name: logVolume, MountPath: logPath}
+
+	// The two fields every policy requires are written whatever the block says.
+	policyOnly := &corev1.PodSecurityContext{
+		RunAsNonRoot:   ptr.To(true),
+		SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
+	}
+	podContext := func(sts *appsv1.StatefulSet) *corev1.PodSecurityContext {
+		return sts.Spec.Template.Spec.SecurityContext
+	}
+
+	t.Run("absent writes the images' identity on both roles", func(t *testing.T) {
+		for _, sts := range []*appsv1.StatefulSet{coordinatorStatefulSet(minimalCluster()), dataStatefulSet(minimalCluster())} {
+			if diff := cmp.Diff(expectedPodSecurityContext(), podContext(sts)); diff != "" {
+				t.Errorf("%s pod security context mismatch (-want +got):\n%s", sts.Name, diff)
+			}
+		}
+	})
+
+	t.Run("empty block leaves the identity to the platform", func(t *testing.T) {
+		cluster := minimalCluster()
+		cluster.Spec.SecurityContext = &memgraphcomv1alpha1.PodSecurityContextSpec{}
+
+		for _, sts := range []*appsv1.StatefulSet{coordinatorStatefulSet(cluster), dataStatefulSet(cluster)} {
+			if diff := cmp.Diff(policyOnly, podContext(sts)); diff != "" {
+				t.Errorf("%s pod security context mismatch (-want +got):\n%s", sts.Name, diff)
+			}
+		}
+	})
+
+	t.Run("named fields land as written and no other", func(t *testing.T) {
+		cluster := minimalCluster()
+		cluster.Spec.SecurityContext = &memgraphcomv1alpha1.PodSecurityContextSpec{
+			RunAsUser: ptr.To(int64(1000680000)),
+			FSGroup:   ptr.To(int64(1000680000)),
+		}
+
+		want := policyOnly.DeepCopy()
+		want.RunAsUser = ptr.To(int64(1000680000))
+		want.FSGroup = ptr.To(int64(1000680000))
+		if diff := cmp.Diff(want, podContext(dataStatefulSet(cluster))); diff != "" {
+			t.Errorf("pod security context mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("the ownership container chowns to runAsUser and runAsGroup", func(t *testing.T) {
+		cluster := minimalCluster()
+		cluster.Spec.FixOwnershipInitContainer = &memgraphcomv1alpha1.FixOwnershipInitContainerSpec{}
+		cluster.Spec.SecurityContext = &memgraphcomv1alpha1.PodSecurityContextSpec{
+			RunAsUser:  ptr.To(int64(1000)),
+			RunAsGroup: ptr.To(int64(2000)),
+			FSGroup:    ptr.To(int64(3000)),
+		}
+
+		want := []corev1.Container{expectedFixOwnershipInitContainer("1000:2000", libMount, logMount)}
+		if diff := cmp.Diff(want, dataStatefulSet(cluster).Spec.Template.Spec.InitContainers); diff != "" {
+			t.Errorf("init containers mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("the ownership container falls back to fsGroup without a runAsGroup", func(t *testing.T) {
+		cluster := minimalCluster()
+		cluster.Spec.FixOwnershipInitContainer = &memgraphcomv1alpha1.FixOwnershipInitContainerSpec{}
+		cluster.Spec.SecurityContext = &memgraphcomv1alpha1.PodSecurityContextSpec{
+			RunAsUser: ptr.To(int64(1000)),
+			FSGroup:   ptr.To(int64(3000)),
+		}
+
+		want := []corev1.Container{expectedFixOwnershipInitContainer("1000:3000", libMount, logMount)}
+		if diff := cmp.Diff(want, dataStatefulSet(cluster).Spec.Template.Spec.InitContainers); diff != "" {
+			t.Errorf("init containers mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	// The CRD rejects this combination; a spec that never passed admission
+	// gets no container rather than a chown to an identity nobody named.
+	t.Run("no ownership container without a named identity", func(t *testing.T) {
+		cluster := minimalCluster()
+		cluster.Spec.FixOwnershipInitContainer = &memgraphcomv1alpha1.FixOwnershipInitContainerSpec{}
+		cluster.Spec.SecurityContext = &memgraphcomv1alpha1.PodSecurityContextSpec{
+			FSGroup: ptr.To(int64(3000)),
+		}
+
+		if got := dataStatefulSet(cluster).Spec.Template.Spec.InitContainers; len(got) != 0 {
+			t.Errorf("init containers = %v, want none without a uid to chown to", got)
 		}
 	})
 }

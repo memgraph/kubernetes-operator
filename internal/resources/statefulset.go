@@ -365,10 +365,11 @@ func privilegedRootSecurityContext() *corev1.SecurityContext {
 // node-tuning containers, as in the HA chart, and mounts exactly what the
 // Memgraph container will use from the pod's claims: the lib volume, the log
 // volume when the role has a log claim, and the core dumps volume when the
-// role collects dumps. The uid and gid are the ones the pods run as, fixed in
-// the Memgraph images, so unlike the chart they are not knobs. Like the other
-// init containers it runs the cluster's own Memgraph image.
-func fixOwnershipInitContainer(spec normalizedSpec, role normalizedRole) corev1.Container {
+// role collects dumps. The uid and gid are the ones the pods run as, from the
+// securityContext block or the images' defaults; the chart's separate knobs
+// for them could only disagree with the pod. Like the other init containers
+// it runs the cluster's own Memgraph image.
+func fixOwnershipInitContainer(spec normalizedSpec, role normalizedRole, uid, gid int64) corev1.Container {
 	mounts := []corev1.VolumeMount{{Name: libVolumeName, MountPath: libMountPath}}
 	if role.storage.createLogClaim {
 		mounts = append(mounts, corev1.VolumeMount{Name: logVolumeName, MountPath: logMountPath})
@@ -378,7 +379,7 @@ func fixOwnershipInitContainer(spec normalizedSpec, role normalizedRole) corev1.
 	}
 	lines := make([]string, 0, len(mounts))
 	for _, mount := range mounts {
-		lines = append(lines, fmt.Sprintf("chown -R %d:%d %s", memgraphUserID, memgraphGroupID, mount.MountPath))
+		lines = append(lines, fmt.Sprintf("chown -R %d:%d %s", uid, gid, mount.MountPath))
 	}
 	script := strings.Join(lines, "\n")
 	return corev1.Container{
@@ -585,8 +586,12 @@ func podInitContainers(spec normalizedSpec, role normalizedRole) []corev1.Contai
 	if role.coreDumps.enabled && role.coreDumps.configurePattern {
 		containers = append(containers, corePatternInitContainer(spec))
 	}
-	if spec.fixOwnership {
-		containers = append(containers, fixOwnershipInitContainer(spec, role))
+	// The CRD rejects the block beside a securityContext that leaves the uid
+	// or both groups to the platform, so a spec that passed admission always
+	// has a target; one that did not gets no container rather than a chown to
+	// an identity nobody named.
+	if uid, gid, ok := spec.securityContext.chownTarget(); spec.fixOwnership && ok {
+		containers = append(containers, fixOwnershipInitContainer(spec, role, uid, gid))
 	}
 	return containers
 }
@@ -646,10 +651,13 @@ func statefulSet(
 					TerminationGracePeriodSeconds: ptr.To(terminationGracePeriod),
 					InitContainers:                podInitContainers(spec, role),
 					Containers:                    podContainers(container, role),
+					// The identity comes from the securityContext block or the
+					// images' defaults; the two fields every policy requires
+					// are not the block's to change.
 					SecurityContext: &corev1.PodSecurityContext{
-						RunAsUser:      ptr.To(memgraphUserID),
-						RunAsGroup:     ptr.To(memgraphGroupID),
-						FSGroup:        ptr.To(memgraphGroupID),
+						RunAsUser:      spec.securityContext.runAsUser,
+						RunAsGroup:     spec.securityContext.runAsGroup,
+						FSGroup:        spec.securityContext.fsGroup,
 						RunAsNonRoot:   ptr.To(true),
 						SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
 					},

@@ -24,6 +24,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/utils/ptr"
 
 	memgraphcomv1alpha1 "github.com/memgraph/kubernetes-operator/api/v1alpha1"
 )
@@ -143,8 +144,36 @@ type normalizedSpec struct {
 	// raises every node to, and zero for a cluster that asked for none.
 	maxMapCount int64
 	// fixOwnership is whether every pod chowns its volume mount points to the
-	// memgraph user from a root init container before Memgraph starts.
+	// pod's identity from a root init container before Memgraph starts.
 	fixOwnership bool
+	// securityContext is the identity every pod runs under, resolved to the
+	// images' uid and gid for a cluster that named none.
+	securityContext normalizedSecurityContext
+}
+
+// normalizedSecurityContext is the securityContext block resolved: the three
+// identity fields as the pod will carry them, nil for one the pod names not.
+type normalizedSecurityContext struct {
+	runAsUser  *int64
+	runAsGroup *int64
+	fsGroup    *int64
+}
+
+// chownTarget is the uid and gid the ownership init container chowns the
+// volumes to: runAsUser, and runAsGroup or else fsGroup. It is false when the
+// cluster left the uid or both groups to the platform, which the CRD rejects
+// beside the fixOwnershipInitContainer block; the builder still has to decide.
+func (c normalizedSecurityContext) chownTarget() (uid, gid int64, ok bool) {
+	if c.runAsUser == nil {
+		return 0, 0, false
+	}
+	switch {
+	case c.runAsGroup != nil:
+		return *c.runAsUser, *c.runAsGroup, true
+	case c.fsGroup != nil:
+		return *c.runAsUser, *c.fsGroup, true
+	}
+	return 0, 0, false
 }
 
 // normalizedPodAntiAffinity is the scheduling.podAntiAffinity block with every
@@ -267,6 +296,7 @@ func normalize(spec memgraphcomv1alpha1.MemgraphClusterSpec) normalizedSpec {
 		readinessProbe:  normalizeProbe(spec.ReadinessProbe),
 		maxMapCount:     normalizeMaxMapCount(spec.SysctlInitContainer),
 		fixOwnership:    spec.FixOwnershipInitContainer != nil,
+		securityContext: normalizeSecurityContext(spec.SecurityContext),
 		coordinatorRole: normalizeRole(roleSpec{
 			storage:        spec.Storage.Coordinators,
 			coreDumps:      normalizeCoreDumps(spec.CoreDumps, spec.CoreDumps.Coordinators),
@@ -476,6 +506,24 @@ func normalizeStorage(spec memgraphcomv1alpha1.RoleStorageSpec) normalizedStorag
 		n.logAccessMode = memgraphcomv1alpha1.DefaultStorageAccessMode
 	}
 	return n
+}
+
+// normalizeSecurityContext resolves the securityContext block: absent, the
+// identity baked into the Memgraph images; present, exactly what it names,
+// including nothing at all for a platform that assigns the identity itself.
+func normalizeSecurityContext(spec *memgraphcomv1alpha1.PodSecurityContextSpec) normalizedSecurityContext {
+	if spec == nil {
+		return normalizedSecurityContext{
+			runAsUser:  ptr.To(memgraphUserID),
+			runAsGroup: ptr.To(memgraphGroupID),
+			fsGroup:    ptr.To(memgraphGroupID),
+		}
+	}
+	return normalizedSecurityContext{
+		runAsUser:  spec.RunAsUser,
+		runAsGroup: spec.RunAsGroup,
+		fsGroup:    spec.FSGroup,
+	}
 }
 
 // normalizeMaxMapCount resolves the sysctl init container block to the one
