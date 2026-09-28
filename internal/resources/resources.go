@@ -210,6 +210,7 @@ type normalizedRole struct {
 	extraArgs         []string
 	extraVolumes      []corev1.Volume
 	extraMounts       []corev1.VolumeMount
+	userContainers    []corev1.Container
 	scheduling        memgraphcomv1alpha1.RoleSchedulingSpec
 }
 
@@ -263,26 +264,28 @@ func normalize(spec memgraphcomv1alpha1.MemgraphClusterSpec) normalizedSpec {
 		readinessProbe:  normalizeProbe(spec.ReadinessProbe),
 		maxMapCount:     normalizeMaxMapCount(spec.SysctlInitContainer),
 		coordinatorRole: normalizeRole(roleSpec{
-			storage:      spec.Storage.Coordinators,
-			coreDumps:    normalizeCoreDumps(spec.CoreDumps, spec.CoreDumps.Coordinators),
-			resources:    spec.Resources.Coordinators,
-			labels:       spec.Labels.Coordinators,
-			env:          spec.ExtraEnv.Coordinators,
-			extraArgs:    spec.ExtraArgs.Coordinators,
-			extraVolumes: spec.ExtraVolumes.Coordinators,
-			extraMounts:  spec.ExtraVolumeMounts.Coordinators,
-			scheduling:   spec.Scheduling.Coordinators,
+			storage:        spec.Storage.Coordinators,
+			coreDumps:      normalizeCoreDumps(spec.CoreDumps, spec.CoreDumps.Coordinators),
+			resources:      spec.Resources.Coordinators,
+			labels:         spec.Labels.Coordinators,
+			env:            spec.ExtraEnv.Coordinators,
+			extraArgs:      spec.ExtraArgs.Coordinators,
+			extraVolumes:   spec.ExtraVolumes.Coordinators,
+			extraMounts:    spec.ExtraVolumeMounts.Coordinators,
+			userContainers: spec.UserContainers.Coordinators,
+			scheduling:     spec.Scheduling.Coordinators,
 		}),
 		dataRole: normalizeRole(roleSpec{
-			storage:      spec.Storage.Data,
-			coreDumps:    normalizeCoreDumps(spec.CoreDumps, spec.CoreDumps.Data),
-			resources:    spec.Resources.Data,
-			labels:       spec.Labels.Data,
-			env:          spec.ExtraEnv.Data,
-			extraArgs:    spec.ExtraArgs.Data,
-			extraVolumes: spec.ExtraVolumes.Data,
-			extraMounts:  spec.ExtraVolumeMounts.Data,
-			scheduling:   spec.Scheduling.Data,
+			storage:        spec.Storage.Data,
+			coreDumps:      normalizeCoreDumps(spec.CoreDumps, spec.CoreDumps.Data),
+			resources:      spec.Resources.Data,
+			labels:         spec.Labels.Data,
+			env:            spec.ExtraEnv.Data,
+			extraArgs:      spec.ExtraArgs.Data,
+			extraVolumes:   spec.ExtraVolumes.Data,
+			extraMounts:    spec.ExtraVolumeMounts.Data,
+			userContainers: spec.UserContainers.Data,
+			scheduling:     spec.Scheduling.Data,
 		}),
 	}
 	if spec.ExternalAccess != nil {
@@ -384,14 +387,15 @@ type roleSpec struct {
 	// coreDumps arrives already normalized: unlike the other entries it is
 	// folded from two spec blocks (the cluster-wide settings and the role's
 	// own), which the caller does before handing it over.
-	coreDumps    normalizedCoreDumps
-	resources    corev1.ResourceRequirements
-	labels       memgraphcomv1alpha1.RoleLabelsSpec
-	env          []memgraphcomv1alpha1.EnvVar
-	extraArgs    []string
-	extraVolumes []corev1.Volume
-	extraMounts  []corev1.VolumeMount
-	scheduling   memgraphcomv1alpha1.RoleSchedulingSpec
+	coreDumps      normalizedCoreDumps
+	resources      corev1.ResourceRequirements
+	labels         memgraphcomv1alpha1.RoleLabelsSpec
+	env            []memgraphcomv1alpha1.EnvVar
+	extraArgs      []string
+	extraVolumes   []corev1.Volume
+	extraMounts    []corev1.VolumeMount
+	userContainers []corev1.Container
+	scheduling     memgraphcomv1alpha1.RoleSchedulingSpec
 }
 
 func normalizeRole(role roleSpec) normalizedRole {
@@ -406,6 +410,7 @@ func normalizeRole(role roleSpec) normalizedRole {
 		extraArgs:         role.extraArgs,
 		extraVolumes:      role.extraVolumes,
 		extraMounts:       role.extraMounts,
+		userContainers:    role.userContainers,
 		scheduling:        role.scheduling,
 	}
 }

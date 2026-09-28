@@ -301,6 +301,23 @@ spec:
       # - name: custom-modules
       #   mountPath: /usr/lib/memgraph/query_modules/custom
       #   readOnly: true
+  # Containers of your own beside Memgraph in a role's pods — the HA chart's
+  # userContainers: a debugger, a log shipper reading the log volume, an
+  # exporter. Plain core/v1 containers appended after the operator's own, free
+  # to mount any volume the pod has (the ones above included). Stored without
+  # schema validation like extraVolumes, so a malformed one surfaces as
+  # ApplyFailed rather than at admission. A container naming no securityContext
+  # gets the same locked-down one as Memgraph (non-root, read-only root
+  # filesystem, no capabilities), so the example below runs in a namespace
+  # enforcing PodSecurity "restricted"; name your own to change that. A user
+  # container counts toward pod readiness, so one that crash-loops keeps the
+  # pod from being registered.
+  userContainers:
+    coordinators: []
+    data: []
+      # - name: my-debugger
+      #   image: docker.io/library/busybox:1.37.0
+      #   command: ["sh", "-c", "echo hi; sleep 10000"]
   # Reach the cluster from outside Kubernetes. Clients outside need two things:
   # a way in, and a routing table whose addresses they can reach — the
   # coordinators hand every client the bolt address each instance was registered
