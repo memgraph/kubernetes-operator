@@ -784,6 +784,13 @@ spec:
                     description: data are added to every data instance pod.
                     x-kubernetes-preserve-unknown-fields: true
                 type: object
+              fixOwnershipInitContainer:
+                description: |-
+                  fixOwnershipInitContainer chowns every pod's volume mount points to the
+                  memgraph user from a root init container before Memgraph starts, as the
+                  memgraph-high-availability Helm chart does, for storage drivers that do
+                  not honor the pod's fsGroup. Absent, no such container runs.
+                type: object
               image:
                 default: {}
                 description: image selects the Memgraph container image run by all

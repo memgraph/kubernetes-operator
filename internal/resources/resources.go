@@ -142,6 +142,9 @@ type normalizedSpec struct {
 	// maxMapCount is the vm.max_map_count floor the sysctl init container
 	// raises every node to, and zero for a cluster that asked for none.
 	maxMapCount int64
+	// fixOwnership is whether every pod chowns its volume mount points to the
+	// memgraph user from a root init container before Memgraph starts.
+	fixOwnership bool
 }
 
 // normalizedPodAntiAffinity is the scheduling.podAntiAffinity block with every
@@ -263,6 +266,7 @@ func normalize(spec memgraphcomv1alpha1.MemgraphClusterSpec) normalizedSpec {
 		retentionPolicy: spec.Storage.RetentionPolicy,
 		readinessProbe:  normalizeProbe(spec.ReadinessProbe),
 		maxMapCount:     normalizeMaxMapCount(spec.SysctlInitContainer),
+		fixOwnership:    spec.FixOwnershipInitContainer != nil,
 		coordinatorRole: normalizeRole(roleSpec{
 			storage:        spec.Storage.Coordinators,
 			coreDumps:      normalizeCoreDumps(spec.CoreDumps, spec.CoreDumps.Coordinators),

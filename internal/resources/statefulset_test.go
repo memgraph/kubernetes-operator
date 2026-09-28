@@ -79,6 +79,8 @@ const (
 	coreDumpsVolume = "core-dumps"
 	logVolume       = "log-storage"
 	uploaderImage   = "amazon/aws-cli:2.33.28"
+	libPath         = "/var/lib/memgraph"
+	logPath         = "/var/log/memgraph"
 	coreDumpsPath   = "/var/core/memgraph"
 	dataPath        = "/var/lib/memgraph/mg_data"
 	logFilePath     = "/var/log/memgraph/memgraph.log"
@@ -292,6 +294,35 @@ func expectedCorePatternInitContainer() corev1.Container {
 	}
 }
 
+// expectedFixOwnershipInitContainer is the init container every pod of a
+// cluster with the fixOwnershipInitContainer block runs last: root with
+// CAP_CHOWN alone, on the cluster's own image, chowning each of the given
+// mounts to the memgraph user and group.
+func expectedFixOwnershipInitContainer(mounts ...corev1.VolumeMount) corev1.Container {
+	lines := make([]string, 0, len(mounts))
+	for _, mount := range mounts {
+		lines = append(lines, "chown -R 101:103 "+mount.MountPath)
+	}
+	return corev1.Container{
+		Name:            "init-fix-perms",
+		Image:           defaultImageRef,
+		ImagePullPolicy: corev1.PullIfNotPresent,
+		Command:         expectedCommand(strings.Join(lines, "\n")),
+		SecurityContext: &corev1.SecurityContext{
+			AllowPrivilegeEscalation: ptr.To(false),
+			Capabilities: &corev1.Capabilities{
+				Drop: []corev1.Capability{"ALL"},
+				Add:  []corev1.Capability{"CHOWN"},
+			},
+			ReadOnlyRootFilesystem: ptr.To(true),
+			RunAsUser:              ptr.To(int64(0)),
+			RunAsNonRoot:           ptr.To(false),
+			SeccompProfile:         &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
+		},
+		VolumeMounts: mounts,
+	}
+}
+
 // sysctlCluster is a minimal cluster with the sysctlInitContainer block
 // present and empty, the way the quickstart example carries it.
 func sysctlCluster() *memgraphcomv1alpha1.MemgraphCluster {
@@ -302,8 +333,8 @@ func sysctlCluster() *memgraphcomv1alpha1.MemgraphCluster {
 
 func expectedVolumeMounts() []corev1.VolumeMount {
 	return []corev1.VolumeMount{
-		{Name: "lib-storage", MountPath: "/var/lib/memgraph"},
-		{Name: logVolume, MountPath: "/var/log/memgraph"},
+		{Name: "lib-storage", MountPath: libPath},
+		{Name: logVolume, MountPath: logPath},
 		{Name: tmpVolume, MountPath: "/tmp"},
 	}
 }
@@ -890,6 +921,70 @@ func TestStatefulSetSysctlInitContainer(t *testing.T) {
 	})
 }
 
+// TestStatefulSetFixOwnershipInitContainer covers the presence-based
+// ownership block: present, both roles run the container with exactly the
+// claims Memgraph will use mounted; absent, which the minimal cluster is, no
+// init container at all.
+func TestStatefulSetFixOwnershipInitContainer(t *testing.T) {
+	libMount := corev1.VolumeMount{Name: "lib-storage", MountPath: libPath}
+	logMount := corev1.VolumeMount{Name: logVolume, MountPath: logPath}
+	coreDumpsMount := corev1.VolumeMount{Name: coreDumpsVolume, MountPath: coreDumpsPath}
+
+	withBlock := func() *memgraphcomv1alpha1.MemgraphCluster {
+		cluster := minimalCluster()
+		cluster.Spec.FixOwnershipInitContainer = &memgraphcomv1alpha1.FixOwnershipInitContainerSpec{}
+		return cluster
+	}
+
+	t.Run("absent by default", func(t *testing.T) {
+		for _, sts := range []*appsv1.StatefulSet{coordinatorStatefulSet(minimalCluster()), dataStatefulSet(minimalCluster())} {
+			if got := sts.Spec.Template.Spec.InitContainers; len(got) != 0 {
+				t.Errorf("%s init containers = %v, want none without the block", sts.Name, got)
+			}
+		}
+	})
+
+	t.Run("chowns the lib and log volumes of both roles", func(t *testing.T) {
+		cluster := withBlock()
+
+		want := []corev1.Container{expectedFixOwnershipInitContainer(libMount, logMount)}
+		for _, sts := range []*appsv1.StatefulSet{coordinatorStatefulSet(cluster), dataStatefulSet(cluster)} {
+			if diff := cmp.Diff(want, sts.Spec.Template.Spec.InitContainers); diff != "" {
+				t.Errorf("%s init containers mismatch (-want +got):\n%s", sts.Name, diff)
+			}
+		}
+	})
+
+	// A role without a log claim has no log volume to mount, let alone chown.
+	t.Run("skips the log volume a role opted out of", func(t *testing.T) {
+		cluster := withBlock()
+		cluster.Spec.Storage.Data.CreateLogStorageClaim = ptr.To(false)
+
+		want := []corev1.Container{expectedFixOwnershipInitContainer(libMount)}
+		if diff := cmp.Diff(want, dataStatefulSet(cluster).Spec.Template.Spec.InitContainers); diff != "" {
+			t.Errorf("init containers mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	// The core dumps volume is a claim like the others and needs the same fix;
+	// the container runs last, after the two node-tuning ones, in the HA
+	// chart's order.
+	t.Run("chowns the core dumps volume and runs after the node-tuning containers", func(t *testing.T) {
+		cluster := withBlock()
+		cluster.Spec.SysctlInitContainer = &memgraphcomv1alpha1.SysctlInitContainerSpec{}
+		cluster.Spec.CoreDumps.Data = &memgraphcomv1alpha1.RoleCoreDumpsSpec{}
+
+		want := []corev1.Container{
+			expectedSysctlInitContainer(memgraphcomv1alpha1.DefaultMaxMapCount),
+			expectedCorePatternInitContainer(),
+			expectedFixOwnershipInitContainer(libMount, logMount, coreDumpsMount),
+		}
+		if diff := cmp.Diff(want, dataStatefulSet(cluster).Spec.Template.Spec.InitContainers); diff != "" {
+			t.Errorf("init containers mismatch (-want +got):\n%s", diff)
+		}
+	})
+}
+
 // TestStatefulSetCoreDumpsUploader pins the wiring the operator owns on behalf
 // of the sidecar: a read-only view of the dumps, the path as CORE_DUMPS_DIR, a
 // writable /tmp, credentials by Secret reference, and the same locked-down
@@ -1034,7 +1129,7 @@ func TestStatefulSetUserContainers(t *testing.T) {
 		Name:  "log-shipper",
 		Image: "docker.io/fluent/fluent-bit:4.0.0",
 		VolumeMounts: []corev1.VolumeMount{{
-			Name: logVolume, MountPath: "/var/log/memgraph", ReadOnly: true,
+			Name: logVolume, MountPath: logPath, ReadOnly: true,
 		}},
 		SecurityContext: &corev1.SecurityContext{RunAsUser: ptr.To(int64(1000))},
 	}

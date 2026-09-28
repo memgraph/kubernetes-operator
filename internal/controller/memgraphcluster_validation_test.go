@@ -325,6 +325,21 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 			})))
 		})
 
+		// The ownership block is presence-based and has no fields: an empty spec
+		// must not grow it, and an empty block must survive the round trip as
+		// present, since presence is the whole signal.
+		It("should leave the ownership init container block absent and keep it when present", func() {
+			absent := createAccepted("no-fix-ownership", memgraphcomv1alpha1.MemgraphClusterSpec{})
+			Expect(absent.Spec.FixOwnershipInitContainer).To(BeNil(),
+				"the block is presence-based: no schema default may conjure it")
+
+			present := createAccepted("empty-fix-ownership", memgraphcomv1alpha1.MemgraphClusterSpec{
+				FixOwnershipInitContainer: &memgraphcomv1alpha1.FixOwnershipInitContainerSpec{},
+			})
+			Expect(present.Spec.FixOwnershipInitContainer).NotTo(BeNil(),
+				"an empty block must round-trip as present, or the container can never be asked for")
+		})
+
 		It("should accept core dumps with an uploader and default what it leaves out", func() {
 			stored := createAccepted("valid-core-dumps-uploader", memgraphcomv1alpha1.MemgraphClusterSpec{
 				CoreDumps: memgraphcomv1alpha1.CoreDumpsSpec{

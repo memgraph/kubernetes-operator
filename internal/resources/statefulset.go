@@ -18,6 +18,7 @@ package resources
 
 import (
 	"fmt"
+	"strings"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -80,6 +81,10 @@ const (
 	// Container names of the two optional containers core dumps bring along.
 	corePatternContainerName = "init-core-pattern"
 	uploaderContainerName    = "core-dumps-uploader"
+
+	// fixOwnershipContainerName is the init container that chowns the volume
+	// mount points to the memgraph user, named as the HA chart names it.
+	fixOwnershipContainerName = "init-fix-perms"
 
 	// terminationGracePeriod is how long a pod gets to shut down cleanly before
 	// SIGKILL. Kubernetes' own default of 30 seconds was harmless while nothing
@@ -277,8 +282,9 @@ func shellCommand(script string) []string {
 
 // restrictedSecurityContext is what every container the operator builds runs
 // under: no privilege escalation, no capabilities, a read-only root filesystem
-// and the default seccomp profile. The two init containers that write under
-// /proc/sys are the exception — they cannot do their job under this.
+// and the default seccomp profile. The init containers are the exception: the
+// two that write under /proc/sys and the one that chowns the volumes cannot do
+// their job under this.
 func restrictedSecurityContext() *corev1.SecurityContext {
 	return &corev1.SecurityContext{
 		AllowPrivilegeEscalation: ptr.To(false),
@@ -338,8 +344,8 @@ func corePatternInitContainer(spec normalizedSpec) corev1.Container {
 
 // privilegedRootSecurityContext is what the two init containers that write
 // under /proc/sys run with: privileged root, but still on a read-only root
-// filesystem and the default seccomp profile. It is the only place the
-// operator relaxes the restricted posture.
+// filesystem and the default seccomp profile. It and chownSecurityContext are
+// the only places the operator relaxes the restricted posture.
 func privilegedRootSecurityContext() *corev1.SecurityContext {
 	return &corev1.SecurityContext{
 		Privileged: ptr.To(true),
@@ -350,6 +356,57 @@ func privilegedRootSecurityContext() *corev1.SecurityContext {
 		RunAsUser:                ptr.To(int64(0)),
 		RunAsNonRoot:             ptr.To(false),
 		SeccompProfile:           &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
+	}
+}
+
+// fixOwnershipInitContainer chowns the role's volume mount points to the
+// memgraph user, recursively, for storage drivers that do not honor the pod's
+// fsGroup and hand over a volume root owned by root. It runs after the
+// node-tuning containers, as in the HA chart, and mounts exactly what the
+// Memgraph container will use from the pod's claims: the lib volume, the log
+// volume when the role has a log claim, and the core dumps volume when the
+// role collects dumps. The uid and gid are the ones the pods run as, fixed in
+// the Memgraph images, so unlike the chart they are not knobs. Like the other
+// init containers it runs the cluster's own Memgraph image.
+func fixOwnershipInitContainer(spec normalizedSpec, role normalizedRole) corev1.Container {
+	mounts := []corev1.VolumeMount{{Name: libVolumeName, MountPath: libMountPath}}
+	if role.storage.createLogClaim {
+		mounts = append(mounts, corev1.VolumeMount{Name: logVolumeName, MountPath: logMountPath})
+	}
+	if role.coreDumps.enabled {
+		mounts = append(mounts, corev1.VolumeMount{Name: coreDumpsVolumeName, MountPath: coreDumpsMountPath})
+	}
+	lines := make([]string, 0, len(mounts))
+	for _, mount := range mounts {
+		lines = append(lines, fmt.Sprintf("chown -R %d:%d %s", memgraphUserID, memgraphGroupID, mount.MountPath))
+	}
+	script := strings.Join(lines, "\n")
+	return corev1.Container{
+		Name:            fixOwnershipContainerName,
+		Image:           spec.image,
+		ImagePullPolicy: spec.pullPolicy,
+		Command:         shellCommand(script),
+		SecurityContext: chownSecurityContext(),
+		VolumeMounts:    mounts,
+	}
+}
+
+// chownSecurityContext is what the ownership-fixing init container runs with:
+// root, because the volume root it fixes is owned by root, but not privileged
+// and holding CAP_CHOWN alone, the one capability the job takes. Everything
+// else stays as restricted as the Memgraph container; it is what the HA
+// chart's container runs with.
+func chownSecurityContext() *corev1.SecurityContext {
+	return &corev1.SecurityContext{
+		AllowPrivilegeEscalation: ptr.To(false),
+		Capabilities: &corev1.Capabilities{
+			Drop: []corev1.Capability{"ALL"},
+			Add:  []corev1.Capability{"CHOWN"},
+		},
+		ReadOnlyRootFilesystem: ptr.To(true),
+		RunAsUser:              ptr.To(int64(0)),
+		RunAsNonRoot:           ptr.To(false),
+		SeccompProfile:         &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
 	}
 }
 
@@ -514,10 +571,12 @@ func userContainer(container corev1.Container) corev1.Container {
 	return container
 }
 
-// podInitContainers are the node-tuning containers a role's pods run before
-// Memgraph: the sysctl one if the cluster asked for it, then the core pattern
-// one if the role collects dumps and asked the operator to configure it. Both
-// are privileged, so a restricted namespace can have neither.
+// podInitContainers are the containers a role's pods run before Memgraph, in
+// the HA chart's order: the sysctl one if the cluster asked for it, then the
+// core pattern one if the role collects dumps and asked the operator to
+// configure it, then the ownership one if the cluster asked for it. The first
+// two are privileged and the third runs as root, so a restricted namespace
+// can have none of them.
 func podInitContainers(spec normalizedSpec, role normalizedRole) []corev1.Container {
 	var containers []corev1.Container
 	if spec.maxMapCount > 0 {
@@ -525,6 +584,9 @@ func podInitContainers(spec normalizedSpec, role normalizedRole) []corev1.Contai
 	}
 	if role.coreDumps.enabled && role.coreDumps.configurePattern {
 		containers = append(containers, corePatternInitContainer(spec))
+	}
+	if spec.fixOwnership {
+		containers = append(containers, fixOwnershipInitContainer(spec, role))
 	}
 	return containers
 }

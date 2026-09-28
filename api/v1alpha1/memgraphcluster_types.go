@@ -642,6 +642,33 @@ type SysctlInitContainerSpec struct {
 	MaxMapCount int64 `json:"maxMapCount,omitempty"`
 }
 
+// FixOwnershipInitContainerSpec is the memgraph-high-availability Helm chart's
+// fixOwnershipInitContainer block: an init container, run as root after the
+// node-tuning ones in every pod of both roles, that chowns the pod's volume
+// mount points to the memgraph user before Memgraph starts. Every pod sets
+// fsGroup to the memgraph group, which is how a volume normally arrives
+// writable, but some storage drivers (rancher.io/local-path among them) do
+// not honor it and hand over a volume root owned by root:root. Memgraph runs
+// as the non-root memgraph user and cannot create its data directory or its
+// log file there; and a data directory that does exist but is owned by
+// another user fails its startup check, "The process is running as user
+// memgraph, but '...' is owned by user ...". The container chowns the lib
+// mount, the log mount when the role has a log claim, and the core dumps
+// mount when the role collects dumps, recursively, to the uid and gid the
+// pods run as (101:103, fixed in the Memgraph images, so they are not knobs
+// as they are in the chart).
+//
+// The block is presence-based like every other optional block of the
+// resource, so there is no enabled knob and it has no fields: present, the
+// container runs; absent, which matches the chart's default, the pods trust
+// fsGroup. The chart's image knobs are dropped as they are for the sysctl
+// container: this runs the cluster's own Memgraph image, already on the
+// node. It is root but not privileged, holding only CAP_CHOWN, so a
+// namespace enforcing the baseline Pod Security Standard admits it while
+// one enforcing "restricted" does not (that forbids running as root); there
+// the driver has to honor fsGroup.
+type FixOwnershipInitContainerSpec struct{}
+
 // ReadinessProbeSpec tunes the timings of the one probe every pod of the
 // cluster carries, its readiness probe. The probe type itself is not
 // configurable: it is a TCP-socket check against the role's own port (the
@@ -1455,6 +1482,13 @@ type MemgraphClusterSpec struct {
 	// containers are not allowed.
 	// +optional
 	SysctlInitContainer *SysctlInitContainerSpec `json:"sysctlInitContainer,omitempty"`
+
+	// fixOwnershipInitContainer chowns every pod's volume mount points to the
+	// memgraph user from a root init container before Memgraph starts, as the
+	// memgraph-high-availability Helm chart does, for storage drivers that do
+	// not honor the pod's fsGroup. Absent, no such container runs.
+	// +optional
+	FixOwnershipInitContainer *FixOwnershipInitContainerSpec `json:"fixOwnershipInitContainer,omitempty"`
 
 	// clusterDomain is the Kubernetes cluster domain the advertised FQDN
 	// addresses are built from: <pod>.<service>.<namespace>.svc.<clusterDomain>.

@@ -142,6 +142,20 @@ spec:
   # with configureCorePattern above) or on nodes the platform tunes itself.
   sysctlInitContainer:
     maxMapCount: 524288
+  # Every pod sets fsGroup to the memgraph group, which is how a volume normally
+  # arrives writable to the non-root memgraph user. Some storage drivers
+  # (rancher.io/local-path among them) do not honor it and hand over a volume
+  # root owned by root:root, where Memgraph can neither create its data
+  # directory nor its log file, and a data directory owned by another user
+  # fails its startup check. With this block present — the HA chart's
+  # fixOwnershipInitContainer — every pod of both roles runs one more init
+  # container, after the node-tuning ones, that chowns the lib, log and core
+  # dumps mount points to the memgraph user (101:103, fixed in the images, so
+  # unlike the chart there is no uid or gid to set) before Memgraph starts. It
+  # runs as root with CAP_CHOWN alone on the cluster's own Memgraph image, not
+  # privileged, so the baseline Pod Security Standard admits it and "restricted"
+  # does not. Off when absent, as in the chart; the block has no fields.
+  # fixOwnershipInitContainer: {}
   # The cluster domain is part of every advertised address the operator
   # registers with the cluster. The internal ports are fixed: Bolt 7687,
   # management 10000, replication 20000, and coordinator 12000.
