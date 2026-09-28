@@ -984,6 +984,51 @@ type ExtraVolumeMountsSpec struct {
 	Data []corev1.VolumeMount `json:"data,omitempty"`
 }
 
+// UserContainersSpec adds containers of the user's own to a role's pods
+// beside the Memgraph container, mirroring the memgraph-high-availability
+// Helm chart's userContainers block: a debugger, a log shipper, a metrics
+// exporter, whatever should share the pod's network namespace and volumes.
+// Each entry is a core/v1 Container appended after the operator's own, so
+// `kubectl logs` without -c keeps showing the database, and a container may
+// mount any volume the pod has, including the ones from extraVolumes.
+//
+// The entries are deliberately schemaless, for the same reason extraVolumes
+// is: a core/v1 Container carries every probe, env source and security field
+// Kubernetes has, and inlining that schema twice grows this CRD past the size
+// a client-side kubectl apply can carry. So the field accepts the same
+// arbitrary container YAML the Helm chart does, and the API server keeps it
+// verbatim without validating its contents. What that costs: kubectl explain
+// says nothing about the entries, and a malformed container — a missing name
+// or image, a name the pod already has (memgraph, core-dumps-uploader, the
+// init containers) — is caught when the operator applies the StatefulSet,
+// surfacing on this resource as the ApplyFailed condition rather than as an
+// admission error.
+//
+// One thing is filled in: a container that names no securityContext gets the
+// same locked-down one as the Memgraph container (non-root, read-only root
+// filesystem, no privilege escalation, all capabilities dropped), so the
+// chart's own example runs in a namespace enforcing the restricted Pod
+// Security Standard. A container that names one keeps it as written; that is
+// how a container that must write to its root filesystem, or run as another
+// user, says so.
+//
+// A user container counts toward pod readiness like any other, so one that
+// crash-loops keeps the pod from ever being registered. A change to this
+// block is a pod-template change the rolling restart carries.
+type UserContainersSpec struct {
+	// coordinators are added to every coordinator pod.
+	// +kubebuilder:validation:Schemaless
+	// +kubebuilder:pruning:PreserveUnknownFields
+	// +optional
+	Coordinators []corev1.Container `json:"coordinators,omitempty"`
+
+	// data are added to every data instance pod.
+	// +kubebuilder:validation:Schemaless
+	// +kubebuilder:pruning:PreserveUnknownFields
+	// +optional
+	Data []corev1.Container `json:"data,omitempty"`
+}
+
 // ExtraArgsSpec passes additional Memgraph flags to a role, so any flag is
 // usable without waiting for a typed field. The flags are appended after the
 // ones the operator derives, and Memgraph takes the last occurrence of a
@@ -1458,6 +1503,11 @@ type MemgraphClusterSpec struct {
 	// beyond the ones the operator mounts.
 	// +optional
 	ExtraVolumeMounts ExtraVolumeMountsSpec `json:"extraVolumeMounts,omitzero"`
+
+	// userContainers adds containers of your own to both roles' pods beside
+	// the Memgraph container.
+	// +optional
+	UserContainers UserContainersSpec `json:"userContainers,omitzero"`
 
 	// externalAccess exposes the cluster outside Kubernetes and registers the
 	// exposed instances with the addresses clients reach them at. Absent, the

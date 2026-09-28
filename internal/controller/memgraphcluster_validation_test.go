@@ -357,6 +357,33 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 			})), "an empty role block must be filled with the default size")
 		})
 
+		// The userContainers entries are schemaless like extraVolumes, so this is
+		// what proves the API server keeps a container's nested fields intact
+		// instead of pruning what it has no schema for.
+		It("should preserve a schemaless user container through a round trip", func() {
+			container := corev1.Container{
+				Name:    "my-debugger",
+				Image:   "docker.io/library/busybox:1.37.0",
+				Command: []string{"sh", "-c", "echo hi; sleep 10000"},
+				Env:     []corev1.EnvVar{{Name: "LEVEL", Value: "debug"}},
+				VolumeMounts: []corev1.VolumeMount{{
+					Name: "log-storage", MountPath: "/var/log/memgraph", ReadOnly: true,
+				}},
+				Resources: corev1.ResourceRequirements{
+					Limits: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("64Mi")},
+				},
+				SecurityContext: &corev1.SecurityContext{RunAsUser: ptr.To(int64(1000))},
+			}
+			stored := createAccepted("valid-user-containers", memgraphcomv1alpha1.MemgraphClusterSpec{
+				UserContainers: memgraphcomv1alpha1.UserContainersSpec{
+					Coordinators: []corev1.Container{container},
+				},
+			})
+
+			Expect(stored.Spec.UserContainers.Coordinators).To(Equal([]corev1.Container{container}))
+			Expect(stored.Spec.UserContainers.Data).To(BeEmpty())
+		})
+
 		// The extraVolumes entries are schemaless, so nothing but this spec
 		// proves the API server keeps an arbitrary volume source intact instead
 		// of pruning the fields it has no schema for.

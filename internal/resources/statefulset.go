@@ -488,15 +488,30 @@ func volumeClaimTemplates(role normalizedRole) []corev1.PersistentVolumeClaim {
 	return claims
 }
 
-// podContainers is the Memgraph container plus the uploader sidecar when the
-// role has one. Memgraph stays first, so `kubectl logs` without -c keeps
-// showing the database.
+// podContainers is the Memgraph container, the uploader sidecar when the role
+// has one, then the role's user containers. Memgraph stays first, so `kubectl
+// logs` without -c keeps showing the database.
 func podContainers(memgraph corev1.Container, role normalizedRole) []corev1.Container {
 	containers := []corev1.Container{memgraph}
 	if role.coreDumps.enabled && role.coreDumps.uploader != nil {
 		containers = append(containers, uploaderSidecar(role.coreDumps))
 	}
+	for _, container := range role.userContainers {
+		containers = append(containers, userContainer(container))
+	}
 	return containers
+}
+
+// userContainer passes a user container through as written, filling in the
+// one thing the pod's security posture needs from it: a container naming no
+// securityContext gets the same restricted one as Memgraph, so the chart's
+// busybox example runs under the restricted Pod Security Standard. A
+// container that names one has said what it needs and keeps it.
+func userContainer(container corev1.Container) corev1.Container {
+	if container.SecurityContext == nil {
+		container.SecurityContext = restrictedSecurityContext()
+	}
+	return container
 }
 
 // podInitContainers are the node-tuning containers a role's pods run before

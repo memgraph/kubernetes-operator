@@ -77,6 +77,8 @@ const (
 	shell           = "/bin/sh"
 	defaultImageRef = memgraphcomv1alpha1.DefaultImageReference
 	coreDumpsVolume = "core-dumps"
+	logVolume       = "log-storage"
+	uploaderImage   = "amazon/aws-cli:2.33.28"
 	coreDumpsPath   = "/var/core/memgraph"
 	dataPath        = "/var/lib/memgraph/mg_data"
 	logFilePath     = "/var/log/memgraph/memgraph.log"
@@ -301,7 +303,7 @@ func sysctlCluster() *memgraphcomv1alpha1.MemgraphCluster {
 func expectedVolumeMounts() []corev1.VolumeMount {
 	return []corev1.VolumeMount{
 		{Name: "lib-storage", MountPath: "/var/lib/memgraph"},
-		{Name: "log-storage", MountPath: "/var/log/memgraph"},
+		{Name: logVolume, MountPath: "/var/log/memgraph"},
 		{Name: tmpVolume, MountPath: "/tmp"},
 	}
 }
@@ -310,7 +312,7 @@ func expectedVolumeMounts() []corev1.VolumeMount {
 // log storage: everything except the log volume.
 func expectedVolumeMountsWithoutLog() []corev1.VolumeMount {
 	return slices.DeleteFunc(expectedVolumeMounts(), func(mount corev1.VolumeMount) bool {
-		return mount.Name == "log-storage"
+		return mount.Name == logVolume
 	})
 }
 
@@ -372,7 +374,7 @@ func expectedClaimTemplate(name, size string, accessMode corev1.PersistentVolume
 func expectedClaimTemplates() []corev1.PersistentVolumeClaim {
 	return []corev1.PersistentVolumeClaim{
 		expectedClaimTemplate("lib-storage", "1Gi", corev1.ReadWriteOnce, nil),
-		expectedClaimTemplate("log-storage", "1Gi", corev1.ReadWriteOnce, nil),
+		expectedClaimTemplate(logVolume, "1Gi", corev1.ReadWriteOnce, nil),
 	}
 }
 
@@ -652,7 +654,7 @@ func TestStatefulSetStorageOverrides(t *testing.T) {
 				expectedClaimTemplate("lib-storage", "4Gi", corev1.ReadWriteOncePod, ptr.To("fast-ssd")),
 				// An empty storage class is passed through verbatim: it means
 				// "no dynamic provisioning", not "cluster default".
-				expectedClaimTemplate("log-storage", "512Mi", corev1.ReadWriteOnce, ptr.To("")),
+				expectedClaimTemplate(logVolume, "512Mi", corev1.ReadWriteOnce, ptr.To("")),
 			},
 		},
 		{
@@ -661,7 +663,7 @@ func TestStatefulSetStorageOverrides(t *testing.T) {
 			want: []corev1.PersistentVolumeClaim{
 				expectedClaimTemplate("lib-storage", "100Gi", corev1.ReadWriteOnce, ptr.To("gp3")),
 				// Untouched by the spec, so it keeps every schema default.
-				expectedClaimTemplate("log-storage", "1Gi", corev1.ReadWriteOnce, nil),
+				expectedClaimTemplate(logVolume, "1Gi", corev1.ReadWriteOnce, nil),
 			},
 		},
 	}
@@ -899,7 +901,7 @@ func TestStatefulSetCoreDumpsUploader(t *testing.T) {
 	cluster.Spec.CoreDumps = memgraphcomv1alpha1.CoreDumpsSpec{
 		Data: &memgraphcomv1alpha1.RoleCoreDumpsSpec{},
 		Uploader: &memgraphcomv1alpha1.CoreDumpsUploaderSpec{
-			Image:          "amazon/aws-cli:2.33.28",
+			Image:          uploaderImage,
 			Command:        []string{shell, "-c"},
 			Args:           []string{"upload-loop"},
 			Env:            []memgraphcomv1alpha1.EnvVar{{Name: "S3_BUCKET", Value: "dumps"}},
@@ -920,7 +922,7 @@ func TestStatefulSetCoreDumpsUploader(t *testing.T) {
 
 	want := corev1.Container{
 		Name:            "core-dumps-uploader",
-		Image:           "amazon/aws-cli:2.33.28",
+		Image:           uploaderImage,
 		ImagePullPolicy: corev1.PullIfNotPresent,
 		Command:         []string{shell, "-c"},
 		Args:            []string{"upload-loop"},
@@ -1017,6 +1019,69 @@ func TestStatefulSetExtraVolumeWithoutMount(t *testing.T) {
 	if diff := cmp.Diff(expectedVolumeMounts(), podSpec.Containers[0].VolumeMounts); diff != "" {
 		t.Errorf("volume mounts mismatch (-want +got):\n%s", diff)
 	}
+}
+
+// TestStatefulSetUserContainers covers the passthrough: a role's containers
+// join its pods after the operator's own and only its pods, a container naming
+// no securityContext gets the restricted one, and one naming its own keeps it.
+func TestStatefulSetUserContainers(t *testing.T) {
+	debugger := corev1.Container{
+		Name:    "my-debugger",
+		Image:   "docker.io/library/busybox:1.37.0",
+		Command: []string{"sh", "-c", "echo hi; sleep 10000"},
+	}
+	shipper := corev1.Container{
+		Name:  "log-shipper",
+		Image: "docker.io/fluent/fluent-bit:4.0.0",
+		VolumeMounts: []corev1.VolumeMount{{
+			Name: logVolume, MountPath: "/var/log/memgraph", ReadOnly: true,
+		}},
+		SecurityContext: &corev1.SecurityContext{RunAsUser: ptr.To(int64(1000))},
+	}
+
+	cluster := minimalCluster()
+	cluster.Spec.UserContainers = memgraphcomv1alpha1.UserContainersSpec{
+		Data: []corev1.Container{debugger, shipper},
+	}
+
+	t.Run(dataComponent, func(t *testing.T) {
+		containers := dataStatefulSet(cluster).Spec.Template.Spec.Containers
+
+		lockedDebugger := debugger
+		lockedDebugger.SecurityContext = expectedContainerSecurityContext()
+		if len(containers) != 3 || containers[0].Name != memgraphName {
+			t.Fatalf("containers = %v, want Memgraph first then the two user containers", containers)
+		}
+		if diff := cmp.Diff([]corev1.Container{lockedDebugger, shipper}, containers[1:]); diff != "" {
+			t.Errorf("user containers mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run(coordinatorComponent, func(t *testing.T) {
+		containers := coordinatorStatefulSet(cluster).Spec.Template.Spec.Containers
+		if len(containers) != 1 {
+			t.Errorf("containers = %v, want only Memgraph's on the role that declared none", containers)
+		}
+	})
+
+	// The operator's own sidecar keeps its place ahead of the user's.
+	t.Run("after the uploader", func(t *testing.T) {
+		cluster := minimalCluster()
+		cluster.Spec.CoreDumps = memgraphcomv1alpha1.CoreDumpsSpec{
+			Data:     &memgraphcomv1alpha1.RoleCoreDumpsSpec{},
+			Uploader: &memgraphcomv1alpha1.CoreDumpsUploaderSpec{Image: uploaderImage},
+		}
+		cluster.Spec.UserContainers.Data = []corev1.Container{debugger}
+
+		containers := dataStatefulSet(cluster).Spec.Template.Spec.Containers
+		names := make([]string, 0, len(containers))
+		for _, c := range containers {
+			names = append(names, c.Name)
+		}
+		if diff := cmp.Diff([]string{memgraphName, "core-dumps-uploader", "my-debugger"}, names); diff != "" {
+			t.Errorf("container order mismatch (-want +got):\n%s", diff)
+		}
+	})
 }
 
 // TestStatefulSetRetentionPolicy pins the mapping from the spec's retention

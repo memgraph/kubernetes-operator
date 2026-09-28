@@ -2760,6 +2760,18 @@ spec:
                     - secretName
                     type: object
                 type: object
+              userContainers:
+                description: |-
+                  userContainers adds containers of your own to both roles' pods beside
+                  the Memgraph container.
+                properties:
+                  coordinators:
+                    description: coordinators are added to every coordinator pod.
+                    x-kubernetes-preserve-unknown-fields: true
+                  data:
+                    description: data are added to every data instance pod.
+                    x-kubernetes-preserve-unknown-fields: true
+                type: object
             type: object
             x-kubernetes-validations:
             - message: 'externalAccess.gateway.dataPortBase + dataInstances must not
