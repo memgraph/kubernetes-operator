@@ -691,6 +691,163 @@ type LabelsSpec struct {
 	Data RoleLabelsSpec `json:"data,omitzero"`
 }
 
+// PodAntiAffinityType is how hard the operator's anti-affinity rule is.
+// +kubebuilder:validation:Enum=preferred;required
+type PodAntiAffinityType string
+
+const (
+	// PodAntiAffinityPreferred asks the scheduler to keep the pods apart and
+	// lets it co-locate them when nothing else fits: a cluster larger than the
+	// node pool still comes up.
+	PodAntiAffinityPreferred PodAntiAffinityType = "preferred"
+	// PodAntiAffinityRequired refuses to co-locate: a pod with no node of its
+	// own stays Pending.
+	PodAntiAffinityRequired PodAntiAffinityType = "required"
+)
+
+// PodAntiAffinityScope is which pods the operator's anti-affinity rule keeps
+// apart.
+// +kubebuilder:validation:Enum=role;cluster
+type PodAntiAffinityScope string
+
+const (
+	// PodAntiAffinityScopeRole keeps coordinators away from coordinators and
+	// data instances away from data instances; a coordinator and a data
+	// instance may share a node.
+	PodAntiAffinityScopeRole PodAntiAffinityScope = "role"
+	// PodAntiAffinityScopeCluster keeps every pod of the cluster away from
+	// every other, whatever its role.
+	PodAntiAffinityScopeCluster PodAntiAffinityScope = "cluster"
+)
+
+const (
+	// DefaultPodAntiAffinityType is the hardness of the operator's rule when
+	// the block names none.
+	DefaultPodAntiAffinityType = PodAntiAffinityPreferred
+	// DefaultPodAntiAffinityScope is the scope of the operator's rule when the
+	// block names none.
+	DefaultPodAntiAffinityScope = PodAntiAffinityScopeRole
+	// DefaultPodAntiAffinityTopologyKey is the node label the operator's rule
+	// spreads over when the block names none: distinct nodes.
+	DefaultPodAntiAffinityTopologyKey = "kubernetes.io/hostname"
+	// PodAntiAffinityWeight is the weight of the operator's preferred rule.
+	// It is the maximum, so a user's own preferred terms are tie-breakers
+	// unless they say otherwise.
+	PodAntiAffinityWeight int32 = 100
+)
+
+// PodAntiAffinitySpec is the one pod anti-affinity rule the operator writes
+// into both roles' pod templates. Present, the rule exists; the fields tune it.
+// Absent, the operator writes none, and the per-role scheduling blocks are the
+// whole of what the pods carry.
+//
+// The memgraph-high-availability Helm chart's three affinity modes are the
+// three corners of this block: its default is type preferred with scope role,
+// its parity is required with scope role, its unique is required with scope
+// cluster.
+type PodAntiAffinitySpec struct {
+	// type is how hard the rule is. preferred, the default, asks the scheduler
+	// to keep the pods apart and lets it co-locate them when nothing else
+	// fits, so a cluster larger than the node pool still comes up. required
+	// refuses to co-locate: with too few nodes the surplus pods stay Pending,
+	// so use it on clusters sized for it and not on a single-node kind.
+	// +kubebuilder:default=preferred
+	// +optional
+	Type PodAntiAffinityType `json:"type,omitempty"`
+
+	// scope is which pods the rule keeps apart. role, the default, keeps
+	// coordinators away from coordinators and data instances away from data
+	// instances; with type required that is one coordinator and one data
+	// instance per node at most, the chart's parity. cluster keeps every pod
+	// of the cluster away from every other; with type required that is one
+	// pod per node, the chart's unique, which needs at least coordinators +
+	// dataInstances nodes.
+	// +kubebuilder:default=role
+	// +optional
+	Scope PodAntiAffinityScope `json:"scope,omitempty"`
+
+	// topologyKey is the node label the rule spreads over. The default,
+	// kubernetes.io/hostname, means distinct nodes. A zone label such as
+	// topology.kubernetes.io/zone means distinct zones, which for more pods
+	// than zones is better said with a topologySpreadConstraint per role: an
+	// anti-affinity forbids or discourages sharing a zone at all, a spread
+	// constraint balances the pods across the zones there are.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=317
+	// +kubebuilder:validation:Pattern=`^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$`
+	// +kubebuilder:default="kubernetes.io/hostname"
+	// +optional
+	TopologyKey string `json:"topologyKey,omitempty"`
+}
+
+// RoleSchedulingSpec is the scheduling surface of one role's pods, in the
+// core/v1 vocabulary and passed through as written. The operator sets the pod
+// labels a selector here would match: app.kubernetes.io/instance carries the
+// cluster's name and app.kubernetes.io/component the role (coordinator or
+// data).
+//
+// A change to any of it only lands when a pod is recreated. Both StatefulSets
+// restart nothing on their own, so the operator rolls the cluster for it, data
+// instances before coordinators, exactly as for any other pod-template change;
+// the Updated condition reports the progress.
+type RoleSchedulingSpec struct {
+	// nodeSelector pins the role's pods to nodes carrying every one of these
+	// labels. The chart's nodeSelection mode is a nodeSelector of
+	// role: coordinator-node on the coordinators and role: data-node on the
+	// data instances.
+	// +optional
+	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
+
+	// tolerations let the role's pods schedule onto tainted nodes.
+	// +listType=atomic
+	// +kubebuilder:validation:MaxItems=64
+	// +optional
+	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
+
+	// topologySpreadConstraints balance the role's pods across a topology,
+	// typically zones. A constraint with no labelSelector is given the role's
+	// own pod selector, so the usual one-liner of maxSkew, topologyKey and
+	// whenUnsatisfiable is enough.
+	// +listType=atomic
+	// +kubebuilder:validation:MaxItems=16
+	// +optional
+	TopologySpreadConstraints []corev1.TopologySpreadConstraint `json:"topologySpreadConstraints,omitempty"`
+
+	// podAntiAffinity is the role's own pod anti-affinity, appended to the
+	// operator's rule when spec.scheduling.podAntiAffinity is present and the
+	// whole rule when it is not — never a replacement for it.
+	// +optional
+	PodAntiAffinity *corev1.PodAntiAffinity `json:"podAntiAffinity,omitempty"`
+
+	// priorityClassName names the PriorityClass the role's pods run under.
+	// +kubebuilder:validation:MaxLength=253
+	// +optional
+	PriorityClassName string `json:"priorityClassName,omitempty"`
+}
+
+// SchedulingSpec decides where the pods land, mirroring the
+// memgraph-high-availability Helm chart's affinity block. The operator's own
+// rule is one decision for the cluster and sits at the top; what genuinely
+// differs by role is per role, in the core/v1 vocabulary.
+type SchedulingSpec struct {
+	// podAntiAffinity is the anti-affinity rule the operator writes into both
+	// roles' pod templates. Present, the pods of a role are kept apart, softly
+	// unless told otherwise; an empty block is the chart's default. Absent,
+	// the operator writes no rule at all and the scheduler places the pods by
+	// free capacity alone, which is right on a single-node kind or when the
+	// per-role blocks carry a hand-written rule instead.
+	// +optional
+	PodAntiAffinity *PodAntiAffinitySpec `json:"podAntiAffinity,omitempty"`
+
+	// coordinators is the scheduling surface of the coordinator pods.
+	// +optional
+	Coordinators RoleSchedulingSpec `json:"coordinators,omitzero"`
+
+	// data is the scheduling surface of the data instance pods.
+	// +optional
+	Data RoleSchedulingSpec `json:"data,omitzero"`
+}
+
 // EnvVar is one non-secret environment variable set on a role's Memgraph
 // container. Only literal values are supported — there is deliberately no
 // valueFrom — so secret material stays confined to the secrets block and the CR
@@ -1227,6 +1384,12 @@ type MemgraphClusterSpec struct {
 	// labels adds custom labels to both roles' pods, StatefulSets and Services.
 	// +optional
 	Labels LabelsSpec `json:"labels,omitzero"`
+
+	// scheduling decides where both roles' pods land: the operator's own
+	// anti-affinity rule, and per role the node selector, tolerations,
+	// topology spread constraints, extra anti-affinity and priority class.
+	// +optional
+	Scheduling SchedulingSpec `json:"scheduling,omitzero"`
 
 	// extraEnv passes additional non-secret environment variables to both
 	// roles' Memgraph containers.

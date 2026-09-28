@@ -163,7 +163,7 @@ Uninstall the operator with `helm uninstall memgraph-operator --namespace memgra
 
 ## Configuration
 
-Beyond the quickstart's four fields, v1alpha1 exposes storage (PVC size, access mode, storage class, whether the log claim is created at all, retention) per role, optional core dump collection with an uploader sidecar of your choice per role, resource requests and limits per role, readiness probe timings, custom labels on pods, StatefulSets and Services, the cluster domain used in advertised addresses, [external access](#external-access) through LoadBalancers or a Gateway API Gateway, a [ServiceMonitor and a Grafana dashboard ConfigMap](docs/monitoring.md) for a monitoring stack you already run, [TLS](docs/tls.md) for clients and between members from certificates you supply, and a freeform passthrough per role for environment variables, Memgraph flags, and extra volumes and volume mounts. Internal ports are fixed: Bolt 7687, management 10000, replication 20000, coordinator 12000, and metrics 9091.
+Beyond the quickstart's four fields, v1alpha1 exposes storage (PVC size, access mode, storage class, whether the log claim is created at all, retention) per role, optional core dump collection with an uploader sidecar of your choice per role, resource requests and limits per role, readiness probe timings, custom labels on pods, StatefulSets and Services, [scheduling](docs/scheduling.md) (an anti-affinity rule the operator writes and, per role, node selector, tolerations, topology spread constraints, extra anti-affinity and priority class), the cluster domain used in advertised addresses, [external access](#external-access) through LoadBalancers or a Gateway API Gateway, a [ServiceMonitor and a Grafana dashboard ConfigMap](docs/monitoring.md) for a monitoring stack you already run, [TLS](docs/tls.md) for clients and between members from certificates you supply, and a freeform passthrough per role for environment variables, Memgraph flags, and extra volumes and volume mounts. Internal ports are fixed: Bolt 7687, management 10000, replication 20000, coordinator 12000, and metrics 9091.
 
 [`config/samples/v1alpha1_memgraphcluster.yaml`](config/samples/v1alpha1_memgraphcluster.yaml) spells the full surface out with every default and the reasoning behind it. `kubectl explain mgc.spec --recursive` documents the same fields from the installed CRD.
 
@@ -220,6 +220,7 @@ The MVP is deliberately "provision, bootstrap, observe". It does:
 - **expose the cluster outside Kubernetes**, through LoadBalancers or a Gateway API Gateway, and keep the routing table pointing at the addresses clients reach it through (see [External access](#external-access));
 - **serve OpenMetrics** from every instance on port 9091, declared on the pods and the headless Services and pinned to that format, so a Prometheus you already run scrapes the cluster with a ServiceMonitor, PodMonitor or scrape config of your own — and, on request, create the ServiceMonitor for a Prometheus Operator and the "Memgraph OpenMetrics" dashboard ConfigMap for a Grafana sidecar with `spec.monitoring` (see [`docs/monitoring.md`](docs/monitoring.md));
 - **serve Bolt and the metrics endpoint over TLS** from a `kubernetes.io/tls` Secret you name in `spec.tls.bolt`, on both roles, with the operator's own dials and the ServiceMonitor following suit, and **authenticate the members to each other over mutual TLS** from a Secret with `ca.crt` you name in `spec.tls.intraCluster`, decided at creation (see [`docs/tls.md`](docs/tls.md));
+- **keep the pods of a role on distinct nodes**, softly by default, as hard as `required` with scope `role` (the HA chart's `parity`) or `cluster` (its `unique`) on request, and pass a node selector, tolerations, topology spread constraints and a priority class through per role with `spec.scheduling` (see [`docs/scheduling.md`](docs/scheduling.md));
 - report the observed MAIN, the registered member counts, the external addresses, and the readiness and convergence conditions on the resource's status.
 
 Scaling is one edit, and `Converged` tells you when it is finished:
@@ -246,7 +247,7 @@ What it does not do yet:
 - **Bolt authentication** — the operator connects to the coordinators unauthenticated, so clusters must not enable auth yet.
 - **The rest of the HA chart's monitoring**: the `mg-exporter` and its JSON format, vmagent remote write, the Vector log sidecar, the logs dashboard, and monitoring objects placed in another namespace — see [what monitoring leaves out](docs/monitoring.md#not-in-scope). (The operator itself serves controller-runtime metrics; see the [chart README](charts/memgraph-operator/README.md).)
 - **Standalone (non-HA) topology.** The API is shaped to grow one without a breaking change, but v1alpha1 provisions HA clusters only.
-- **Affinity, tolerations, init containers, sidecars, snapshot-restore fields** and the rest of the HA chart's surface — parity roadmap, not MVP.
+- **Init containers, sidecars, snapshot-restore fields** and the rest of the HA chart's surface — parity roadmap, not MVP.
 
 ## Relationship to the memgraph-high-availability chart
 

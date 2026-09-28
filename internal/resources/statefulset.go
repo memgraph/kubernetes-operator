@@ -528,11 +528,86 @@ func statefulSet(
 						RunAsNonRoot:   ptr.To(true),
 						SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
 					},
-					Volumes: podVolumes(spec, role),
+					Volumes:                   podVolumes(spec, role),
+					NodeSelector:              role.scheduling.NodeSelector,
+					Tolerations:               role.scheduling.Tolerations,
+					TopologySpreadConstraints: spreadConstraints(cluster, component, role),
+					Affinity:                  podAffinity(cluster, component, spec, role),
+					PriorityClassName:         role.scheduling.PriorityClassName,
 				},
 			},
 		},
 	}
+}
+
+// podAffinity is the pod anti-affinity of one role: the operator's own rule
+// first, when the cluster asked for one, then the role's own terms appended
+// to it. The two are never merged into one term and the role's never replace
+// the operator's, so a user adding a rule of their own cannot silently lose
+// the spread the cluster was created with. A role with neither carries no
+// affinity at all.
+func podAffinity(
+	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	component string,
+	spec normalizedSpec,
+	role normalizedRole,
+) *corev1.Affinity {
+	var anti corev1.PodAntiAffinity
+	if rule := spec.podAntiAffinity; rule != nil {
+		// Scope role keeps this role's pods apart; scope cluster keeps every
+		// pod of the cluster apart, so its selector drops the component label.
+		selector := selectorLabels(cluster, component)
+		if rule.scope == memgraphcomv1alpha1.PodAntiAffinityScopeCluster {
+			delete(selector, componentLabel)
+		}
+		term := corev1.PodAffinityTerm{
+			LabelSelector: &metav1.LabelSelector{MatchLabels: selector},
+			TopologyKey:   rule.topologyKey,
+		}
+		if rule.typ == memgraphcomv1alpha1.PodAntiAffinityRequired {
+			anti.RequiredDuringSchedulingIgnoredDuringExecution = []corev1.PodAffinityTerm{term}
+		} else {
+			anti.PreferredDuringSchedulingIgnoredDuringExecution = []corev1.WeightedPodAffinityTerm{{
+				Weight:          memgraphcomv1alpha1.PodAntiAffinityWeight,
+				PodAffinityTerm: term,
+			}}
+		}
+	}
+	if own := role.scheduling.PodAntiAffinity; own != nil {
+		anti.RequiredDuringSchedulingIgnoredDuringExecution = append(
+			anti.RequiredDuringSchedulingIgnoredDuringExecution,
+			own.RequiredDuringSchedulingIgnoredDuringExecution...)
+		anti.PreferredDuringSchedulingIgnoredDuringExecution = append(
+			anti.PreferredDuringSchedulingIgnoredDuringExecution,
+			own.PreferredDuringSchedulingIgnoredDuringExecution...)
+	}
+	if anti.RequiredDuringSchedulingIgnoredDuringExecution == nil &&
+		anti.PreferredDuringSchedulingIgnoredDuringExecution == nil {
+		return nil
+	}
+	return &corev1.Affinity{PodAntiAffinity: &anti}
+}
+
+// spreadConstraints passes the role's topology spread constraints through,
+// giving a constraint that names no labelSelector the role's own pod selector:
+// the labels are the operator's, so asking the user to repeat them would only
+// invite a typo that spreads nothing.
+func spreadConstraints(
+	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	component string,
+	role normalizedRole,
+) []corev1.TopologySpreadConstraint {
+	if len(role.scheduling.TopologySpreadConstraints) == 0 {
+		return nil
+	}
+	constraints := make([]corev1.TopologySpreadConstraint, 0, len(role.scheduling.TopologySpreadConstraints))
+	for _, c := range role.scheduling.TopologySpreadConstraints {
+		if c.LabelSelector == nil {
+			c.LabelSelector = &metav1.LabelSelector{MatchLabels: selectorLabels(cluster, component)}
+		}
+		constraints = append(constraints, c)
+	}
+	return constraints
 }
 
 // volumeClaimTemplate builds one StatefulSet volumeClaimTemplate. A nil class

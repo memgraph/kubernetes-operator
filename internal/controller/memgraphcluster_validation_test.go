@@ -252,6 +252,73 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 				"--storage-snapshot-on-exit=true", "--bolt-num-workers=8"))
 		})
 
+		It("should accept a scheduling block and default the rule it leaves out", func() {
+			stored := createAccepted("valid-scheduling", memgraphcomv1alpha1.MemgraphClusterSpec{
+				Scheduling: memgraphcomv1alpha1.SchedulingSpec{
+					// The empty block is the HA chart's default rule; every
+					// knob inside is a schema default.
+					PodAntiAffinity: &memgraphcomv1alpha1.PodAntiAffinitySpec{},
+					Coordinators: memgraphcomv1alpha1.RoleSchedulingSpec{
+						NodeSelector:      map[string]string{"role": "coordinator-node"},
+						PriorityClassName: "system-cluster-critical",
+						Tolerations: []corev1.Toleration{{
+							Key: "memgraph", Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoSchedule,
+						}},
+					},
+					Data: memgraphcomv1alpha1.RoleSchedulingSpec{
+						TopologySpreadConstraints: []corev1.TopologySpreadConstraint{{
+							MaxSkew: 1, TopologyKey: "topology.kubernetes.io/zone", WhenUnsatisfiable: corev1.DoNotSchedule,
+						}},
+						PodAntiAffinity: &corev1.PodAntiAffinity{
+							RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{{
+								LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "batch"}},
+								TopologyKey:   "kubernetes.io/hostname",
+							}},
+						},
+					},
+				},
+			})
+
+			rule := stored.Spec.Scheduling.PodAntiAffinity
+			Expect(rule).NotTo(BeNil())
+			Expect(rule.Type).To(Equal(memgraphcomv1alpha1.PodAntiAffinityPreferred))
+			Expect(rule.Scope).To(Equal(memgraphcomv1alpha1.PodAntiAffinityScopeRole))
+			Expect(rule.TopologyKey).To(Equal("kubernetes.io/hostname"))
+			Expect(stored.Spec.Scheduling.Coordinators.NodeSelector).To(HaveKeyWithValue("role", "coordinator-node"))
+			Expect(stored.Spec.Scheduling.Coordinators.Tolerations).To(HaveLen(1))
+			Expect(stored.Spec.Scheduling.Data.TopologySpreadConstraints).To(HaveLen(1))
+			Expect(stored.Spec.Scheduling.Data.TopologySpreadConstraints[0].LabelSelector).To(BeNil(),
+				"the role's selector is filled in by the builder, not stored on the resource")
+			Expect(stored.Spec.Scheduling.Data.PodAntiAffinity).NotTo(BeNil())
+		})
+
+		It("should leave an absent scheduling block absent", func() {
+			stored := createAccepted("no-scheduling", memgraphcomv1alpha1.MemgraphClusterSpec{})
+			Expect(stored.Spec.Scheduling.PodAntiAffinity).To(BeNil(),
+				"the operator's rule is presence-based: no schema default may conjure it")
+		})
+
+		It("should reject an anti-affinity type or scope outside the enum", func() {
+			expectRejected("bad-anti-affinity-type", memgraphcomv1alpha1.MemgraphClusterSpec{
+				Scheduling: memgraphcomv1alpha1.SchedulingSpec{
+					PodAntiAffinity: &memgraphcomv1alpha1.PodAntiAffinitySpec{Type: "hard"},
+				},
+			}, `Unsupported value: "hard"`)
+			expectRejected("bad-anti-affinity-scope", memgraphcomv1alpha1.MemgraphClusterSpec{
+				Scheduling: memgraphcomv1alpha1.SchedulingSpec{
+					PodAntiAffinity: &memgraphcomv1alpha1.PodAntiAffinitySpec{Scope: "everywhere"},
+				},
+			}, `Unsupported value: "everywhere"`)
+		})
+
+		It("should reject a topology key that is not a label key", func() {
+			expectRejected("bad-topology-key", memgraphcomv1alpha1.MemgraphClusterSpec{
+				Scheduling: memgraphcomv1alpha1.SchedulingSpec{
+					PodAntiAffinity: &memgraphcomv1alpha1.PodAntiAffinitySpec{TopologyKey: "not a label"},
+				},
+			}, "topologyKey")
+		})
+
 		It("should accept core dumps with an uploader and default what it leaves out", func() {
 			stored := createAccepted("valid-core-dumps-uploader", memgraphcomv1alpha1.MemgraphClusterSpec{
 				CoreDumps: memgraphcomv1alpha1.CoreDumpsSpec{
