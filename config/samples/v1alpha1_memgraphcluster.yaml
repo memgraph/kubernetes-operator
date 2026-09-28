@@ -218,15 +218,14 @@ spec:
   extraVolumes:
     coordinators: []
     data: []
-      # - name: bolt-certs
-      #   secret:
-      #     secretName: bolt-tls
-      #     defaultMode: 0400
+      # - name: custom-modules
+      #   configMap:
+      #     name: memgraph-custom-modules
   extraVolumeMounts:
     coordinators: []
     data: []
-      # - name: bolt-certs
-      #   mountPath: /etc/memgraph/ssl
+      # - name: custom-modules
+      #   mountPath: /usr/lib/memgraph/query_modules/custom
       #   readOnly: true
   # Reach the cluster from outside Kubernetes. Clients outside need two things:
   # a way in, and a routing table whose addresses they can reach — the
