@@ -49,6 +49,16 @@ const (
 	coreDumpsVolumeName = "core-dumps"
 	tmpVolumeName       = "tmp"
 
+	// boltTLSVolumeName and boltTLSMountPath are where the Bolt certificate
+	// Secret lands in every pod of both roles, mirroring the HA chart's mount.
+	// The Secret is mounted whole rather than through subPath on purpose: a
+	// subPath mount pins the files at pod start, while a whole-volume mount is
+	// refreshed by the kubelet after an in-place update to the Secret, which
+	// is what lets a renewed certificate reach a running instance without a
+	// restart.
+	boltTLSVolumeName = "bolt-tls"
+	boltTLSMountPath  = "/etc/memgraph/ssl"
+
 	// containerName is the Memgraph container's name, and doubles as the $0 the
 	// coordinator's shell wrapper is given.
 	containerName = "memgraph"
@@ -96,7 +106,7 @@ func CoordinatorStatefulSet(
 	// a value carrying whitespace or shell metacharacters is never re-parsed by
 	// the shell. `sh -c` assigns the first operand to $0, so it is a placeholder
 	// name and not a flag.
-	container.Args = append([]string{containerName}, append(commonArgs(role), role.extraArgs...)...)
+	container.Args = append([]string{containerName}, append(commonArgs(spec, role), role.extraArgs...)...)
 	container.Env = append([]corev1.EnvVar{{
 		Name: memgraphcomv1alpha1.EnvPodName,
 		ValueFrom: &corev1.EnvVarSource{
@@ -124,7 +134,7 @@ func DataStatefulSet(cluster *memgraphcomv1alpha1.MemgraphCluster, replicas int3
 	role := spec.dataRole
 
 	container := memgraphContainer(spec, role)
-	container.Args = append(commonArgs(role), role.extraArgs...)
+	container.Args = append(commonArgs(spec, role), role.extraArgs...)
 	container.Ports = []corev1.ContainerPort{
 		{Name: boltPortName, ContainerPort: memgraphcomv1alpha1.BoltPort},
 		{Name: managementPortName, ContainerPort: memgraphcomv1alpha1.ManagementPort},
@@ -166,12 +176,16 @@ exec %s \
 // resulting path is fatal — so an unmounted log directory on a read-only root
 // filesystem would crash-loop the pod. --also-log-to-stderr keeps the logs in
 // `kubectl logs` either way.
-func commonArgs(role normalizedRole) []string {
+//
+// A cluster with Bolt TLS gets the certificate and key flags last. Memgraph
+// serves the metrics endpoint from the same server context, so the two flags
+// turn 9091 to https as well; nothing else about the args changes.
+func commonArgs(spec normalizedSpec, role normalizedRole) []string {
 	logDestination := logFile
 	if !role.storage.createLogClaim {
 		logDestination = ""
 	}
-	return []string{
+	args := []string{
 		fmt.Sprintf("--bolt-port=%d", memgraphcomv1alpha1.BoltPort),
 		fmt.Sprintf("--management-port=%d", memgraphcomv1alpha1.ManagementPort),
 		// The metrics endpoint is served either way; the port is pinned so it
@@ -186,6 +200,13 @@ func commonArgs(role normalizedRole) []string {
 		"--log-file=" + logDestination,
 		"--log-retention-days=35",
 	}
+	if spec.boltTLSSecret != "" {
+		args = append(args,
+			"--bolt-cert-file="+boltTLSMountPath+"/"+corev1.TLSCertKey,
+			"--bolt-key-file="+boltTLSMountPath+"/"+corev1.TLSPrivateKeyKey,
+		)
+	}
+	return args
 }
 
 // memgraphContainer builds the parts of the Memgraph container shared by both
@@ -220,7 +241,7 @@ func memgraphContainer(spec normalizedSpec, role normalizedRole) corev1.Containe
 				},
 			},
 		}, role.env...),
-		VolumeMounts:    volumeMounts(role),
+		VolumeMounts:    volumeMounts(spec, role),
 		SecurityContext: restrictedSecurityContext(),
 	}
 }
@@ -315,9 +336,10 @@ func uploaderSidecar(coreDumps normalizedCoreDumps) corev1.Container {
 
 // volumeMounts are the Memgraph container's mounts: lib storage, the scratch
 // directory the read-only root filesystem needs, log storage unless the role
-// opted out of it, the core dumps directory when the role collects dumps, and
-// last the role's own extra mounts.
-func volumeMounts(role normalizedRole) []corev1.VolumeMount {
+// opted out of it, the core dumps directory when the role collects dumps, the
+// Bolt certificate when the cluster serves TLS, and last the role's own extra
+// mounts.
+func volumeMounts(spec normalizedSpec, role normalizedRole) []corev1.VolumeMount {
 	mounts := []corev1.VolumeMount{{Name: libVolumeName, MountPath: libMountPath}}
 	if role.storage.createLogClaim {
 		mounts = append(mounts, corev1.VolumeMount{Name: logVolumeName, MountPath: logMountPath})
@@ -327,17 +349,40 @@ func volumeMounts(role normalizedRole) []corev1.VolumeMount {
 		mounts = append(mounts,
 			corev1.VolumeMount{Name: coreDumpsVolumeName, MountPath: coreDumpsMountPath})
 	}
+	if spec.boltTLSSecret != "" {
+		mounts = append(mounts,
+			corev1.VolumeMount{Name: boltTLSVolumeName, MountPath: boltTLSMountPath, ReadOnly: true})
+	}
 	return append(mounts, role.extraMounts...)
 }
 
-// podVolumes is the scratch directory the read-only root filesystem needs plus
-// the role's extra volumes. Everything persistent comes from
-// volumeClaimTemplates instead.
-func podVolumes(role normalizedRole) []corev1.Volume {
-	volumes := make([]corev1.Volume, 0, 1+len(role.extraVolumes))
+// podVolumes is the scratch directory the read-only root filesystem needs, the
+// Bolt certificate Secret when the cluster serves TLS, plus the role's extra
+// volumes. Everything persistent comes from volumeClaimTemplates instead.
+//
+// The certificate Secret is projected by key name: tls.crt and tls.key, the
+// shape of a kubernetes.io/tls Secret. A Secret carrying more keys mounts
+// fine, and one missing either keeps the pod from starting, which is how a
+// missing license Secret is reported too.
+func podVolumes(spec normalizedSpec, role normalizedRole) []corev1.Volume {
+	volumes := make([]corev1.Volume, 0, 2+len(role.extraVolumes))
 	volumes = append(volumes, corev1.Volume{
 		Name: tmpVolumeName, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
 	})
+	if spec.boltTLSSecret != "" {
+		volumes = append(volumes, corev1.Volume{
+			Name: boltTLSVolumeName,
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: spec.boltTLSSecret,
+					Items: []corev1.KeyToPath{
+						{Key: corev1.TLSCertKey, Path: corev1.TLSCertKey},
+						{Key: corev1.TLSPrivateKeyKey, Path: corev1.TLSPrivateKeyKey},
+					},
+				},
+			},
+		})
+	}
 	return append(volumes, role.extraVolumes...)
 }
 
@@ -445,7 +490,7 @@ func statefulSet(
 						RunAsNonRoot:   ptr.To(true),
 						SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
 					},
-					Volumes: podVolumes(role),
+					Volumes: podVolumes(spec, role),
 				},
 			},
 		},

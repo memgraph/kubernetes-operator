@@ -1365,7 +1365,7 @@ func (r *MemgraphClusterReconciler) observeCluster(
 	var errs []error
 	leaderless := false
 	for _, coordinator := range endpoints {
-		conn, observed, err := r.showInstances(ctx, coordinator.Address)
+		conn, observed, err := r.showInstances(ctx, coordinator.Address, coordinator.TLS)
 		if err != nil {
 			errs = append(errs, err)
 			continue
@@ -1399,7 +1399,7 @@ func (r *MemgraphClusterReconciler) observeCluster(
 				coordinator.Name, leaderName))
 			continue
 		}
-		leader, err := r.Memgraph.Connect(ctx, address)
+		leader, err := r.Memgraph.Connect(ctx, address, coordinator.TLS)
 		if err != nil {
 			errs = append(errs, err)
 			continue
@@ -1434,13 +1434,15 @@ func leaderAddress(endpoints []resources.CoordinatorEndpoint, observed []memgrap
 	return "", false
 }
 
-// showInstances connects to one coordinator's Bolt address and fetches its
-// cluster view, closing the connection again on query failure.
+// showInstances connects to one coordinator's Bolt address, in the mode the
+// spec says it serves, and fetches its cluster view, closing the connection
+// again on query failure.
 func (r *MemgraphClusterReconciler) showInstances(
 	ctx context.Context,
 	address string,
+	tls bool,
 ) (memgraph.Client, []memgraph.Instance, error) {
-	c, err := r.Memgraph.Connect(ctx, address)
+	c, err := r.Memgraph.Connect(ctx, address, tls)
 	if err != nil {
 		return nil, nil, err
 	}

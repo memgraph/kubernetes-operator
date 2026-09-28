@@ -71,9 +71,15 @@ func UsesServiceMonitor(cluster *memgraphcomv1alpha1.MemgraphCluster) bool {
 // headless ones publish a port named metrics, so only they yield targets. The
 // headless Services publish not-ready addresses, so a recovering instance is
 // scraped and fails, which is the up=0 a monitoring stack wants to see rather
-// than a target that vanishes. The endpoint is plain HTTP on the metrics port,
-// and names an interval only when the spec does, so Prometheus's own default
-// applies otherwise.
+// than a target that vanishes. The endpoint is on the metrics port and names
+// an interval only when the spec does, so Prometheus's own default applies
+// otherwise. Its scheme follows spec.tls.bolt: Memgraph serves metrics from
+// the Bolt server context, so the endpoint is http until that block is set
+// and https from then on, with verification skipped. Prometheus scrapes pod
+// IPs from the headless Services' endpoints, so verifying would need a
+// serverName the certificate's SANs carry on top of a CA the ServiceMonitor
+// can reference — the same pod-DNS burden on a user-facing certificate the
+// operator's own dials decline, and the answer is the same.
 //
 // The builder is only called for a cluster whose spec carries the block: it
 // reads the block's knobs and has nothing to build without them.
@@ -102,14 +108,27 @@ func ServiceMonitor(cluster *memgraphcomv1alpha1.MemgraphCluster) *monitoringv1.
 					instanceLabel:            cluster.Name,
 				},
 			},
-			Endpoints: []monitoringv1.Endpoint{{
-				Port:     metricsPortName,
-				Path:     metricsPath,
-				Scheme:   ptr.To(monitoringv1.SchemeHTTP),
-				Interval: monitoringv1.Duration(block.interval),
-			}},
+			Endpoints: []monitoringv1.Endpoint{metricsEndpoint(spec, block)},
 		},
 	}
+}
+
+// metricsEndpoint is the ServiceMonitor's one endpoint: plain http, or https
+// with verification skipped on a cluster serving Bolt TLS.
+func metricsEndpoint(spec normalizedSpec, block *normalizedServiceMonitor) monitoringv1.Endpoint {
+	endpoint := monitoringv1.Endpoint{
+		Port:     metricsPortName,
+		Path:     metricsPath,
+		Scheme:   ptr.To(monitoringv1.SchemeHTTP),
+		Interval: monitoringv1.Duration(block.interval),
+	}
+	if spec.boltTLSSecret != "" {
+		endpoint.Scheme = ptr.To(monitoringv1.SchemeHTTPS)
+		endpoint.TLSConfig = &monitoringv1.TLSConfig{
+			SafeTLSConfig: monitoringv1.SafeTLSConfig{InsecureSkipVerify: ptr.To(true)},
+		}
+	}
+	return endpoint
 }
 
 // grafanaDashboardJSON is the "Memgraph OpenMetrics" Grafana dashboard, copied

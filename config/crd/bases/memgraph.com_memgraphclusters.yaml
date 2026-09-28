@@ -1460,6 +1460,31 @@ spec:
                     - Delete
                     type: string
                 type: object
+              tls:
+                description: |-
+                  tls turns on the cluster's TLS modes from certificates in Secrets the
+                  user supplies. Absent, every port speaks plaintext.
+                properties:
+                  bolt:
+                    description: |-
+                      bolt serves Bolt and the metrics endpoint over TLS on both roles, from
+                      the certificate in the named Secret.
+                    properties:
+                      secretName:
+                        description: |-
+                          secretName names a Secret in the cluster's namespace holding the
+                          certificate under tls.crt and the private key under tls.key — the shape
+                          of a kubernetes.io/tls Secret, which kubectl create secret tls and a
+                          cert-manager Certificate both produce. Both roles mount it read-only and
+                          serve Bolt and metrics with it.
+                        maxLength: 253
+                        minLength: 1
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                        type: string
+                    required:
+                    - secretName
+                    type: object
+                type: object
             type: object
             x-kubernetes-validations:
             - message: 'externalAccess.gateway.dataPortBase + dataInstances must not

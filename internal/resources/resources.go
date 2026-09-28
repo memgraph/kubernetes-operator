@@ -126,6 +126,9 @@ type normalizedSpec struct {
 	dataRole        normalizedRole
 	external        normalizedExternal
 	monitoring      normalizedMonitoring
+	// boltTLSSecret names the Secret both roles serve Bolt and metrics with,
+	// and is empty for a cluster that serves them in plaintext.
+	boltTLSSecret string
 }
 
 // normalizedMonitoring is the monitoring block with each optional object
@@ -297,6 +300,9 @@ func normalize(spec memgraphcomv1alpha1.MemgraphClusterSpec) normalizedSpec {
 			labels:      labels,
 			annotations: spec.Monitoring.GrafanaDashboard.Annotations,
 		}
+	}
+	if spec.TLS != nil && spec.TLS.Bolt != nil {
+		n.boltTLSSecret = spec.TLS.Bolt.SecretName
 	}
 	if spec.Coordinators != nil {
 		n.coordinators = *spec.Coordinators

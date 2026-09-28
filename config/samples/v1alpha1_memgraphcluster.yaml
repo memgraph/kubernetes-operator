@@ -218,15 +218,14 @@ spec:
   extraVolumes:
     coordinators: []
     data: []
-      # - name: bolt-certs
-      #   secret:
-      #     secretName: bolt-tls
-      #     defaultMode: 0400
+      # - name: custom-modules
+      #   configMap:
+      #     name: memgraph-custom-modules
   extraVolumeMounts:
     coordinators: []
     data: []
-      # - name: bolt-certs
-      #   mountPath: /etc/memgraph/ssl
+      # - name: custom-modules
+      #   mountPath: /usr/lib/memgraph/query_modules/custom
       #   readOnly: true
   # Reach the cluster from outside Kubernetes. Clients outside need two things:
   # a way in, and a routing table whose addresses they can reach — the
@@ -311,3 +310,23 @@ spec:
   #   grafanaDashboard:
   #     labels: {}
   #     annotations: {}
+  # TLS. bolt serves Bolt on 7687 — and the metrics endpoint on 9091, which
+  # Memgraph serves from the same server context — over TLS on both roles, from
+  # one kubernetes.io/tls Secret in this namespace holding tls.crt and tls.key
+  # (what `kubectl create secret tls` and a cert-manager Certificate produce).
+  # One Secret serves every pod of both roles. Its SANs must cover whatever a
+  # verifying client dials: the external address announced on an exposed
+  # cluster, and *.<cluster>-coordinator.<ns>.svc.cluster.local and
+  # *.<cluster>-data.<ns>.svc.cluster.local for clients inside Kubernetes.
+  # Create the Secret first, then add the block: on a running cluster it is an
+  # ordinary rolling restart, data instances before coordinators, during which
+  # the operator reaches each coordinator in whichever mode it still speaks.
+  # The operator dials TLS without verifying, and a serviceMonitor switches to
+  # https with verification skipped, both derived from this block. Renewing
+  # the certificate is an in-place Secret update — the kubelet refreshes the
+  # files — followed by RELOAD BOLT SERVER TLS on every instance; a different
+  # secretName rolls the cluster instead. Removing the block rolls back to
+  # plaintext.
+  # tls:
+  #   bolt:
+  #     secretName: bolt-tls

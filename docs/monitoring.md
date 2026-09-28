@@ -30,7 +30,7 @@ The block is presence-based, like `externalAccess`: present, the operator create
 What the object is:
 
 - **Selector.** `app.kubernetes.io/name: memgraph` and `app.kubernetes.io/instance: <cluster>`, which both headless Services carry. The external Services of an exposed cluster carry the same labels, but no `metrics` port, so they yield no targets.
-- **Endpoint.** Port `metrics`, path `/metrics`, scheme `http`, and `interval` only when the spec sets one.
+- **Endpoint.** Port `metrics`, path `/metrics`, and `interval` only when the spec sets one. The scheme is `http`, or `https` with `tlsConfig.insecureSkipVerify: true` on a cluster with `spec.tls.bolt`: Memgraph serves metrics from the Bolt server context, so the endpoint follows that block (see [`docs/tls.md`](tls.md)).
 - **Labels.** Yours under the operator's identity labels, which win a key collision, plus the marker `memgraph.com/monitoring: "true"` the operator prunes by.
 - **Ownership.** A controller owner reference to the `MemgraphCluster`, so deleting the cluster deletes the ServiceMonitor with everything else.
 
@@ -90,7 +90,7 @@ The ConfigMap is applied on every reconcile pass like every other object the ope
 ## Not in scope
 
 - **The `mg-exporter`**, JSON metrics, vmagent remote write and the Vector log sidecar the HA chart offers. The operator serves OpenMetrics directly and lets your stack scrape it.
-- **`scheme` and `tlsConfig`** on the ServiceMonitor. They only mean something once Memgraph serves metrics over HTTPS, which the operator has no support for yet. They arrive with TLS, driven by the same spec that turns it on.
+- **A `scheme` or `tlsConfig` knob** on the ServiceMonitor. Both follow `spec.tls.bolt`, because that is what moves the endpoint to HTTPS; a verified scrape would need pod-IP names on a user-facing certificate, which is why the derived config skips verification (see [`docs/tls.md`](tls.md)).
 - **A ServiceMonitor in another namespace.** See above.
 - **The chart's "Memgraph Logs" dashboard**, which reads logs the Vector sidecar ships; without the sidecar there is nothing for it to show.
 - **A Prometheus or a Grafana of its own**, or any assertion that one discovers the objects. The e2e suite proves the endpoint answers and the objects are created and pruned; discovery is the stack's contract.
