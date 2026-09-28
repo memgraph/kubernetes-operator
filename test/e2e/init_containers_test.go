@@ -24,6 +24,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -100,12 +101,19 @@ spec:
 		_, err := utils.RunWithInput(cmd, manifest)
 		Expect(err).NotTo(HaveOccurred(), "Failed to apply the MemgraphCluster")
 
+		// Polled rather than `kubectl wait`, which fails at once on a pod that
+		// does not exist yet, and right after the apply the operator has not
+		// created it.
 		By("waiting for the data instance to be ready, which means its init containers have finished")
-		cmd = exec.Command("kubectl", "wait", "--for=condition=Ready", "pod/"+dataPod,
-			"-n", initNamespace, "--timeout=5m")
-		_, err = utils.Run(cmd)
-		Expect(err).NotTo(HaveOccurred(), "the data pod never became ready; its events:\n%s",
-			describePod(initNamespace, dataPod))
+		Eventually(func(g Gomega) {
+			cmd := exec.Command("kubectl", "get", "pod", dataPod, "-n", initNamespace, "-o",
+				`jsonpath={.status.conditions[?(@.type=="Ready")].status}`)
+			output, err := utils.Run(cmd)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(strings.TrimSpace(output)).To(Equal("True"))
+		}, 5*time.Minute, 5*time.Second).Should(Succeed(), func() string {
+			return "the data pod never became ready; its events:\n" + describePod(initNamespace, dataPod)
+		})
 
 		By("confirming both init containers ran, sysctl first, and exited cleanly")
 		Expect(initContainerResults(initNamespace, dataPod)).To(Equal(
