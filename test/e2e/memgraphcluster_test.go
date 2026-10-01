@@ -64,6 +64,9 @@ const (
 	// column.
 	roleMain = "main"
 
+	// roleReplica is the replica data-instance role reported in the same column.
+	roleReplica = "replica"
+
 	// roleLeader is the Raft leader coordinator role reported in the same column.
 	// Which coordinator holds it decides whether a shrink can remove a member at
 	// all: Raft refuses to remove its own leader.
@@ -642,13 +645,12 @@ var _ = Describe("MemgraphCluster", Ordered, func() {
 	// action. This runs after the bootstrap spec (Ordered) against the same
 	// converged cluster.
 	It("re-registers a data instance whose registration was wiped", func() {
-		const wiped = "instance_1"
-
 		By("confirming the cluster is converged before wiping a registration")
 		Eventually(quickstartCluster.verifyRegistered, 10*time.Minute, 10*time.Second).Should(Succeed())
 
-		By("unregistering a data instance on the coordinator leader")
-		Expect(wipeInstanceRegistration(wiped)).To(Succeed())
+		By("unregistering a replica data instance on the coordinator leader")
+		wiped, err := wipeReplicaRegistration()
+		Expect(err).NotTo(HaveOccurred())
 
 		By("confirming the instance really left the cluster view")
 		view, err := quickstartCluster.leaderView()
@@ -1451,21 +1453,35 @@ func metricsFromPod(namespace, pod string) (string, error) {
 	return utils.Run(cmd)
 }
 
-// wipeInstanceRegistration unregisters the named data instance on the
+// wipeReplicaRegistration unregisters a replica data instance on the
 // coordinator leader, simulating registration state a pod loses when it is
-// rescheduled onto a fresh node. UNREGISTER INSTANCE must run on the leader —
-// only it holds the authoritative cluster view — which leaderPod locates.
-func wipeInstanceRegistration(name string) error {
-	pod, _, err := quickstartCluster.leaderPod()
+// rescheduled onto a fresh node, and returns the name it wiped. UNREGISTER
+// INSTANCE must run on the leader — only it holds the authoritative cluster
+// view — which leaderPod locates. A replica is chosen from that view rather
+// than named in advance: Memgraph refuses to unregister a live MAIN, and
+// which instance is MAIN depends on the rolls earlier specs put the cluster
+// through.
+func wipeReplicaRegistration() (string, error) {
+	pod, view, err := quickstartCluster.leaderPod()
 	if err != nil {
-		return fmt.Errorf("no coordinator leader found to unregister %s: %w", name, err)
+		return "", fmt.Errorf("no coordinator leader found to unregister a replica: %w", err)
+	}
+	var name string
+	for _, instance := range view {
+		if instance.role == roleReplica {
+			name = instance.name
+			break
+		}
+	}
+	if name == "" {
+		return "", fmt.Errorf("no replica in the leader's view to unregister: %v", instanceNames(view))
 	}
 	cmd := exec.Command("kubectl", "exec", pod, "-n", clusterNamespace, "-c", "memgraph", "--",
 		"bash", "-c", quickstartCluster.mgconsole(fmt.Sprintf("UNREGISTER INSTANCE %s;", name)))
 	if _, err := utils.Run(cmd); err != nil {
-		return fmt.Errorf("unregistering %s on %s: %w", name, pod, err)
+		return "", fmt.Errorf("unregistering %s on %s: %w", name, pod, err)
 	}
-	return nil
+	return name, nil
 }
 
 // removeCoordinatorRegistration removes a follower coordinator from the Raft
