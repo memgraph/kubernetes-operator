@@ -75,6 +75,23 @@ const (
 	// the default labels of a grafanaDashboard block that names none.
 	DefaultGrafanaDashboardLabel = "grafana_dashboard"
 	DefaultGrafanaDashboardValue = "1"
+
+	// The vmagent the vmagentRemote block runs: the image the HA chart
+	// defaults to, and the chart's scrape interval.
+	DefaultVMAgentImageRepository = "docker.io/victoriametrics/vmagent"
+	DefaultVMAgentImageTag        = "v1.139.0"
+	DefaultVMAgentScrapeInterval  = "15s"
+
+	// VMAgentPort is where vmagent serves its own HTTP endpoints: health,
+	// its metrics and target status. It is fixed, like the Memgraph ports,
+	// because nothing outside the pod dials it.
+	VMAgentPort int32 = 8429
+
+	// The keys of the basic-auth Secret vmagentRemote.remoteWrite.basicAuth
+	// names: those of a kubernetes.io/basic-auth Secret, which are also what
+	// the HA chart's usernameKey and passwordKey default to.
+	BasicAuthUsernameKey = "username"
+	BasicAuthPasswordKey = "password"
 )
 
 // Readiness probe timing defaults, Go constants mirrored by the doc comments
@@ -1386,6 +1403,123 @@ type GrafanaDashboardSpec struct {
 	Annotations map[string]string `json:"annotations,omitempty"`
 }
 
+// VMAgentImageSpec selects the vmagent image the vmagentRemote block runs. It
+// has the shape of the Memgraph image block with vmagent's defaults: the
+// chart's victoriametrics/vmagent at the tag the chart pins.
+type VMAgentImageSpec struct {
+	// repository is the vmagent container image repository, with the optional
+	// registry host and the image path only; the version belongs in tag.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=255
+	// +kubebuilder:validation:XValidation:rule="!self.contains('@')",message="repository must not contain a digest; pin the image with tag instead"
+	// +kubebuilder:validation:XValidation:rule="!self.substring(self.lastIndexOf('/') + 1).contains(':')",message="repository must not contain a tag; set image.tag instead"
+	// +kubebuilder:default="docker.io/victoriametrics/vmagent"
+	// +optional
+	Repository string `json:"repository,omitempty"`
+
+	// tag is the vmagent container image tag.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=128
+	// +kubebuilder:validation:Pattern=`^[a-zA-Z0-9_][a-zA-Z0-9._-]*$`
+	// +kubebuilder:default="v1.139.0"
+	// +optional
+	Tag string `json:"tag,omitempty"`
+
+	// pullPolicy is the image pull policy of the vmagent pod.
+	// +kubebuilder:validation:Enum=Always;IfNotPresent;Never
+	// +kubebuilder:default=IfNotPresent
+	// +optional
+	PullPolicy corev1.PullPolicy `json:"pullPolicy,omitempty"`
+}
+
+// RemoteWriteBasicAuthSpec names the Secret holding the credentials vmagent
+// authenticates to the remote-write endpoint with. The keys are not knobs:
+// they are "username" and "password", the keys of a kubernetes.io/basic-auth
+// Secret and what the HA chart's usernameKey and passwordKey default to, for
+// the reason the TLS Secrets have fixed keys too. The password is mounted into
+// the vmagent pod and read as a file vmagent re-reads every second, so a
+// rotated password takes effect with no restart and is never on the command
+// line; the username reaches vmagent through an environment variable, and a
+// changed one rolls the pod. The operator never reads the Secret.
+type RemoteWriteBasicAuthSpec struct {
+	// secretName is the name of the Secret in the cluster's namespace holding
+	// the keys "username" and "password".
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
+	// +required
+	SecretName string `json:"secretName"`
+}
+
+// RemoteWriteSpec is where vmagent ships what it scrapes.
+type RemoteWriteSpec struct {
+	// url is the Prometheus remote-write endpoint vmagent writes to, for
+	// example "http://vmsingle.monitoring.svc.cluster.local:8428/api/v1/write".
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=2048
+	// +kubebuilder:validation:Pattern=`^https?://`
+	// +required
+	URL string `json:"url"`
+
+	// basicAuth names the Secret vmagent authenticates to the endpoint with.
+	// Absent, the endpoint is written to unauthenticated.
+	// +optional
+	BasicAuth *RemoteWriteBasicAuthSpec `json:"basicAuth,omitempty"`
+}
+
+// VMAgentRemoteSpec asks the operator to run the HA chart's vmagentRemote: one
+// vmagent Deployment in the cluster's namespace that scrapes every instance's
+// OpenMetrics endpoint over pod DNS and remote-writes the samples to a
+// Prometheus remote-write endpoint, which is how a cluster's metrics reach a
+// monitoring cluster run elsewhere. The scrape configuration is an operator-
+// owned ConfigMap vmagent re-reads when it changes, so a count change reaches
+// the running vmagent without a restart; a change to the url, the image or the
+// credentials Secret is a pod-template change the Deployment rolls itself.
+//
+// The scrape scheme is not a knob: it follows spec.tls.bolt the way the
+// ServiceMonitor's does, http until that block is set and https with
+// verification skipped from then on. There is no namespace knob, for the
+// reason the ServiceMonitor has none. The chart's kubernetes block, which
+// scrapes kube-state-metrics, node-exporter and the kubelet through the API
+// server, is deliberately absent: those targets are not this cluster's, and
+// the kubelet job needs a cluster-scoped ClusterRole on nodes and nodes/proxy
+// that no owner reference garbage-collects; a cluster-wide agent is the tool
+// for them. The vmagent pod runs as uid 65534 under the restricted security
+// context every container the operator builds runs under, because the image
+// names no user of its own.
+type VMAgentRemoteSpec struct {
+	// image selects the vmagent image. Left out, the chart's default image at
+	// the tag the operator pins is run.
+	// +kubebuilder:default={}
+	// +optional
+	Image VMAgentImageSpec `json:"image,omitzero"`
+
+	// remoteWrite is the endpoint vmagent writes to and how it authenticates.
+	// +required
+	RemoteWrite RemoteWriteSpec `json:"remoteWrite"`
+
+	// scrapeInterval is how often vmagent scrapes every instance, as a
+	// Prometheus duration such as "15s" or "1m".
+	// +kubebuilder:validation:Pattern=`^(0|(([0-9]+)y)?(([0-9]+)w)?(([0-9]+)d)?(([0-9]+)h)?(([0-9]+)m)?(([0-9]+)s)?(([0-9]+)ms)?)$`
+	// +kubebuilder:default="15s"
+	// +optional
+	ScrapeInterval string `json:"scrapeInterval,omitempty"`
+
+	// externalLabels are added to every sample vmagent writes, which is how a
+	// monitoring cluster receiving from many Memgraph clusters tells them
+	// apart; for example cluster: production. Keys must be Prometheus label
+	// names.
+	// +kubebuilder:validation:MaxProperties=64
+	// +kubebuilder:validation:XValidation:rule="self.all(k, k.matches('^[a-zA-Z_][a-zA-Z0-9_]*$'))",message="externalLabels keys must be Prometheus label names: letters, digits and underscores, not starting with a digit"
+	// +optional
+	ExternalLabels map[string]string `json:"externalLabels,omitempty"`
+
+	// resources sets the vmagent container's compute resources. Left out, the
+	// pod schedules without requests or limits.
+	// +optional
+	Resources corev1.ResourceRequirements `json:"resources,omitzero"`
+}
+
 // MonitoringSpec is what the operator creates for a monitoring stack the user
 // already runs. Each block is optional and presence-based, like externalAccess:
 // present, the object is created and kept; removed, it is deleted again. What
@@ -1405,6 +1539,12 @@ type MonitoringSpec struct {
 	// as a ConfigMap a Grafana sidecar loads.
 	// +optional
 	GrafanaDashboard *GrafanaDashboardSpec `json:"grafanaDashboard,omitempty"`
+
+	// vmagentRemote runs one vmagent that scrapes every instance of the
+	// cluster and remote-writes the samples to a Prometheus remote-write
+	// endpoint, such as a VictoriaMetrics in another cluster.
+	// +optional
+	VMAgentRemote *VMAgentRemoteSpec `json:"vmagentRemote,omitempty"`
 }
 
 // BoltTLSSpec makes both roles serve Bolt — and with it the metrics endpoint,

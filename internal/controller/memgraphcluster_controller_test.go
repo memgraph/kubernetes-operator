@@ -2664,6 +2664,136 @@ var _ = Describe("MemgraphCluster Controller", func() {
 		})
 	})
 
+	Context("when asked for a vmagent", func() {
+		const resourceName = "mgc-vmagent"
+		const vmagentName = resourceName + "-vmagent"
+		const remoteWriteURL = "http://vmsingle.monitoring.svc.cluster.local:8428/api/v1/write"
+
+		updateSpec := func(mutate func(*memgraphcomv1alpha1.MemgraphClusterSpec)) {
+			GinkgoHelper()
+			cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+			get(resourceName, cluster)
+			mutate(&cluster.Spec)
+			Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
+		}
+		marked := client.MatchingLabels{resources.MonitoringLabel: resources.MonitoringValue}
+		deployments := func() []appsv1.Deployment {
+			GinkgoHelper()
+			list := &appsv1.DeploymentList{}
+			Expect(k8sClient.List(ctx, list, client.InNamespace(resourceNamespace), marked)).To(Succeed())
+			return list.Items
+		}
+		configMaps := func() []corev1.ConfigMap {
+			GinkgoHelper()
+			list := &corev1.ConfigMapList{}
+			Expect(k8sClient.List(ctx, list, client.InNamespace(resourceNamespace), marked)).To(Succeed())
+			return list.Items
+		}
+		serviceMonitors := func() []monitoringv1.ServiceMonitor {
+			GinkgoHelper()
+			list := &monitoringv1.ServiceMonitorList{}
+			Expect(k8sClient.List(ctx, list, client.InNamespace(resourceNamespace), marked)).To(Succeed())
+			return list.Items
+		}
+		// cleanupMonitoring removes the monitoring objects by hand: envtest runs
+		// no garbage collector.
+		cleanupMonitoring := func() {
+			GinkgoHelper()
+			for _, item := range deployments() {
+				Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, &item))).To(Succeed())
+			}
+			for _, item := range configMaps() {
+				Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, &item))).To(Succeed())
+			}
+			for _, item := range serviceMonitors() {
+				Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, &item))).To(Succeed())
+			}
+		}
+
+		BeforeEach(func() {
+			resource := &memgraphcomv1alpha1.MemgraphCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: resourceNamespace},
+				Spec: memgraphcomv1alpha1.MemgraphClusterSpec{
+					Monitoring: &memgraphcomv1alpha1.MonitoringSpec{
+						ServiceMonitor: &memgraphcomv1alpha1.ServiceMonitorSpec{},
+						VMAgentRemote: &memgraphcomv1alpha1.VMAgentRemoteSpec{
+							RemoteWrite: memgraphcomv1alpha1.RemoteWriteSpec{
+								URL:       remoteWriteURL,
+								BasicAuth: &memgraphcomv1alpha1.RemoteWriteBasicAuthSpec{SecretName: "monitoring-basic-auth"},
+							},
+							ExternalLabels: map[string]string{"cluster": "envtest"},
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+		})
+
+		AfterEach(func() {
+			cleanupMonitoring()
+			cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+			get(resourceName, cluster)
+			Expect(k8sClient.Delete(ctx, cluster)).To(Succeed())
+			deleteOwned(resourceName)
+		})
+
+		It("should run one vmagent scraping every applied pod and writing to the endpoint", func() {
+			reconcileCluster(resourceName)
+
+			cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+			get(resourceName, cluster)
+			// The CRD defaults applied at admission, so the block arrived with
+			// the image and the interval filled in.
+			Expect(cluster.Spec.Monitoring.VMAgentRemote.Image.Tag).To(Equal(memgraphcomv1alpha1.DefaultVMAgentImageTag))
+			Expect(cluster.Spec.Monitoring.VMAgentRemote.ScrapeInterval).To(Equal(memgraphcomv1alpha1.DefaultVMAgentScrapeInterval))
+
+			deployment := &appsv1.Deployment{}
+			get(vmagentName, deployment)
+			expectControlledBy(deployment, cluster)
+			Expect(deployment.Labels).To(HaveKeyWithValue(resources.MonitoringLabel, resources.MonitoringValue))
+			Expect(deployment.Spec.Template.Spec.Containers).To(HaveLen(1))
+			container := deployment.Spec.Template.Spec.Containers[0]
+			Expect(container.Image).To(Equal(
+				memgraphcomv1alpha1.DefaultVMAgentImageRepository + ":" + memgraphcomv1alpha1.DefaultVMAgentImageTag))
+			Expect(container.Args).To(ContainElement("-remoteWrite.url=" + remoteWriteURL))
+			Expect(container.Args).To(ContainElement("-remoteWrite.basicAuth.passwordFile=/etc/vmagent/basic-auth/password"),
+				"the credentials are read from the mounted Secret, never passed on the command line")
+			Expect(deployment.Spec.Template.Spec.Volumes).To(ContainElement(
+				HaveField("Secret.SecretName", "monitoring-basic-auth")))
+
+			config := &corev1.ConfigMap{}
+			get(vmagentName+"-config", config)
+			expectControlledBy(config, cluster)
+			Expect(config.Labels).To(HaveKeyWithValue(resources.MonitoringLabel, resources.MonitoringValue))
+			scrape := config.Data[resources.VMAgentConfigKey]
+			Expect(scrape).To(ContainSubstring("scrape_interval: 15s"))
+			Expect(scrape).To(ContainSubstring("cluster: envtest"))
+			for ordinal := range memgraphcomv1alpha1.DefaultCoordinatorCount {
+				Expect(scrape).To(ContainSubstring(fmt.Sprintf("%s-coordinator-%d.%s-coordinator.%s.svc.cluster.local:9091",
+					resourceName, ordinal, resourceName, resourceNamespace)))
+			}
+			for ordinal := range memgraphcomv1alpha1.DefaultDataInstanceCount {
+				Expect(scrape).To(ContainSubstring(fmt.Sprintf("%s-data-%d.%s-data.%s.svc.cluster.local:9091",
+					resourceName, ordinal, resourceName, resourceNamespace)))
+			}
+		})
+
+		It("should prune the vmagent when its block is removed and leave the ServiceMonitor alone", func() {
+			reconcileCluster(resourceName)
+			Expect(deployments()).To(HaveLen(1))
+			Expect(configMaps()).To(HaveLen(1))
+			Expect(serviceMonitors()).To(HaveLen(1))
+
+			updateSpec(func(spec *memgraphcomv1alpha1.MemgraphClusterSpec) {
+				spec.Monitoring.VMAgentRemote = nil
+			})
+			reconcileCluster(resourceName)
+			Expect(deployments()).To(BeEmpty(), "removing the block takes the Deployment away")
+			Expect(configMaps()).To(BeEmpty(), "and its scrape config with it")
+			Expect(serviceMonitors()).To(HaveLen(1), "the sibling block's object is untouched")
+		})
+	})
+
 	Context("when discovering ServiceMonitor", func() {
 		It("should find it on a cluster that serves it", func() {
 			served, missing, err := ServiceMonitorServed(k8sClient.RESTMapper())
