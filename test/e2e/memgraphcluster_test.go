@@ -213,6 +213,14 @@ spec:
       targetPort: http
 `
 
+// workloadPods is the label selector of a cluster's Memgraph pods alone, both
+// roles, and not the vmagent's: every object of the cluster carries the
+// instance label, and a sidecar-less agent pod lingering in Terminating would
+// otherwise count as one of the pods a roll is watched over.
+func (c clusterUnderTest) workloadPods() string {
+	return "app.kubernetes.io/instance=" + c.name + ",app.kubernetes.io/component in (coordinator,data)"
+}
+
 // clusterUnderTest is one MemgraphCluster a spec observes, together with the
 // topology it declares. The suite runs several differently-shaped clusters —
 // the quickstart one, the retention one, the one that is scaled — so every
@@ -482,14 +490,19 @@ var _ = Describe("MemgraphCluster", Ordered, func() {
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred())
 
-		By("waiting for the vmagent Deployment and its ConfigMap to go")
+		By("waiting for the vmagent Deployment, its pod and its ConfigMap to go")
 		Eventually(func(g Gomega) {
-			cmd := exec.Command("kubectl", "get", "deployment,configmap", "-n", clusterNamespace,
-				"-l", resources.MonitoringLabel+"="+resources.MonitoringValue, "-o", "name")
+			cmd := exec.Command("kubectl", "get", "deployment,configmap,pod", "-n", clusterNamespace,
+				"-l", "app.kubernetes.io/component=vmagent", "-o", "name")
 			out, err := utils.Run(cmd)
 			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(strings.TrimSpace(out)).To(BeEmpty(), "the pod must be gone too, or the next spec counts it")
+			cmd = exec.Command("kubectl", "get", "deployment,configmap", "-n", clusterNamespace,
+				"-l", resources.MonitoringLabel+"="+resources.MonitoringValue, "-o", "name")
+			out, err = utils.Run(cmd)
+			g.Expect(err).NotTo(HaveOccurred())
 			g.Expect(strings.TrimSpace(out)).To(BeEmpty())
-		}, 2*time.Minute, 5*time.Second).Should(Succeed())
+		}, 3*time.Minute, 5*time.Second).Should(Succeed())
 		quickstartCluster.awaitConverged(3 * time.Minute)
 	})
 
@@ -550,7 +563,7 @@ var _ = Describe("MemgraphCluster", Ordered, func() {
 
 		By("confirming every pod runs the sidecar under the restricted policy")
 		cmd = exec.Command("kubectl", "get", "pods", "-n", clusterNamespace,
-			"-l", "app.kubernetes.io/instance="+quickstartCluster.name,
+			"-l", quickstartCluster.workloadPods(),
 			"-o", "jsonpath={range .items[*]}{.metadata.name}={range .spec.containers[*]}{.name},{end}{\"\\n\"}{end}")
 		out, err := utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred())
@@ -599,7 +612,7 @@ var _ = Describe("MemgraphCluster", Ordered, func() {
 			g.Expect(strings.TrimSpace(out)).To(BeEmpty())
 		}, 2*time.Minute, 5*time.Second).Should(Succeed())
 		cmd = exec.Command("kubectl", "get", "pods", "-n", clusterNamespace,
-			"-l", "app.kubernetes.io/instance="+quickstartCluster.name,
+			"-l", quickstartCluster.workloadPods(),
 			"-o", "jsonpath={range .items[*]}{.metadata.name}={range .spec.containers[*]}{.name},{end}{\"\\n\"}{end}")
 		out, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred())
@@ -1320,7 +1333,7 @@ func (c clusterUnderTest) podExists(component string, ordinal int32) (bool, erro
 // says nothing, the UID changes exactly once per replacement.
 func (c clusterUnderTest) podUIDs() (map[string]string, error) {
 	cmd := exec.Command("kubectl", "get", "pods", "-n", c.namespace,
-		"-l", "app.kubernetes.io/instance="+c.name,
+		"-l", c.workloadPods(),
 		"-o", `jsonpath={range .items[*]}{.metadata.name}{" "}{.metadata.uid}{" "}`+
 			`{range .status.conditions[?(@.type=="Ready")]}{.status}{end}{"\n"}{end}`)
 	output, err := utils.Run(cmd)
@@ -1342,7 +1355,7 @@ func (c clusterUnderTest) podUIDs() (map[string]string, error) {
 // counting a pod that has gone away entirely.
 func (c clusterUnderTest) notReadyPods(expected int) (int, error) {
 	cmd := exec.Command("kubectl", "get", "pods", "-n", c.namespace,
-		"-l", "app.kubernetes.io/instance="+c.name,
+		"-l", c.workloadPods(),
 		"-o", `jsonpath={range .items[*]}{range .status.conditions[?(@.type=="Ready")]}{.status}{end}{"\n"}{end}`)
 	output, err := utils.Run(cmd)
 	if err != nil {
