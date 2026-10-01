@@ -408,7 +408,7 @@ var _ = Describe("MemgraphCluster", Ordered, func() {
 					} `json:"result"`
 				} `json:"data"`
 			}
-			g.Expect(json.Unmarshal([]byte(jsonObject(body)), &response)).To(Succeed(), "sink answered %q", body)
+			g.Expect(json.Unmarshal([]byte(body), &response)).To(Succeed(), "sink answered %q", body)
 			g.Expect(response.Status).To(Equal("success"))
 			g.Expect(response.Data.Result).To(HaveLen(1), "no up series has reached the sink yet")
 			g.Expect(response.Data.Result[0].Value).To(HaveLen(2))
@@ -1235,17 +1235,6 @@ func (c clusterUnderTest) watchRoll(before map[string]string, timeout time.Durat
 // dataPod is the name of the data pod on the given ordinal.
 func (c clusterUnderTest) dataPod(ordinal int32) string {
 	return fmt.Sprintf("%s-data-%d", c.name, ordinal)
-}
-
-// jsonObject cuts the one JSON object out of the output of a kubectl run -i
-// pod, which kubectl frames with a banner about session recording and the
-// line reporting the pod's deletion; neither carries a brace.
-func jsonObject(output string) string {
-	start, end := strings.Index(output, "{"), strings.LastIndex(output, "}")
-	if start < 0 || end < start {
-		return output
-	}
-	return output[start : end+1]
 }
 
 // metricsFromPod reads the pod's own metrics endpoint from inside the pod,
