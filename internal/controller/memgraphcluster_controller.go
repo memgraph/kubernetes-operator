@@ -133,6 +133,7 @@ type MemgraphClusterReconciler struct {
 // +kubebuilder:rbac:groups=memgraph.com,resources=memgraphclusters/status,verbs=get;patch
 // +kubebuilder:rbac:groups=memgraph.com,resources=memgraphclusters/finalizers,verbs=update
 // +kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;create;patch
+// +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;patch;delete
 // +kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;patch;delete
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;delete
 //
@@ -191,7 +192,7 @@ func (r *MemgraphClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	// count it declares: a retiring instance keeps serving clients until its pod
 	// is shed, and the pass that sheds the pod is the one that drops its way in.
 	external := r.desiredExternal(&cluster, replicas.data.applied)
-	monitoring := r.desiredMonitoring(&cluster)
+	monitoring := r.desiredMonitoring(&cluster, replicas)
 	desired := make([]client.Object, 0, 4+len(external)+len(monitoring))
 	desired = append(desired,
 		resources.CoordinatorHeadlessService(&cluster),
@@ -248,15 +249,26 @@ func (r *MemgraphClusterReconciler) desiredExternal(
 // desiredMonitoring is every monitoring object the spec asks for: the
 // ServiceMonitor, but only on a cluster that serves the kind — without it the
 // cluster runs as if that block were absent and the block is reported as failed
-// rather than pending, because no amount of waiting makes the CRD appear — and
-// the Grafana dashboard ConfigMap, which needs nothing from the cluster.
-func (r *MemgraphClusterReconciler) desiredMonitoring(cluster *memgraphcomv1alpha1.MemgraphCluster) []client.Object {
+// rather than pending, because no amount of waiting makes the CRD appear — the
+// Grafana dashboard ConfigMap, which needs nothing from the cluster, and the
+// vmagent Deployment with its scrape config, whose targets follow the pods the
+// operator runs for the reason the external objects do.
+func (r *MemgraphClusterReconciler) desiredMonitoring(
+	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	replicas replicaCounts,
+) []client.Object {
 	var objects []client.Object
 	if resources.UsesServiceMonitor(cluster) && r.ServiceMonitorAPI {
 		objects = append(objects, resources.ServiceMonitor(cluster))
 	}
 	if resources.UsesGrafanaDashboard(cluster) {
 		objects = append(objects, resources.GrafanaDashboard(cluster))
+	}
+	if resources.UsesVMAgent(cluster) {
+		objects = append(objects,
+			resources.VMAgentConfigMap(cluster, replicas.coordinators.applied, replicas.data.applied),
+			resources.VMAgentDeployment(cluster),
+		)
 	}
 	return objects
 }
@@ -282,7 +294,7 @@ func (r *MemgraphClusterReconciler) pruneMonitoring(
 	desired []client.Object,
 ) error {
 	keep := keptNames(desired)
-	lists := []client.ObjectList{&corev1.ConfigMapList{}}
+	lists := []client.ObjectList{&corev1.ConfigMapList{}, &appsv1.DeploymentList{}}
 	if r.ServiceMonitorAPI {
 		lists = append(lists, &monitoringv1.ServiceMonitorList{})
 	}
@@ -1487,6 +1499,7 @@ func (r *MemgraphClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	builder := ctrl.NewControllerManagedBy(mgr).
 		For(&memgraphcomv1alpha1.MemgraphCluster{}).
 		Owns(&appsv1.StatefulSet{}).
+		Owns(&appsv1.Deployment{}).
 		Owns(&corev1.Service{}).
 		Owns(&corev1.ConfigMap{})
 	if r.GatewayAPI {

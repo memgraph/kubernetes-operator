@@ -344,14 +344,35 @@ func createTLSSecret(namespace, name, certPEM, keyPEM, caPEM string) {
 
 // curlInsecure fetches a URL from inside the cluster through a throwaway curl
 // pod that skips certificate verification, and returns the body. The pod runs
-// under the restricted Pod Security Standard the namespace enforces.
+// under the restricted Pod Security Standard the namespace enforces. The body
+// is read from the pod's logs once it has finished rather than through an
+// attached kubectl run: curl is done in well under a second, and an attach
+// that arrives after the container exited sees nothing.
 func curlInsecure(namespace, url string) (string, error) {
+	const pod = "curl-insecure"
 	overrides := `{"spec":{"containers":[{"name":"curl","image":"curlimages/curl:latest",` +
 		`"command":["curl","-sSk","--max-time","30","` + url + `"],` +
 		`"securityContext":{"readOnlyRootFilesystem":true,"allowPrivilegeEscalation":false,` +
 		`"capabilities":{"drop":["ALL"]},"runAsNonRoot":true,"runAsUser":1000,` +
 		`"seccompProfile":{"type":"RuntimeDefault"}}}]}}`
-	cmd := exec.Command("kubectl", "run", "curl-tls-metrics", "--rm", "-i", "--restart=Never",
-		"--namespace", namespace, "--image=curlimages/curl:latest", "--overrides", overrides)
+	deletePod := func() {
+		cmd := exec.Command("kubectl", "delete", "pod", pod, "--namespace", namespace,
+			"--ignore-not-found", "--wait=true")
+		_, _ = utils.Run(cmd)
+	}
+	deletePod()
+	defer deletePod()
+
+	cmd := exec.Command("kubectl", "run", pod, "--restart=Never", "--namespace", namespace,
+		"--image=curlimages/curl:latest", "--overrides", overrides)
+	if _, err := utils.Run(cmd); err != nil {
+		return "", err
+	}
+	cmd = exec.Command("kubectl", "wait", "pod/"+pod, "--namespace", namespace,
+		"--for=jsonpath={.status.phase}=Succeeded", "--timeout=2m")
+	if _, err := utils.Run(cmd); err != nil {
+		return "", err
+	}
+	cmd = exec.Command("kubectl", "logs", pod, "--namespace", namespace)
 	return utils.Run(cmd)
 }

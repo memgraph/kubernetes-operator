@@ -25,6 +25,7 @@ import (
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	klabels "k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -183,13 +184,14 @@ func main() {
 		// controller-revision-hash and readiness on every pass — but only this
 		// operator's own pods are. Watching every pod in the cluster to find them
 		// would cost memory proportional to somebody else's workload. ConfigMaps
-		// the same: the operator owns one per cluster that asks for the Grafana
-		// dashboard, and every namespace has ConfigMaps that are none of its
-		// business.
+		// and Deployments the same: the operator owns one of each per cluster
+		// that asks for the Grafana dashboard or a vmagent, and every namespace
+		// has ConfigMaps and Deployments that are none of its business.
 		Cache: cache.Options{
 			ByObject: map[client.Object]cache.ByObject{
-				&corev1.Pod{}:       {Label: managedByOperator},
-				&corev1.ConfigMap{}: {Label: managedByOperator},
+				&corev1.Pod{}:        {Label: managedByOperator},
+				&corev1.ConfigMap{}:  {Label: managedByOperator},
+				&appsv1.Deployment{}: {Label: managedByOperator},
 			},
 		},
 		LeaderElection:   enableLeaderElection,

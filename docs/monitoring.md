@@ -1,6 +1,6 @@
 # Monitoring: scraping a cluster with Prometheus
 
-Every instance of a `MemgraphCluster` serves metrics in the OpenMetrics text format, and `spec.monitoring` creates the objects a monitoring stack you already run discovers the cluster by. This document is the contract: what is served without asking, what the block creates, what a cluster without Prometheus Operator reports, and what is deliberately left out.
+Every instance of a `MemgraphCluster` serves metrics in the OpenMetrics text format, and `spec.monitoring` creates the objects a monitoring stack you already run discovers the cluster by — or the vmagent that pushes the metrics to Memgraph, so Memgraph can monitor the cluster for you. This document is the contract: what is served without asking, what the block creates, what a cluster without Prometheus Operator reports, and what is deliberately left out.
 
 ## What every cluster serves, with no spec at all
 
@@ -87,9 +87,56 @@ Presence-based like the block above. Present, the operator creates one ConfigMap
 
 The ConfigMap is applied on every reconcile pass like every other object the operator owns, which is about 460 KB to the API server per cluster per 30-second resync and no etcd write when nothing changed. That is noise next to a Prometheus scraping the same cluster, and there is deliberately no second code path that skips the apply when the cached copy matches: it can come if someone sees the cost on a graph.
 
+## `spec.monitoring.vmagentRemote`
+
+```yaml
+spec:
+  monitoring:
+    vmagentRemote:
+      remoteWrite:
+        url: http://vmsingle.monitoring.svc.cluster.local:8428/api/v1/write
+        basicAuth:                        # optional
+          secretName: monitoring-basic-auth
+      scrapeInterval: 15s                 # the default
+      externalLabels:                     # optional; how the remote tells clusters apart
+        cluster: production
+      image:                              # optional; defaults to victoriametrics/vmagent at the pinned tag
+        repository: docker.io/victoriametrics/vmagent
+        tag: v1.139.0
+      resources: {}
+```
+
+The HA chart's `vmagentRemote`, which is how Memgraph monitors a customer's cluster. Memgraph cannot reach into your network to scrape the cluster, so the cluster pushes its metrics the other way: a vmagent beside it scrapes every instance and remote-writes the samples, outbound only, to the VictoriaMetrics Memgraph runs, at the URL and with the credentials Memgraph gives you. The same block works for any Prometheus remote-write endpoint, such as a monitoring cluster your own platform team runs. Presence-based like the blocks above: present, the operator runs one vmagent in the cluster's namespace that scrapes every instance's OpenMetrics endpoint and remote-writes the samples to `remoteWrite.url`; removed, the vmagent is deleted. `remoteWrite.url` is the one required field. Nothing about the Memgraph pods changes: the vmagent scrapes the same 9091 the ServiceMonitor names, and both blocks can be on at once (the chart warns about scraping twice because its vmagent scrapes the exporter; here there is no exporter and two scrapers of an endpoint are harmless).
+
+What the operator creates:
+
+- **A Deployment `<cluster>-vmagent`**, one replica, carrying the monitoring marker and a controller owner reference like the ServiceMonitor. The container runs under the restricted security context every container the operator builds runs under, as uid 65534 (the vmagent image names no user of its own), mounts no ServiceAccount token because it needs nothing from the API server, buffers samples the endpoint has not accepted yet on an emptyDir, and reports ready on vmagent's own `/health`.
+- **A ConfigMap `<cluster>-vmagent-config`** holding the scrape configuration under `scrape.yml`: one job `memgraph` with a static target per pod the operator runs, addressed by pod DNS on the metrics port (`<cluster>-coordinator-0.<cluster>-coordinator.<namespace>.svc.<clusterDomain>:9091`, and so on), `scrapeInterval` and `externalLabels` under `global`. The targets follow the pods the operator runs, so a scale-up or scale-down rewrites the file; vmagent re-reads it once the kubelet has synced the mount, within a minute or two, with no pod restart and no loss of the buffer. The scheme follows `spec.tls.bolt` the way the ServiceMonitor's does: `https` with `insecure_skip_verify` the moment that block is set.
+
+Changing `remoteWrite.url`, the image or the credentials Secret is a pod-template change the Deployment rolls itself. Nothing lands in the resource's status: whether the endpoint accepts the writes is vmagent's to report, in its logs and on its own metrics (`vmagent_remotewrite_*` on port 8429 inside the pod).
+
+### Credentials
+
+`basicAuth.secretName` names a Secret in the cluster's namespace with the keys **`username`** and **`password`** — the keys of a `kubernetes.io/basic-auth` Secret, which is what the chart's `usernameKey` and `passwordKey` default to; here they are fixed, for the reason the TLS Secrets' keys are. Create it with
+
+```sh
+kubectl create secret generic monitoring-basic-auth --namespace <cluster namespace> \
+  --type=kubernetes.io/basic-auth --from-literal=username=... --from-literal=password=...
+```
+
+The password is mounted into the vmagent pod read-only and vmagent reads it from the file, re-reading it every second, so a rotated password takes effect with no restart and is never on the command line (the chart's vmagent takes it through `$(MONITORING_PASSWORD)`, where `ps` shows it). The username is not the secret part: it reaches vmagent through an environment variable from the same Secret, and a changed username rolls the pod. The operator never reads the Secret: it holds no Secret permissions at all.
+
+### What is not a knob
+
+- **`namespace`**, for the reason the ServiceMonitor has none; the vmagent runs beside the cluster and reaches the endpoint over the network like any client would.
+- **`httpPort`**: vmagent listens on 8429 inside the pod and nothing outside the pod dials it.
+- **The scrape scheme**, which follows `spec.tls.bolt`.
+- **`kubernetes.*`**: see below.
+
 ## Not in scope
 
-- **The `mg-exporter`**, JSON metrics, vmagent remote write and the Vector log sidecar the HA chart offers. The operator serves OpenMetrics directly and lets your stack scrape it.
+- **The `mg-exporter`**, JSON metrics and the Vector log sidecar the HA chart offers. The operator serves OpenMetrics directly and lets your stack scrape it; its vmagent scrapes Memgraph directly too (the chart's `scrapeMemgraphDirectly: true`), never an exporter.
+- **Kubernetes infrastructure metrics through the vmagent** — the chart's `vmagentRemote.kubernetes` block, which has the vmagent also scrape kube-state-metrics, node-exporter and the kubelet (cAdvisor and `/metrics`, through the API server's node proxy) for the kube-prometheus dashboards. Those targets are not this cluster's, and the kubelet job needs a ServiceAccount bound to a cluster-scoped ClusterRole on `nodes`, `nodes/proxy` and `pods` — permissions the operator would then have to hold itself to grant, on objects no owner reference garbage-collects when the cluster goes. A cluster-wide agent is the tool for infrastructure metrics: the VictoriaMetrics operator's `VMAgent`, or kube-prometheus's own, writing to the same remote endpoint.
 - **A `scheme` or `tlsConfig` knob** on the ServiceMonitor. Both follow `spec.tls.bolt`, because that is what moves the endpoint to HTTPS; a verified scrape would need pod-IP names on a user-facing certificate, which is why the derived config skips verification (see [`docs/tls.md`](tls.md)).
 - **A ServiceMonitor in another namespace.** See above.
 - **The chart's "Memgraph Logs" dashboard**, which reads logs the Vector sidecar ships; without the sidecar there is nothing for it to show.

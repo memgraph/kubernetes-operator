@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -92,6 +93,66 @@ var (
 		dataInstances: dataInstanceCount,
 	}
 )
+
+// victoriaMetricsSink is the single-node VictoriaMetrics the vmagent spec
+// writes to, shaped for a namespace enforcing the restricted Pod Security
+// Standard: the image names no user, so one is pinned, and it stores on an
+// emptyDir. %s is its name, which is also the Service's.
+const victoriaMetricsSink = `apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: %[1]s
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: %[1]s
+  template:
+    metadata:
+      labels:
+        app: %[1]s
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: victoria-metrics
+          image: docker.io/victoriametrics/victoria-metrics:v1.139.0
+          args:
+            - -storageDataPath=/storage
+            - -retentionPeriod=1d
+          ports:
+            - name: http
+              containerPort: 8428
+          volumeMounts:
+            - name: storage
+              mountPath: /storage
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+      volumes:
+        - name: storage
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: %[1]s
+spec:
+  selector:
+    app: %[1]s
+  ports:
+    - name: http
+      port: 8428
+      targetPort: http
+`
 
 // clusterUnderTest is one MemgraphCluster a spec observes, together with the
 // topology it declares. The suite runs several differently-shaped clusters —
@@ -282,6 +343,89 @@ var _ = Describe("MemgraphCluster", Ordered, func() {
 		By("waiting for the ServiceMonitor and the ConfigMap to go")
 		Eventually(func(g Gomega) {
 			cmd := exec.Command("kubectl", "get", "servicemonitor,configmap", "-n", clusterNamespace,
+				"-l", resources.MonitoringLabel+"="+resources.MonitoringValue, "-o", "name")
+			out, err := utils.Run(cmd)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(strings.TrimSpace(out)).To(BeEmpty())
+		}, 2*time.Minute, 5*time.Second).Should(Succeed())
+		quickstartCluster.awaitConverged(3 * time.Minute)
+	})
+
+	// The vmagent the operator runs so Memgraph can monitor the cluster, proven
+	// against a real remote-write endpoint: a single-node VictoriaMetrics in
+	// the cluster's namespace, which the test deploys and the restricted Pod
+	// Security Standard the namespace enforces applies to as it does to the
+	// vmagent. Every instance's up series arriving there, carrying the external
+	// label, is the whole feature end to end; nothing in the suite's setup
+	// runs a monitoring stack, so the sink lives and dies with this spec.
+	It("ships every instance's metrics to a remote-write endpoint with a vmagent and prunes it with the block", func() {
+		const sinkName = "vmsingle"
+		const basicAuthSecret = "monitoring-basic-auth"
+		remoteWriteURL := fmt.Sprintf("http://%s.%s.svc.cluster.local:8428/api/v1/write", sinkName, clusterNamespace)
+
+		By("deploying a single-node VictoriaMetrics as the remote-write endpoint")
+		cmd := exec.Command("kubectl", "apply", "-n", clusterNamespace, "-f", "-")
+		_, err := utils.RunWithInput(cmd, fmt.Sprintf(victoriaMetricsSink, sinkName))
+		Expect(err).NotTo(HaveOccurred(), "Failed to deploy the VictoriaMetrics sink")
+		DeferCleanup(func() {
+			cmd := exec.Command("kubectl", "delete", "-n", clusterNamespace, "--ignore-not-found",
+				"deployment/"+sinkName, "service/"+sinkName, "secret/"+basicAuthSecret)
+			_, _ = utils.Run(cmd)
+		})
+
+		By("creating the basic-auth Secret the block names")
+		cmd = exec.Command("kubectl", "create", "secret", "generic", basicAuthSecret, "-n", clusterNamespace,
+			"--type=kubernetes.io/basic-auth", "--from-literal=username=memgraph", "--from-literal=password=e2e")
+		_, err = utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred(), "Failed to create the basic-auth Secret")
+
+		By("adding the vmagentRemote block")
+		cmd = exec.Command("kubectl", "patch", "memgraphcluster", quickstartCluster.name,
+			"-n", clusterNamespace, "--type=merge", "-p",
+			fmt.Sprintf(`{"spec":{"monitoring":{"vmagentRemote":{"remoteWrite":{"url":%q,"basicAuth":{"secretName":%q}},`+
+				`"externalLabels":{"cluster":"e2e"}}}}}`, remoteWriteURL, basicAuthSecret))
+		_, err = utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred())
+
+		By("waiting for the vmagent Deployment to become available under the restricted policy")
+		cmd = exec.Command("kubectl", "wait", "--for=condition=Available", "deployment/"+quickstartCluster.name+"-vmagent",
+			"-n", clusterNamespace, "--timeout=3m")
+		_, err = utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred(), "the vmagent never became available")
+
+		By("waiting for every instance's up series to reach the sink with the external label")
+		declared := quickstartCluster.coordinators + quickstartCluster.dataInstances
+		query := fmt.Sprintf("http://%s.%s.svc.cluster.local:8428/api/v1/query?query=%s", sinkName, clusterNamespace,
+			url.QueryEscape(`count(up{job="memgraph",cluster="e2e"}==1)`))
+		Eventually(func(g Gomega) {
+			body, err := curlInsecure(clusterNamespace, query)
+			g.Expect(err).NotTo(HaveOccurred())
+			var response struct {
+				Status string `json:"status"`
+				Data   struct {
+					Result []struct {
+						Value []any `json:"value"`
+					} `json:"result"`
+				} `json:"data"`
+			}
+			g.Expect(json.Unmarshal([]byte(body), &response)).To(Succeed(), "sink answered %q", body)
+			g.Expect(response.Status).To(Equal("success"))
+			g.Expect(response.Data.Result).To(HaveLen(1), "no up series has reached the sink yet")
+			g.Expect(response.Data.Result[0].Value).To(HaveLen(2))
+			g.Expect(response.Data.Result[0].Value[1]).To(Equal(fmt.Sprint(declared)),
+				"every declared instance is scraped and written")
+		}, 4*time.Minute, 10*time.Second).Should(Succeed())
+		quickstartCluster.awaitConverged(3 * time.Minute)
+
+		By("removing the block")
+		cmd = exec.Command("kubectl", "patch", "memgraphcluster", quickstartCluster.name,
+			"-n", clusterNamespace, "--type=merge", "-p", `{"spec":{"monitoring":null}}`)
+		_, err = utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred())
+
+		By("waiting for the vmagent Deployment and its ConfigMap to go")
+		Eventually(func(g Gomega) {
+			cmd := exec.Command("kubectl", "get", "deployment,configmap", "-n", clusterNamespace,
 				"-l", resources.MonitoringLabel+"="+resources.MonitoringValue, "-o", "name")
 			out, err := utils.Run(cmd)
 			g.Expect(err).NotTo(HaveOccurred())
