@@ -438,11 +438,13 @@ spec:
   # grafana_dashboard: "1", which is what the kube-prometheus-stack sidecar
   # selects on. Set labels only for a sidecar configured with another label;
   # a set you name replaces the default. The sidecar reads grafana_folder from
-  # the annotations to file the dashboard. vmagentRemote runs one vmagent
-  # (the HA chart's block) that scrapes every instance over pod DNS and
-  # remote-writes the samples to a Prometheus remote-write endpoint, for a
-  # monitoring cluster run elsewhere; remoteWrite.url is its one required
-  # field. basicAuth names a kubernetes.io/basic-auth Secret (keys username
+  # the annotations to file the dashboard. vmagentRemote is how Memgraph
+  # monitors your cluster: Memgraph cannot reach into your network to scrape
+  # it, so one vmagent (the HA chart's block) scrapes every instance over pod
+  # DNS and remote-writes the samples, outbound only, to the VictoriaMetrics
+  # Memgraph runs, at the URL and with the credentials Memgraph gives you (any
+  # Prometheus remote-write endpoint works); remoteWrite.url is its one
+  # required field. basicAuth names a kubernetes.io/basic-auth Secret (keys username
   # and password, fixed); the password is a mounted file vmagent re-reads, so
   # it is never on a command line and rotates with no restart. externalLabels are stamped on every sample,
   # which is how the remote tells clusters apart. The scrape goes over https

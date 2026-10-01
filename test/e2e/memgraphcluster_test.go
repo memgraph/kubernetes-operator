@@ -351,7 +351,7 @@ var _ = Describe("MemgraphCluster", Ordered, func() {
 		quickstartCluster.awaitConverged(3 * time.Minute)
 	})
 
-	// The vmagent the operator runs for a remote monitoring cluster, proven
+	// The vmagent the operator runs so Memgraph can monitor the cluster, proven
 	// against a real remote-write endpoint: a single-node VictoriaMetrics in
 	// the cluster's namespace, which the test deploys and the restricted Pod
 	// Security Standard the namespace enforces applies to as it does to the

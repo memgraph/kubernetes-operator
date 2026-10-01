@@ -1,6 +1,6 @@
 # Monitoring: scraping a cluster with Prometheus
 
-Every instance of a `MemgraphCluster` serves metrics in the OpenMetrics text format, and `spec.monitoring` creates the objects a monitoring stack you already run discovers the cluster by — or, for a monitoring cluster run elsewhere, the vmagent that ships the metrics to it. This document is the contract: what is served without asking, what the block creates, what a cluster without Prometheus Operator reports, and what is deliberately left out.
+Every instance of a `MemgraphCluster` serves metrics in the OpenMetrics text format, and `spec.monitoring` creates the objects a monitoring stack you already run discovers the cluster by — or the vmagent that pushes the metrics to Memgraph, so Memgraph can monitor the cluster for you. This document is the contract: what is served without asking, what the block creates, what a cluster without Prometheus Operator reports, and what is deliberately left out.
 
 ## What every cluster serves, with no spec at all
 
@@ -106,7 +106,7 @@ spec:
       resources: {}
 ```
 
-The HA chart's `vmagentRemote`, for the case where the metrics must leave the Kubernetes cluster: a monitoring cluster Memgraph or your platform team runs elsewhere, reachable only as a Prometheus remote-write endpoint. Presence-based like the blocks above: present, the operator runs one vmagent in the cluster's namespace that scrapes every instance's OpenMetrics endpoint and remote-writes the samples to `remoteWrite.url`; removed, the vmagent is deleted. `remoteWrite.url` is the one required field. Nothing about the Memgraph pods changes: the vmagent scrapes the same 9091 the ServiceMonitor names, and both blocks can be on at once (the chart warns about scraping twice because its vmagent scrapes the exporter; here there is no exporter and two scrapers of an endpoint are harmless).
+The HA chart's `vmagentRemote`, which is how Memgraph monitors a customer's cluster. Memgraph cannot reach into your network to scrape the cluster, so the cluster pushes its metrics the other way: a vmagent beside it scrapes every instance and remote-writes the samples, outbound only, to the VictoriaMetrics Memgraph runs, at the URL and with the credentials Memgraph gives you. The same block works for any Prometheus remote-write endpoint, such as a monitoring cluster your own platform team runs. Presence-based like the blocks above: present, the operator runs one vmagent in the cluster's namespace that scrapes every instance's OpenMetrics endpoint and remote-writes the samples to `remoteWrite.url`; removed, the vmagent is deleted. `remoteWrite.url` is the one required field. Nothing about the Memgraph pods changes: the vmagent scrapes the same 9091 the ServiceMonitor names, and both blocks can be on at once (the chart warns about scraping twice because its vmagent scrapes the exporter; here there is no exporter and two scrapers of an endpoint are harmless).
 
 What the operator creates:
 
