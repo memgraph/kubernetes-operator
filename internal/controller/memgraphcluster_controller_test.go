@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -49,6 +50,10 @@ const dataHostnamePattern = "data-{ordinal}.memgraph.example.com"
 
 // instanceLabel is the identity label every object of a cluster carries.
 const instanceLabel = "app.kubernetes.io/instance"
+
+// memgraphContainerName is the name of the database container in every pod,
+// which the sidecar specs assert their container lands beside.
+const memgraphContainerName = "memgraph"
 
 // Name suffixes of the per-role workload objects a reconcile creates.
 const (
@@ -2719,7 +2724,7 @@ var _ = Describe("MemgraphCluster Controller", func() {
 						VMAgentRemote: &memgraphcomv1alpha1.VMAgentRemoteSpec{
 							RemoteWrite: memgraphcomv1alpha1.RemoteWriteSpec{
 								URL:       remoteWriteURL,
-								BasicAuth: &memgraphcomv1alpha1.RemoteWriteBasicAuthSpec{SecretName: "monitoring-basic-auth"},
+								BasicAuth: &memgraphcomv1alpha1.BasicAuthSecretSpec{SecretName: "monitoring-basic-auth"},
 							},
 							ExternalLabels: map[string]string{"cluster": "envtest"},
 						},
@@ -2791,6 +2796,112 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			Expect(deployments()).To(BeEmpty(), "removing the block takes the Deployment away")
 			Expect(configMaps()).To(BeEmpty(), "and its scrape config with it")
 			Expect(serviceMonitors()).To(HaveLen(1), "the sibling block's object is untouched")
+		})
+	})
+
+	Context("when asked for the Vector sidecar", func() {
+		const resourceName = "mgc-vector"
+		const configName = resourceName + "-vector-config"
+		const logsEndpoint = "http://victoria-logs.monitoring.svc.cluster.local:9428/insert"
+
+		updateSpec := func(mutate func(*memgraphcomv1alpha1.MemgraphClusterSpec)) {
+			GinkgoHelper()
+			cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+			get(resourceName, cluster)
+			mutate(&cluster.Spec)
+			Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
+		}
+		configMaps := func() []corev1.ConfigMap {
+			GinkgoHelper()
+			list := &corev1.ConfigMapList{}
+			Expect(k8sClient.List(ctx, list, client.InNamespace(resourceNamespace),
+				client.MatchingLabels{resources.MonitoringLabel: resources.MonitoringValue})).To(Succeed())
+			return list.Items
+		}
+		containerNames := func(suffix string) []string {
+			GinkgoHelper()
+			sts := &appsv1.StatefulSet{}
+			get(resourceName+suffix, sts)
+			names := make([]string, 0, len(sts.Spec.Template.Spec.Containers))
+			for _, container := range sts.Spec.Template.Spec.Containers {
+				names = append(names, container.Name)
+			}
+			return names
+		}
+
+		BeforeEach(func() {
+			resource := &memgraphcomv1alpha1.MemgraphCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: resourceNamespace},
+				Spec: memgraphcomv1alpha1.MemgraphClusterSpec{
+					Monitoring: &memgraphcomv1alpha1.MonitoringSpec{
+						VectorRemote: &memgraphcomv1alpha1.VectorRemoteSpec{
+							LogsEndpoint: logsEndpoint,
+							Auth:         &memgraphcomv1alpha1.BasicAuthSecretSpec{SecretName: "logs-basic-auth"},
+							ExtraLabels:  map[string]string{"cluster_id": "envtest"},
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+		})
+
+		AfterEach(func() {
+			for _, item := range configMaps() {
+				Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, &item))).To(Succeed())
+			}
+			cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+			get(resourceName, cluster)
+			Expect(k8sClient.Delete(ctx, cluster)).To(Succeed())
+			deleteOwned(resourceName)
+		})
+
+		It("should put the sidecar in both roles' pods on one shared configuration", func() {
+			reconcileCluster(resourceName)
+
+			cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+			get(resourceName, cluster)
+			// The CRD defaults applied at admission, so the block arrived with
+			// the image filled in.
+			Expect(cluster.Spec.Monitoring.VectorRemote.Image.Tag).To(Equal(memgraphcomv1alpha1.DefaultVectorImageTag))
+
+			config := &corev1.ConfigMap{}
+			get(configName, config)
+			expectControlledBy(config, cluster)
+			Expect(config.Labels).To(HaveKeyWithValue(resources.MonitoringLabel, resources.MonitoringValue))
+			vectorConfig := config.Data[resources.VectorConfigKey]
+			Expect(vectorConfig).To(ContainSubstring("uri: ws://127.0.0.1:7444"))
+			Expect(vectorConfig).To(ContainSubstring("endpoint: " + logsEndpoint))
+			Expect(vectorConfig).To(ContainSubstring("cluster_id: envtest"))
+			Expect(vectorConfig).To(ContainSubstring("user: ${LOGS_USERNAME}"))
+
+			for _, suffix := range []string{coordinatorSuffix, dataSuffix} {
+				Expect(containerNames(suffix)).To(Equal([]string{memgraphContainerName, "vector"}), resourceName+suffix)
+				sts := &appsv1.StatefulSet{}
+				get(resourceName+suffix, sts)
+				vector := sts.Spec.Template.Spec.Containers[1]
+				Expect(vector.Image).To(Equal(
+					memgraphcomv1alpha1.DefaultVectorImageRepository + ":" + memgraphcomv1alpha1.DefaultVectorImageTag))
+				Expect(vector.Env).To(ContainElement(corev1.EnvVar{Name: "ROLE", Value: strings.TrimPrefix(suffix, "-")}),
+					"each role's sidecar labels its lines with its own role")
+				Expect(vector.Env).To(ContainElement(HaveField("ValueFrom.SecretKeyRef.Key", "password")),
+					"the credentials reach Vector by Secret reference")
+				Expect(sts.Spec.Template.Spec.Volumes).To(ContainElement(HaveField("ConfigMap.Name", configName)))
+			}
+		})
+
+		It("should take the sidecar and its configuration away when the block is removed", func() {
+			reconcileCluster(resourceName)
+			Expect(configMaps()).To(HaveLen(1))
+
+			updateSpec(func(spec *memgraphcomv1alpha1.MemgraphClusterSpec) {
+				spec.Monitoring = nil
+			})
+			reconcileCluster(resourceName)
+			Expect(configMaps()).To(BeEmpty(), "removing the block prunes the configuration")
+			for _, suffix := range []string{coordinatorSuffix, dataSuffix} {
+				Expect(containerNames(suffix)).To(Equal([]string{memgraphContainerName}),
+					"the pod template no longer carries the sidecar, which the roll then applies")
+			}
 		})
 	})
 

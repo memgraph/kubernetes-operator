@@ -1,6 +1,6 @@
 # Monitoring: scraping a cluster with Prometheus
 
-Every instance of a `MemgraphCluster` serves metrics in the OpenMetrics text format, and `spec.monitoring` creates the objects a monitoring stack you already run discovers the cluster by — or the vmagent that pushes the metrics to Memgraph, so Memgraph can monitor the cluster for you. This document is the contract: what is served without asking, what the block creates, what a cluster without Prometheus Operator reports, and what is deliberately left out.
+Every instance of a `MemgraphCluster` serves metrics in the OpenMetrics text format, and `spec.monitoring` creates the objects a monitoring stack you already run discovers the cluster by — or the vmagent and the Vector sidecars that push the metrics and the logs to Memgraph, so Memgraph can monitor the cluster for you. This document is the contract: what is served without asking, what the block creates, what a cluster without Prometheus Operator reports, and what is deliberately left out.
 
 ## What every cluster serves, with no spec at all
 
@@ -133,11 +133,50 @@ The password is mounted into the vmagent pod read-only and vmagent reads it from
 - **The scrape scheme**, which follows `spec.tls.bolt`.
 - **`kubernetes.*`**: see below.
 
+## `spec.monitoring.vectorRemote`
+
+```yaml
+spec:
+  monitoring:
+    vectorRemote:
+      logsEndpoint: http://victoria-logs.monitoring.svc.cluster.local:9428/insert
+      auth:                               # optional
+        secretName: logs-basic-auth
+      extraLabels:                        # optional; how the remote tells clusters apart
+        cluster_id: production
+      image:                              # optional; defaults to timberio/vector at the pinned tag
+        repository: docker.io/timberio/vector
+        tag: 0.49.0-debian
+      resources: {}
+```
+
+The HA chart's `vectorRemote`, the logs half of how Memgraph monitors a customer's cluster: a Vector sidecar in every pod of both roles reads the instance's own log stream and pushes it, outbound only, to the Loki-compatible endpoint Memgraph gives you — the VictoriaLogs it runs — or to any Loki. Presence-based: present, both roles' pods carry the sidecar; removed, they do not. `logsEndpoint` is the one required field, a base URL to which Vector appends `/loki/api/v1/push` itself; for VictoriaLogs that is its `/insert` path, as above.
+
+How it works:
+
+- **The source is Memgraph itself.** Every instance, both roles, serves a monitoring websocket on port 7444 (Memgraph's `--monitoring-port` default) that streams its log lines as they are written, at whatever `--log-level` the instance runs; there is no switch to turn it off. The sidecar dials it inside the pod, so no Service, no port on one and no API access is involved, and nothing about the Memgraph container changes. Leave `--monitoring-port` and `--monitoring-address` at their defaults in `extraArgs`: the sidecar dials `127.0.0.1:7444`. The websocket shares the Bolt TLS context, so on a cluster with `spec.tls.bolt` the sidecar dials `wss` without verifying a certificate that names no loopback address, for the reason the operator's own dials do not verify.
+- **One configuration for both roles**, in a ConfigMap `<cluster>-vector-config` the operator owns and prunes with the block. Everything that differs per pod reaches Vector through the environment: the role, the pod and namespace names, and the credentials.
+- **The labels are the chart's**, so the dashboards Memgraph keeps for chart users work unchanged: `app` and `job` are `memgraph`, `role` is `coordinator` or `data`, `namespace` and `pod` are the pod's, `level` is Memgraph's level with `warning` and `critical` renamed to `warn` and `fatal` as the chart does, plus `extraLabels` as written (`cluster_id`, `service_name` and `cluster_env` are what Memgraph's dashboards filter on). A key the operator sets itself is the operator's. Memgraph frames each line as JSON, but escapes only quotes and newlines, so a line carrying a backslash is kept whole with `level=unknown` rather than dropped.
+- **The sidecar runs under the pod's identity** and the restricted security context every operator container runs under, with its state on an emptyDir because its root filesystem is read-only. It carries no probe: a sidecar's readiness must never gate the pod's, which is what registration waits on. It starts before Memgraph listens and retries the websocket until it does.
+- **Adding or removing the block is a pod-template change**, which the roll carries through the cluster one pod at a time like any other. Nothing lands in the resource's status: whether the endpoint accepts the lines is Vector's to report, in its own container's logs (`kubectl logs <pod> -c vector`).
+
+### Credentials
+
+`auth.secretName` names a Secret in the cluster's namespace with the keys **`username`** and **`password`**, as for the [vmagent](#credentials). Both reach Vector through environment variables it interpolates into its configuration (`${LOGS_USERNAME}`, `${LOGS_PASSWORD}`), so neither is on a command line or in the ConfigMap; a rotated Secret takes effect when the pod next restarts, which a roll of your choosing provides. The operator never reads the Secret.
+
+### What is not a knob
+
+- **`data` and `coordinators`**, the chart's per-role switches: the sidecar runs on both roles, because a coordinator's log is where a failover decision is explained.
+- **`websocketPort`**: the sidecar dials Memgraph's default, which the operator leaves alone.
+- **The scrape scheme**, which follows `spec.tls.bolt`.
+- **`namespace`** on anything, for the reason the ServiceMonitor has none.
+- **The chart's `grafanaDashboard`** for logs: see below.
+
 ## Not in scope
 
-- **The `mg-exporter`**, JSON metrics and the Vector log sidecar the HA chart offers. The operator serves OpenMetrics directly and lets your stack scrape it; its vmagent scrapes Memgraph directly too (the chart's `scrapeMemgraphDirectly: true`), never an exporter.
+- **The `mg-exporter`** and JSON metrics the HA chart offers. The operator serves OpenMetrics directly and lets your stack scrape it; its vmagent scrapes Memgraph directly too (the chart's `scrapeMemgraphDirectly: true`), never an exporter.
 - **Kubernetes infrastructure metrics through the vmagent** — the chart's `vmagentRemote.kubernetes` block, which has the vmagent also scrape kube-state-metrics, node-exporter and the kubelet (cAdvisor and `/metrics`, through the API server's node proxy) for the kube-prometheus dashboards. Those targets are not this cluster's, and the kubelet job needs a ServiceAccount bound to a cluster-scoped ClusterRole on `nodes`, `nodes/proxy` and `pods` — permissions the operator would then have to hold itself to grant, on objects no owner reference garbage-collects when the cluster goes. A cluster-wide agent is the tool for infrastructure metrics: the VictoriaMetrics operator's `VMAgent`, or kube-prometheus's own, writing to the same remote endpoint.
 - **A `scheme` or `tlsConfig` knob** on the ServiceMonitor. Both follow `spec.tls.bolt`, because that is what moves the endpoint to HTTPS; a verified scrape would need pod-IP names on a user-facing certificate, which is why the derived config skips verification (see [`docs/tls.md`](tls.md)).
 - **A ServiceMonitor in another namespace.** See above.
-- **The chart's "Memgraph Logs" dashboard**, which reads logs the Vector sidecar ships; without the sidecar there is nothing for it to show.
+- **The chart's "Memgraph Logs" dashboard** as a ConfigMap in your cluster (`vectorRemote.grafanaDashboard`). The logs go to the Grafana on Memgraph's side, which is where that dashboard lives; it needs a VictoriaLogs datasource and the `cluster_id`-labelled metrics the vmagent ships, neither of which a customer's Grafana has. The JSON stays in [memgraph/helm-charts](https://github.com/memgraph/helm-charts) for anyone running their own VictoriaLogs and Grafana.
 - **A Prometheus or a Grafana of its own**, or any assertion that one discovers the objects. The e2e suite proves the endpoint answers and the objects are created and pruned; discovery is the stack's contract.

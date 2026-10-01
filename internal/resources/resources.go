@@ -53,6 +53,10 @@ const (
 	coordinatorPortName = "coordinator"
 	replicationPortName = "replication"
 	metricsPortName     = "metrics"
+
+	// configMapKind is the kind of the ConfigMaps the operator builds, which
+	// server-side apply needs stated on each.
+	configMapKind = "ConfigMap"
 )
 
 // CoordinatorName is the name shared by the coordinator StatefulSet and its
@@ -190,6 +194,18 @@ type normalizedMonitoring struct {
 	serviceMonitor   *normalizedServiceMonitor
 	grafanaDashboard *normalizedGrafanaDashboard
 	vmagent          *normalizedVMAgent
+	vector           *normalizedVector
+}
+
+// normalizedVector is the vectorRemote block with its image defaults
+// resolved; authSecret is empty for an unauthenticated endpoint.
+type normalizedVector struct {
+	image        string
+	pullPolicy   corev1.PullPolicy
+	logsEndpoint string
+	authSecret   string
+	extraLabels  map[string]string
+	resources    corev1.ResourceRequirements
 }
 
 // normalizedVMAgent is the vmagentRemote block with its image and interval
@@ -382,6 +398,9 @@ func normalize(spec memgraphcomv1alpha1.MemgraphClusterSpec) normalizedSpec {
 	if spec.Monitoring != nil && spec.Monitoring.VMAgentRemote != nil {
 		n.monitoring.vmagent = normalizeVMAgent(spec.Monitoring.VMAgentRemote)
 	}
+	if spec.Monitoring != nil && spec.Monitoring.VectorRemote != nil {
+		n.monitoring.vector = normalizeVector(spec.Monitoring.VectorRemote)
+	}
 	if spec.TLS != nil && spec.TLS.Bolt != nil {
 		n.boltTLSSecret = spec.TLS.Bolt.SecretName
 	}
@@ -562,6 +581,34 @@ func normalizeVMAgent(block *memgraphcomv1alpha1.VMAgentRemoteSpec) *normalizedV
 	}
 	if block.RemoteWrite.BasicAuth != nil {
 		n.basicAuthSecret = block.RemoteWrite.BasicAuth.SecretName
+	}
+	return n
+}
+
+// normalizeVector resolves the vectorRemote block's defaults, mirroring its
+// CRD schema defaults.
+func normalizeVector(block *memgraphcomv1alpha1.VectorRemoteSpec) *normalizedVector {
+	repository := block.Image.Repository
+	if repository == "" {
+		repository = memgraphcomv1alpha1.DefaultVectorImageRepository
+	}
+	tag := block.Image.Tag
+	if tag == "" {
+		tag = memgraphcomv1alpha1.DefaultVectorImageTag
+	}
+	pullPolicy := block.Image.PullPolicy
+	if pullPolicy == "" {
+		pullPolicy = memgraphcomv1alpha1.DefaultImagePullPolicy
+	}
+	n := &normalizedVector{
+		image:        repository + ":" + tag,
+		pullPolicy:   pullPolicy,
+		logsEndpoint: block.LogsEndpoint,
+		extraLabels:  block.ExtraLabels,
+		resources:    block.Resources,
+	}
+	if block.Auth != nil {
+		n.authSecret = block.Auth.SecretName
 	}
 	return n
 }

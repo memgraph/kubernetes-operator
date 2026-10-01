@@ -487,7 +487,11 @@ func volumeMounts(spec normalizedSpec, role normalizedRole) []corev1.VolumeMount
 // shape of a kubernetes.io/tls Secret, plus ca.crt for the intra-cluster one.
 // A Secret carrying more keys mounts fine, and one missing a key keeps the pod
 // from starting, which is how a missing license Secret is reported too.
-func podVolumes(spec normalizedSpec, role normalizedRole) []corev1.Volume {
+func podVolumes(
+	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	spec normalizedSpec,
+	role normalizedRole,
+) []corev1.Volume {
 	volumes := make([]corev1.Volume, 0, 3+len(role.extraVolumes))
 	volumes = append(volumes, corev1.Volume{
 		Name: tmpVolumeName, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
@@ -521,6 +525,9 @@ func podVolumes(spec normalizedSpec, role normalizedRole) []corev1.Volume {
 			},
 		})
 	}
+	if spec.monitoring.vector != nil {
+		volumes = append(volumes, vectorVolumes(cluster)...)
+	}
 	return append(volumes, role.extraVolumes...)
 }
 
@@ -547,12 +554,21 @@ func volumeClaimTemplates(role normalizedRole) []corev1.PersistentVolumeClaim {
 }
 
 // podContainers is the Memgraph container, the uploader sidecar when the role
-// has one, then the role's user containers. Memgraph stays first, so `kubectl
-// logs` without -c keeps showing the database.
-func podContainers(memgraph corev1.Container, role normalizedRole) []corev1.Container {
+// has one, the Vector sidecar when the cluster ships its logs, then the role's
+// user containers. Memgraph stays first, so `kubectl logs` without -c keeps
+// showing the database.
+func podContainers(
+	component string,
+	spec normalizedSpec,
+	role normalizedRole,
+	memgraph corev1.Container,
+) []corev1.Container {
 	containers := []corev1.Container{memgraph}
 	if role.coreDumps.enabled && role.coreDumps.uploader != nil {
 		containers = append(containers, uploaderSidecar(role.coreDumps))
+	}
+	if spec.monitoring.vector != nil {
+		containers = append(containers, vectorSidecar(component, spec))
 	}
 	for _, container := range role.userContainers {
 		containers = append(containers, userContainer(container))
@@ -656,7 +672,7 @@ func statefulSet(
 				Spec: corev1.PodSpec{
 					TerminationGracePeriodSeconds: ptr.To(terminationGracePeriod),
 					InitContainers:                podInitContainers(spec, role),
-					Containers:                    podContainers(container, role),
+					Containers:                    podContainers(component, spec, role, container),
 					// The identity comes from the securityContext block or the
 					// images' defaults; the two fields every policy requires
 					// are not the block's to change.
@@ -667,7 +683,7 @@ func statefulSet(
 						RunAsNonRoot:   ptr.To(true),
 						SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
 					},
-					Volumes:                   podVolumes(spec, role),
+					Volumes:                   podVolumes(cluster, spec, role),
 					NodeSelector:              role.scheduling.NodeSelector,
 					Tolerations:               role.scheduling.Tolerations,
 					TopologySpreadConstraints: spreadConstraints(cluster, component, role),

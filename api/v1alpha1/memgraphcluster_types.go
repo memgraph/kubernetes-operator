@@ -87,11 +87,23 @@ const (
 	// because nothing outside the pod dials it.
 	VMAgentPort int32 = 8429
 
-	// The keys of the basic-auth Secret vmagentRemote.remoteWrite.basicAuth
-	// names: those of a kubernetes.io/basic-auth Secret, which are also what
-	// the HA chart's usernameKey and passwordKey default to.
+	// The keys of the basic-auth Secrets vmagentRemote.remoteWrite.basicAuth
+	// and vectorRemote.auth name: those of a kubernetes.io/basic-auth Secret,
+	// which are also what the HA chart's usernameKey and passwordKey default
+	// to.
 	BasicAuthUsernameKey = "username"
 	BasicAuthPasswordKey = "password"
+
+	// The Vector the vectorRemote block runs beside every instance: the image
+	// the HA chart defaults to.
+	DefaultVectorImageRepository = "docker.io/timberio/vector"
+	DefaultVectorImageTag        = "0.49.0-debian"
+
+	// MonitoringPort is where every instance serves its monitoring websocket,
+	// the stream of its own log lines the Vector sidecar reads. It is
+	// Memgraph's default and the operator neither sets nor exposes it: the
+	// sidecar dials it inside the pod.
+	MonitoringPort int32 = 7444
 )
 
 // Readiness probe timing defaults, Go constants mirrored by the doc comments
@@ -1432,16 +1444,18 @@ type VMAgentImageSpec struct {
 	PullPolicy corev1.PullPolicy `json:"pullPolicy,omitempty"`
 }
 
-// RemoteWriteBasicAuthSpec names the Secret holding the credentials vmagent
-// authenticates to the remote-write endpoint with. The keys are not knobs:
+// BasicAuthSecretSpec names the Secret holding the credentials a remote
+// monitoring agent authenticates to its endpoint with. The keys are not knobs:
 // they are "username" and "password", the keys of a kubernetes.io/basic-auth
 // Secret and what the HA chart's usernameKey and passwordKey default to, for
-// the reason the TLS Secrets have fixed keys too. The password is mounted into
-// the vmagent pod and read as a file vmagent re-reads every second, so a
-// rotated password takes effect with no restart and is never on the command
-// line; the username reaches vmagent through an environment variable, and a
-// changed one rolls the pod. The operator never reads the Secret.
-type RemoteWriteBasicAuthSpec struct {
+// the reason the TLS Secrets have fixed keys too. The operator never reads the
+// Secret; the kubelet hands its keys to the agent's container. For vmagent the
+// password is a mounted file re-read every second, so a rotated password takes
+// effect with no restart and is never on the command line, and the username
+// reaches it through an environment variable; for the Vector sidecar both
+// reach it through environment variables, which Vector interpolates into its
+// configuration.
+type BasicAuthSecretSpec struct {
 	// secretName is the name of the Secret in the cluster's namespace holding
 	// the keys "username" and "password".
 	// +kubebuilder:validation:MinLength=1
@@ -1464,7 +1478,90 @@ type RemoteWriteSpec struct {
 	// basicAuth names the Secret vmagent authenticates to the endpoint with.
 	// Absent, the endpoint is written to unauthenticated.
 	// +optional
-	BasicAuth *RemoteWriteBasicAuthSpec `json:"basicAuth,omitempty"`
+	BasicAuth *BasicAuthSecretSpec `json:"basicAuth,omitempty"`
+}
+
+// VectorImageSpec selects the Vector image the vectorRemote sidecar runs. It
+// has the shape of the Memgraph image block with Vector's defaults: the
+// chart's timberio/vector at the tag the chart pins.
+type VectorImageSpec struct {
+	// repository is the Vector container image repository, with the optional
+	// registry host and the image path only; the version belongs in tag.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=255
+	// +kubebuilder:validation:XValidation:rule="!self.contains('@')",message="repository must not contain a digest; pin the image with tag instead"
+	// +kubebuilder:validation:XValidation:rule="!self.substring(self.lastIndexOf('/') + 1).contains(':')",message="repository must not contain a tag; set image.tag instead"
+	// +kubebuilder:default="docker.io/timberio/vector"
+	// +optional
+	Repository string `json:"repository,omitempty"`
+
+	// tag is the Vector container image tag.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=128
+	// +kubebuilder:validation:Pattern=`^[a-zA-Z0-9_][a-zA-Z0-9._-]*$`
+	// +kubebuilder:default="0.49.0-debian"
+	// +optional
+	Tag string `json:"tag,omitempty"`
+
+	// pullPolicy is the image pull policy of the sidecar.
+	// +kubebuilder:validation:Enum=Always;IfNotPresent;Never
+	// +kubebuilder:default=IfNotPresent
+	// +optional
+	PullPolicy corev1.PullPolicy `json:"pullPolicy,omitempty"`
+}
+
+// VectorRemoteSpec asks the operator to run the HA chart's vectorRemote: a
+// Vector sidecar in every pod of both roles that reads the instance's log
+// stream from Memgraph's monitoring websocket and pushes it to a Loki-
+// compatible endpoint, such as the VictoriaLogs Memgraph runs. It is the logs
+// half of how Memgraph monitors a customer's cluster: Memgraph cannot reach
+// into the customer's network, so the cluster pushes, outbound only, at the
+// endpoint and with the credentials Memgraph gives the customer.
+//
+// Memgraph serves the websocket on every instance, both roles, at the default
+// --monitoring-port 7444, with no switch to turn it off; the sidecar dials it
+// inside the pod and needs no Service, no port on one and no API access. The
+// websocket shares the Bolt TLS context, so on a cluster with spec.tls.bolt
+// the sidecar dials wss without verifying the certificate, for the reason the
+// operator's own dials do not. Each line is pushed with the labels the HA
+// chart's sidecar sets — app and job "memgraph", role, namespace, pod, level —
+// plus extraLabels, so the dashboards Memgraph keeps for chart users work for
+// operator users unchanged. Adding or removing the block is a pod-template
+// change the roll carries. Nothing new lands in status.
+type VectorRemoteSpec struct {
+	// image selects the Vector image. Left out, the chart's default image at
+	// the tag the operator pins is run.
+	// +kubebuilder:default={}
+	// +optional
+	Image VectorImageSpec `json:"image,omitzero"`
+
+	// logsEndpoint is the base URL of the Loki-compatible push API Vector
+	// writes to; Vector appends /loki/api/v1/push itself. For VictoriaLogs
+	// that is its insert path, for example
+	// "http://victoria-logs.monitoring.svc.cluster.local:9428/insert".
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=2048
+	// +kubebuilder:validation:Pattern=`^https?://`
+	// +required
+	LogsEndpoint string `json:"logsEndpoint"`
+
+	// auth names the Secret Vector authenticates to the endpoint with. Absent,
+	// the endpoint is pushed to unauthenticated.
+	// +optional
+	Auth *BasicAuthSecretSpec `json:"auth,omitempty"`
+
+	// extraLabels are added to every log line pushed, beside the labels the
+	// operator sets; for example cluster_id: production. Keys must be Loki
+	// label names; a key the operator sets itself is the operator's.
+	// +kubebuilder:validation:MaxProperties=64
+	// +kubebuilder:validation:XValidation:rule="self.all(k, k.matches('^[a-zA-Z_][a-zA-Z0-9_]*$'))",message="extraLabels keys must be label names: letters, digits and underscores, not starting with a digit"
+	// +optional
+	ExtraLabels map[string]string `json:"extraLabels,omitempty"`
+
+	// resources sets the sidecar's compute resources. Left out, it runs
+	// without requests or limits.
+	// +optional
+	Resources corev1.ResourceRequirements `json:"resources,omitzero"`
 }
 
 // VMAgentRemoteSpec asks the operator to run the HA chart's vmagentRemote: one
@@ -1548,6 +1645,12 @@ type MonitoringSpec struct {
 	// endpoint, such as a VictoriaMetrics in another cluster.
 	// +optional
 	VMAgentRemote *VMAgentRemoteSpec `json:"vmagentRemote,omitempty"`
+
+	// vectorRemote adds a Vector sidecar to every pod that pushes the
+	// instance's logs to a Loki-compatible endpoint, such as the VictoriaLogs
+	// Memgraph runs to monitor the cluster.
+	// +optional
+	VectorRemote *VectorRemoteSpec `json:"vectorRemote,omitempty"`
 }
 
 // BoltTLSSpec makes both roles serve Bolt — and with it the metrics endpoint,

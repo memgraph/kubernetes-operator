@@ -250,9 +250,10 @@ func (r *MemgraphClusterReconciler) desiredExternal(
 // ServiceMonitor, but only on a cluster that serves the kind — without it the
 // cluster runs as if that block were absent and the block is reported as failed
 // rather than pending, because no amount of waiting makes the CRD appear — the
-// Grafana dashboard ConfigMap, which needs nothing from the cluster, and the
+// Grafana dashboard ConfigMap, which needs nothing from the cluster, the
 // vmagent Deployment with its scrape config, whose targets follow the pods the
-// operator runs for the reason the external objects do.
+// operator runs for the reason the external objects do, and the Vector
+// sidecar's configuration, which the StatefulSets' pods mount.
 func (r *MemgraphClusterReconciler) desiredMonitoring(
 	cluster *memgraphcomv1alpha1.MemgraphCluster,
 	replicas replicaCounts,
@@ -269,6 +270,9 @@ func (r *MemgraphClusterReconciler) desiredMonitoring(
 			resources.VMAgentConfigMap(cluster, replicas.coordinators.applied, replicas.data.applied),
 			resources.VMAgentDeployment(cluster),
 		)
+	}
+	if resources.UsesVector(cluster) {
+		objects = append(objects, resources.VectorConfigMap(cluster))
 	}
 	return objects
 }
