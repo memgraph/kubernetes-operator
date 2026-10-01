@@ -571,10 +571,26 @@ var _ = Describe("MemgraphCluster", Ordered, func() {
 			Expect(out).To(ContainSubstring(pod+"=memgraph,vector,"), "%s carries Memgraph and the sidecar", pod)
 		}
 
+		// Memgraph pushes a line to the websocket only as it is written, and
+		// an instance that has finished starting may write none for minutes:
+		// an idle Raft follower logs through NuRaft's own logger, not the
+		// sink the websocket reads. One Bolt session per pod makes every
+		// instance log something, so the assertion is about the pipeline and
+		// not about who happened to be chatty.
 		By("waiting for every pod's lines to reach the sink with the extra label")
 		query := fmt.Sprintf("http://%s.%s.svc.cluster.local:9428/select/logsql/query?query=%s", sinkName, clusterNamespace,
 			url.QueryEscape(`app:memgraph job:memgraph cluster_id:e2e | stats by (pod) count()`))
 		Eventually(func(g Gomega) {
+			for ordinal := range quickstartCluster.coordinators {
+				cmd := exec.Command("kubectl", "exec", quickstartCluster.coordinatorPod(ordinal), "-n", clusterNamespace,
+					"-c", "memgraph", "--", "bash", "-c", quickstartCluster.mgconsole("SHOW INSTANCES;"))
+				_, _ = utils.Run(cmd)
+			}
+			for ordinal := range quickstartCluster.dataInstances {
+				cmd := exec.Command("kubectl", "exec", quickstartCluster.dataPod(ordinal), "-n", clusterNamespace,
+					"-c", "memgraph", "--", "bash", "-c", quickstartCluster.mgconsole("RETURN 1;"))
+				_, _ = utils.Run(cmd)
+			}
 			body, err := curlInsecure(clusterNamespace, query)
 			g.Expect(err).NotTo(HaveOccurred())
 			var pods []string
@@ -1492,6 +1508,11 @@ func dumpDiagnosticsOnFailure(clusterNamespace string) {
 		{"get", "memgraphclusters", "-n", clusterNamespace, "-o", "yaml"},
 		{"get", "events", "-n", clusterNamespace, "--sort-by=.lastTimestamp"},
 		{"logs", "deploy/" + controllerDeploymentName, "-n", namespace, "--tail=200"},
+		// The Vector sidecars, when the cluster has them: whether each one
+		// reached its instance's websocket and the endpoint is in here and
+		// nowhere else.
+		{"logs", "-n", clusterNamespace, "-l", "app.kubernetes.io/component in (coordinator,data)",
+			"-c", "vector", "--tail=40", "--prefix", "--ignore-errors"},
 	} {
 		cmd := exec.Command("kubectl", args...)
 		output, err := utils.Run(cmd)

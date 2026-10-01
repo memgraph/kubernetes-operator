@@ -56,6 +56,15 @@ const (
 	// chart's value, which the dashboards Memgraph keeps select on; it is
 	// also the id of the websocket source in the configuration.
 	vectorJob = "memgraph"
+
+	// vectorConnectTimeoutSecs bounds how long Vector keeps trying to reach
+	// the websocket before it gives up. Vector retries a refused connection
+	// with backoff, but its connect timeout wraps the whole retry loop and
+	// defaults to 30 seconds, after which the source fails and Vector exits;
+	// Memgraph opens the websocket only after recovering every database,
+	// which can take far longer. A day is "never give up on the instance
+	// beside you" without disabling the bound outright.
+	vectorConnectTimeoutSecs int64 = 86400
 )
 
 // vectorRemap is the VRL program that turns Memgraph's websocket frames into
@@ -99,9 +108,10 @@ type vectorConfig struct {
 }
 
 type vectorWebsocket struct {
-	Type string     `json:"type"`
-	URI  string     `json:"uri"`
-	TLS  *vectorTLS `json:"tls,omitempty"`
+	Type               string     `json:"type"`
+	URI                string     `json:"uri"`
+	ConnectTimeoutSecs int64      `json:"connect_timeout_secs"`
+	TLS                *vectorTLS `json:"tls,omitempty"`
 }
 
 type vectorTLS struct {
@@ -156,8 +166,9 @@ func VectorConfigMap(cluster *memgraphcomv1alpha1.MemgraphCluster) *corev1.Confi
 	block := spec.monitoring.vector
 
 	source := vectorWebsocket{
-		Type: "websocket",
-		URI:  fmt.Sprintf("ws://127.0.0.1:%d", memgraphcomv1alpha1.MonitoringPort),
+		Type:               "websocket",
+		URI:                fmt.Sprintf("ws://127.0.0.1:%d", memgraphcomv1alpha1.MonitoringPort),
+		ConnectTimeoutSecs: vectorConnectTimeoutSecs,
 	}
 	if spec.boltTLSSecret != "" {
 		source.URI = fmt.Sprintf("wss://127.0.0.1:%d", memgraphcomv1alpha1.MonitoringPort)
