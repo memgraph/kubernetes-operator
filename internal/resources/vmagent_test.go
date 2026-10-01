@@ -56,7 +56,7 @@ func vmagentCluster() *memgraphcomv1alpha1.MemgraphCluster {
 			},
 			RemoteWrite: memgraphcomv1alpha1.RemoteWriteSpec{
 				URL:       remoteWriteURL,
-				BasicAuth: &memgraphcomv1alpha1.RemoteWriteBasicAuthSpec{SecretName: basicAuthSecret},
+				BasicAuth: &memgraphcomv1alpha1.BasicAuthSecretSpec{SecretName: basicAuthSecret},
 			},
 			ScrapeInterval: "30s",
 			ExternalLabels: map[string]string{"cluster": "production", "team": "platform"},

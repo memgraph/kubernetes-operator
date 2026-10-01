@@ -162,7 +162,7 @@ func VMAgentConfigMap(
 	labels[MonitoringLabel] = MonitoringValue
 
 	return &corev1.ConfigMap{
-		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "ConfigMap"},
+		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: configMapKind},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      VMAgentConfigName(cluster),
 			Namespace: cluster.Namespace,

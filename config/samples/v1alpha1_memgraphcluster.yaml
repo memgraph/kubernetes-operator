@@ -444,7 +444,15 @@ spec:
   # DNS and remote-writes the samples, outbound only, to the VictoriaMetrics
   # Memgraph runs, at the URL and with the credentials Memgraph gives you (any
   # Prometheus remote-write endpoint works); remoteWrite.url is its one
-  # required field. basicAuth names a kubernetes.io/basic-auth Secret (keys username
+  # required field. vectorRemote is the logs half of the same: a Vector
+  # sidecar in every pod of both roles (the HA chart's block) reads the
+  # instance's log stream from Memgraph's monitoring websocket on 7444 and
+  # pushes it, outbound only, to the Loki-compatible endpoint Memgraph gives
+  # you; logsEndpoint is a base URL Vector appends /loki/api/v1/push to, for
+  # VictoriaLogs its /insert path. auth names a kubernetes.io/basic-auth
+  # Secret like the vmagent's; extraLabels are stamped on every line beside
+  # app, job, role, namespace, pod and level. Adding or removing the block
+  # rolls the pods. basicAuth names a kubernetes.io/basic-auth Secret (keys username
   # and password, fixed); the password is a mounted file vmagent re-reads, so
   # it is never on a command line and rotates with no restart. externalLabels are stamped on every sample,
   # which is how the remote tells clusters apart. The scrape goes over https
@@ -471,6 +479,17 @@ spec:
   #     image:
   #       repository: docker.io/victoriametrics/vmagent
   #       tag: v1.139.0
+  #       pullPolicy: IfNotPresent
+  #     resources: {}
+  #   vectorRemote:
+  #     logsEndpoint: http://victoria-logs.monitoring.svc.cluster.local:9428/insert
+  #     auth:
+  #       secretName: logs-basic-auth
+  #     extraLabels:
+  #       cluster_id: production
+  #     image:
+  #       repository: docker.io/timberio/vector
+  #       tag: 0.49.0-debian
   #       pullPolicy: IfNotPresent
   #     resources: {}
   # TLS. bolt serves Bolt on 7687 — and the metrics endpoint on 9091, which

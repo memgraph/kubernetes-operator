@@ -154,6 +154,65 @@ spec:
       targetPort: http
 `
 
+// victoriaLogsSink is the single-node VictoriaLogs the Vector spec ships to,
+// shaped like the VictoriaMetrics one above. %s is its name, which is also the
+// Service's.
+const victoriaLogsSink = `apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: %[1]s
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: %[1]s
+  template:
+    metadata:
+      labels:
+        app: %[1]s
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: victoria-logs
+          image: docker.io/victoriametrics/victoria-logs:v1.49.0
+          args:
+            - -storageDataPath=/storage
+            - -retentionPeriod=1d
+          ports:
+            - name: http
+              containerPort: 9428
+          volumeMounts:
+            - name: storage
+              mountPath: /storage
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+      volumes:
+        - name: storage
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: %[1]s
+spec:
+  selector:
+    app: %[1]s
+  ports:
+    - name: http
+      port: 9428
+      targetPort: http
+`
+
 // clusterUnderTest is one MemgraphCluster a spec observes, together with the
 // topology it declares. The suite runs several differently-shaped clusters —
 // the quickstart one, the retention one, the one that is scaled — so every
@@ -432,6 +491,121 @@ var _ = Describe("MemgraphCluster", Ordered, func() {
 			g.Expect(strings.TrimSpace(out)).To(BeEmpty())
 		}, 2*time.Minute, 5*time.Second).Should(Succeed())
 		quickstartCluster.awaitConverged(3 * time.Minute)
+	})
+
+	// The Vector sidecar the operator runs so Memgraph can read the cluster's
+	// logs, proven against a real Loki-compatible endpoint: a single-node
+	// VictoriaLogs in the cluster's namespace, deployed by the test like the
+	// vmagent's sink. Adding the sidecar is a pod-template change, so the spec
+	// also watches the roll carry it in, one pod at a time, and out again.
+	// Every pod logs at TRACE, so every pod has lines to ship.
+	It("ships every instance's logs to a Loki endpoint with a Vector sidecar and rolls it out with the block", func() {
+		const sinkName = "vlogs"
+		const authSecret = "logs-basic-auth"
+		logsEndpoint := fmt.Sprintf("http://%s.%s.svc.cluster.local:9428/insert", sinkName, clusterNamespace)
+		declaredPods := make([]string, 0, quickstartCluster.coordinators+quickstartCluster.dataInstances)
+		for ordinal := range quickstartCluster.coordinators {
+			declaredPods = append(declaredPods, quickstartCluster.coordinatorPod(ordinal))
+		}
+		for ordinal := range quickstartCluster.dataInstances {
+			declaredPods = append(declaredPods, quickstartCluster.dataPod(ordinal))
+		}
+
+		By("deploying a single-node VictoriaLogs as the Loki endpoint")
+		cmd := exec.Command("kubectl", "apply", "-n", clusterNamespace, "-f", "-")
+		_, err := utils.RunWithInput(cmd, fmt.Sprintf(victoriaLogsSink, sinkName))
+		Expect(err).NotTo(HaveOccurred(), "Failed to deploy the VictoriaLogs sink")
+		DeferCleanup(func() {
+			cmd := exec.Command("kubectl", "delete", "-n", clusterNamespace, "--ignore-not-found",
+				"deployment/"+sinkName, "service/"+sinkName, "secret/"+authSecret)
+			_, _ = utils.Run(cmd)
+		})
+
+		By("creating the basic-auth Secret the block names")
+		cmd = exec.Command("kubectl", "create", "secret", "generic", authSecret, "-n", clusterNamespace,
+			"--type=kubernetes.io/basic-auth", "--from-literal=username=memgraph", "--from-literal=password=e2e")
+		_, err = utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred(), "Failed to create the basic-auth Secret")
+
+		By("recording which pods exist")
+		before, err := quickstartCluster.podUIDs()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(before).To(HaveLen(len(declaredPods)))
+
+		By("adding the vectorRemote block")
+		cmd = exec.Command("kubectl", "patch", "memgraphcluster", quickstartCluster.name,
+			"-n", clusterNamespace, "--type=merge", "-p",
+			fmt.Sprintf(`{"spec":{"monitoring":{"vectorRemote":{"logsEndpoint":%q,"auth":{"secretName":%q},`+
+				`"extraLabels":{"cluster_id":"e2e"}}}}}`, logsEndpoint, authSecret))
+		_, err = utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred())
+
+		By("watching the operator roll the sidecar into every pod, one at a time")
+		order, maxDown := quickstartCluster.watchRoll(before, 25*time.Minute)
+		Expect(order).To(HaveLen(len(before)), "every pod must be replaced exactly once")
+		Expect(maxDown).To(BeNumerically("<=", 1),
+			"at most one pod of the cluster may be unready at a time; observed %d", maxDown)
+		Eventually(quickstartCluster.verifyRegistered, 10*time.Minute, 10*time.Second).Should(Succeed())
+		quickstartCluster.awaitConverged(5 * time.Minute)
+
+		By("confirming every pod runs the sidecar under the restricted policy")
+		cmd = exec.Command("kubectl", "get", "pods", "-n", clusterNamespace,
+			"-l", "app.kubernetes.io/instance="+quickstartCluster.name,
+			"-o", "jsonpath={range .items[*]}{.metadata.name}={range .spec.containers[*]}{.name},{end}{\"\n\"}{end}")
+		out, err := utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred())
+		for _, pod := range declaredPods {
+			Expect(out).To(ContainSubstring(pod+"=memgraph,vector,"), "%s carries Memgraph and the sidecar", pod)
+		}
+
+		By("waiting for every pod's lines to reach the sink with the extra label")
+		query := fmt.Sprintf("http://%s.%s.svc.cluster.local:9428/select/logsql/query?query=%s", sinkName, clusterNamespace,
+			url.QueryEscape(`app:memgraph job:memgraph cluster_id:e2e | stats by (pod) count()`))
+		Eventually(func(g Gomega) {
+			body, err := curlInsecure(clusterNamespace, query)
+			g.Expect(err).NotTo(HaveOccurred())
+			var pods []string
+			for _, line := range strings.Split(strings.TrimSpace(body), "\n") {
+				if line == "" {
+					continue
+				}
+				var row struct {
+					Pod string `json:"pod"`
+				}
+				g.Expect(json.Unmarshal([]byte(line), &row)).To(Succeed(), "sink answered %q", body)
+				pods = append(pods, row.Pod)
+			}
+			g.Expect(pods).To(ConsistOf(declaredPods), "every declared pod has shipped lines")
+		}, 4*time.Minute, 10*time.Second).Should(Succeed())
+
+		By("removing the block")
+		before, err = quickstartCluster.podUIDs()
+		Expect(err).NotTo(HaveOccurred())
+		cmd = exec.Command("kubectl", "patch", "memgraphcluster", quickstartCluster.name,
+			"-n", clusterNamespace, "--type=merge", "-p", `{"spec":{"monitoring":null}}`)
+		_, err = utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred())
+
+		By("watching the roll take the sidecar out again and the configuration go")
+		order, _ = quickstartCluster.watchRoll(before, 25*time.Minute)
+		Expect(order).To(HaveLen(len(before)), "every pod must be replaced exactly once")
+		Eventually(quickstartCluster.verifyRegistered, 10*time.Minute, 10*time.Second).Should(Succeed())
+		quickstartCluster.awaitConverged(5 * time.Minute)
+		Eventually(func(g Gomega) {
+			cmd := exec.Command("kubectl", "get", "configmap", "-n", clusterNamespace,
+				"-l", resources.MonitoringLabel+"="+resources.MonitoringValue, "-o", "name")
+			out, err := utils.Run(cmd)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(strings.TrimSpace(out)).To(BeEmpty())
+		}, 2*time.Minute, 5*time.Second).Should(Succeed())
+		cmd = exec.Command("kubectl", "get", "pods", "-n", clusterNamespace,
+			"-l", "app.kubernetes.io/instance="+quickstartCluster.name,
+			"-o", "jsonpath={range .items[*]}{.metadata.name}={range .spec.containers[*]}{.name},{end}{\"\n\"}{end}")
+		out, err = utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred())
+		for _, pod := range declaredPods {
+			Expect(out).To(ContainSubstring(pod+"=memgraph,\n"), "%s runs Memgraph alone again", pod)
+		}
 	})
 
 	// The operator's reason to exist over the chart's one-shot Job: a data

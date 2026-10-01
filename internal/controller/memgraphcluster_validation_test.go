@@ -576,7 +576,7 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 						VMAgentRemote: &memgraphcomv1alpha1.VMAgentRemoteSpec{
 							RemoteWrite: memgraphcomv1alpha1.RemoteWriteSpec{
 								URL:       "http://vmsingle:8428/api/v1/write",
-								BasicAuth: &memgraphcomv1alpha1.RemoteWriteBasicAuthSpec{},
+								BasicAuth: &memgraphcomv1alpha1.BasicAuthSecretSpec{},
 							},
 						},
 					},
@@ -592,6 +592,40 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 					},
 				},
 				"externalLabels keys must be Prometheus label names"),
+			Entry("a Vector sidecar without a logs endpoint", "invalid-vector-no-endpoint",
+				memgraphcomv1alpha1.MemgraphClusterSpec{
+					Monitoring: &memgraphcomv1alpha1.MonitoringSpec{
+						VectorRemote: &memgraphcomv1alpha1.VectorRemoteSpec{},
+					},
+				},
+				"spec.monitoring.vectorRemote.logsEndpoint"),
+			Entry("a logs endpoint that is not an http URL", "invalid-vector-endpoint-scheme",
+				memgraphcomv1alpha1.MemgraphClusterSpec{
+					Monitoring: &memgraphcomv1alpha1.MonitoringSpec{
+						VectorRemote: &memgraphcomv1alpha1.VectorRemoteSpec{LogsEndpoint: "victoria-logs:9428/insert"},
+					},
+				},
+				"in body should match"),
+			Entry("a Vector auth block naming no Secret", "invalid-vector-auth-no-secret",
+				memgraphcomv1alpha1.MemgraphClusterSpec{
+					Monitoring: &memgraphcomv1alpha1.MonitoringSpec{
+						VectorRemote: &memgraphcomv1alpha1.VectorRemoteSpec{
+							LogsEndpoint: "http://victoria-logs:9428/insert",
+							Auth:         &memgraphcomv1alpha1.BasicAuthSecretSpec{},
+						},
+					},
+				},
+				"spec.monitoring.vectorRemote.auth.secretName"),
+			Entry("a Vector extra label that is not a label name", "invalid-vector-extra-label",
+				memgraphcomv1alpha1.MemgraphClusterSpec{
+					Monitoring: &memgraphcomv1alpha1.MonitoringSpec{
+						VectorRemote: &memgraphcomv1alpha1.VectorRemoteSpec{
+							LogsEndpoint: "http://victoria-logs:9428/insert",
+							ExtraLabels:  map[string]string{"cluster-id": "production"},
+						},
+					},
+				},
+				"extraLabels keys must be label names"),
 			Entry("a zero vm.max_map_count floor", "invalid-max-map-count-zero",
 				memgraphcomv1alpha1.MemgraphClusterSpec{
 					SysctlInitContainer: &memgraphcomv1alpha1.SysctlInitContainerSpec{MaxMapCount: -1},
