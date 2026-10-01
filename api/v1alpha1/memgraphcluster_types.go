@@ -1470,8 +1470,11 @@ type RemoteWriteSpec struct {
 // VMAgentRemoteSpec asks the operator to run the HA chart's vmagentRemote: one
 // vmagent Deployment in the cluster's namespace that scrapes every instance's
 // OpenMetrics endpoint over pod DNS and remote-writes the samples to a
-// Prometheus remote-write endpoint, which is how a cluster's metrics reach a
-// monitoring cluster run elsewhere. The scrape configuration is an operator-
+// Prometheus remote-write endpoint. It is how Memgraph monitors a customer's
+// cluster: Memgraph cannot reach into the customer's network to scrape it, so
+// the cluster pushes its metrics, outbound only, to the VictoriaMetrics
+// Memgraph runs and gives the customer the URL and credentials of. The scrape
+// configuration is an operator-
 // owned ConfigMap vmagent re-reads when it changes, so a count change reaches
 // the running vmagent without a restart; a change to the url, the image or the
 // credentials Secret is a pod-template change the Deployment rolls itself.
