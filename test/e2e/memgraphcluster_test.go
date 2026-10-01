@@ -551,7 +551,7 @@ var _ = Describe("MemgraphCluster", Ordered, func() {
 		By("confirming every pod runs the sidecar under the restricted policy")
 		cmd = exec.Command("kubectl", "get", "pods", "-n", clusterNamespace,
 			"-l", "app.kubernetes.io/instance="+quickstartCluster.name,
-			"-o", "jsonpath={range .items[*]}{.metadata.name}={range .spec.containers[*]}{.name},{end}{\"\n\"}{end}")
+			"-o", "jsonpath={range .items[*]}{.metadata.name}={range .spec.containers[*]}{.name},{end}{\"\\n\"}{end}")
 		out, err := utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred())
 		for _, pod := range declaredPods {
@@ -600,7 +600,7 @@ var _ = Describe("MemgraphCluster", Ordered, func() {
 		}, 2*time.Minute, 5*time.Second).Should(Succeed())
 		cmd = exec.Command("kubectl", "get", "pods", "-n", clusterNamespace,
 			"-l", "app.kubernetes.io/instance="+quickstartCluster.name,
-			"-o", "jsonpath={range .items[*]}{.metadata.name}={range .spec.containers[*]}{.name},{end}{\"\n\"}{end}")
+			"-o", "jsonpath={range .items[*]}{.metadata.name}={range .spec.containers[*]}{.name},{end}{\"\\n\"}{end}")
 		out, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred())
 		for _, pod := range declaredPods {
