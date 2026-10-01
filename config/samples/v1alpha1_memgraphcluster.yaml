@@ -438,7 +438,17 @@ spec:
   # grafana_dashboard: "1", which is what the kube-prometheus-stack sidecar
   # selects on. Set labels only for a sidecar configured with another label;
   # a set you name replaces the default. The sidecar reads grafana_folder from
-  # the annotations to file the dashboard. Each block is optional on its own.
+  # the annotations to file the dashboard. vmagentRemote runs one vmagent
+  # (the HA chart's block) that scrapes every instance over pod DNS and
+  # remote-writes the samples to a Prometheus remote-write endpoint, for a
+  # monitoring cluster run elsewhere; remoteWrite.url is its one required
+  # field. basicAuth names a kubernetes.io/basic-auth Secret (keys username
+  # and password, fixed); the password is a mounted file vmagent re-reads, so
+  # it is never on a command line and rotates with no restart. externalLabels are stamped on every sample,
+  # which is how the remote tells clusters apart. The scrape goes over https
+  # as soon as tls.bolt is set. The chart's kubernetes block (kube-state-
+  # metrics, node-exporter, kubelet) is not carried over: a cluster-wide agent
+  # is the tool for infrastructure metrics. Each block is optional on its own.
   # monitoring:
   #   serviceMonitor:
   #     labels:
@@ -448,6 +458,19 @@ spec:
   #   grafanaDashboard:
   #     labels: {}
   #     annotations: {}
+  #   vmagentRemote:
+  #     remoteWrite:
+  #       url: http://vmsingle.monitoring.svc.cluster.local:8428/api/v1/write
+  #       basicAuth:
+  #         secretName: monitoring-basic-auth
+  #     scrapeInterval: 15s
+  #     externalLabels:
+  #       cluster: production
+  #     image:
+  #       repository: docker.io/victoriametrics/vmagent
+  #       tag: v1.139.0
+  #       pullPolicy: IfNotPresent
+  #     resources: {}
   # TLS. bolt serves Bolt on 7687 — and the metrics endpoint on 9091, which
   # Memgraph serves from the same server context — over TLS on both roles, from
   # one kubernetes.io/tls Secret in this namespace holding tls.crt and tls.key

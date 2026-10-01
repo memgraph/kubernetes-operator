@@ -189,6 +189,19 @@ type normalizedPodAntiAffinity struct {
 type normalizedMonitoring struct {
 	serviceMonitor   *normalizedServiceMonitor
 	grafanaDashboard *normalizedGrafanaDashboard
+	vmagent          *normalizedVMAgent
+}
+
+// normalizedVMAgent is the vmagentRemote block with its image and interval
+// defaults resolved; basicAuthSecret is empty for an unauthenticated endpoint.
+type normalizedVMAgent struct {
+	image           string
+	pullPolicy      corev1.PullPolicy
+	remoteWriteURL  string
+	basicAuthSecret string
+	scrapeInterval  string
+	externalLabels  map[string]string
+	resources       corev1.ResourceRequirements
 }
 
 // normalizedGrafanaDashboard is what decorates the dashboard ConfigMap, its
@@ -366,6 +379,9 @@ func normalize(spec memgraphcomv1alpha1.MemgraphClusterSpec) normalizedSpec {
 			annotations: spec.Monitoring.GrafanaDashboard.Annotations,
 		}
 	}
+	if spec.Monitoring != nil && spec.Monitoring.VMAgentRemote != nil {
+		n.monitoring.vmagent = normalizeVMAgent(spec.Monitoring.VMAgentRemote)
+	}
 	if spec.TLS != nil && spec.TLS.Bolt != nil {
 		n.boltTLSSecret = spec.TLS.Bolt.SecretName
 	}
@@ -516,6 +532,40 @@ func normalizeStorage(spec memgraphcomv1alpha1.RoleStorageSpec) normalizedStorag
 // normalizeSecurityContext resolves the securityContext block: absent, the
 // identity baked into the Memgraph images; present, exactly what it names,
 // including nothing at all for a platform that assigns the identity itself.
+// normalizeVMAgent resolves the vmagentRemote block's defaults, which mirror
+// its CRD schema defaults so the builder behaves the same on a spec that never
+// passed admission.
+func normalizeVMAgent(block *memgraphcomv1alpha1.VMAgentRemoteSpec) *normalizedVMAgent {
+	repository := block.Image.Repository
+	if repository == "" {
+		repository = memgraphcomv1alpha1.DefaultVMAgentImageRepository
+	}
+	tag := block.Image.Tag
+	if tag == "" {
+		tag = memgraphcomv1alpha1.DefaultVMAgentImageTag
+	}
+	pullPolicy := block.Image.PullPolicy
+	if pullPolicy == "" {
+		pullPolicy = memgraphcomv1alpha1.DefaultImagePullPolicy
+	}
+	interval := block.ScrapeInterval
+	if interval == "" {
+		interval = memgraphcomv1alpha1.DefaultVMAgentScrapeInterval
+	}
+	n := &normalizedVMAgent{
+		image:          repository + ":" + tag,
+		pullPolicy:     pullPolicy,
+		remoteWriteURL: block.RemoteWrite.URL,
+		scrapeInterval: interval,
+		externalLabels: block.ExternalLabels,
+		resources:      block.Resources,
+	}
+	if block.RemoteWrite.BasicAuth != nil {
+		n.basicAuthSecret = block.RemoteWrite.BasicAuth.SecretName
+	}
+	return n
+}
+
 func normalizeSecurityContext(spec *memgraphcomv1alpha1.PodSecurityContextSpec) normalizedSecurityContext {
 	if spec == nil {
 		return normalizedSecurityContext{

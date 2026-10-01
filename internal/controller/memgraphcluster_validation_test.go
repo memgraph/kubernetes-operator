@@ -554,6 +554,44 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 					},
 				},
 				"licenseKey and organizationKey must name different keys of the Secret"),
+			Entry("a vmagent without a remote-write endpoint", "invalid-vmagent-no-url",
+				memgraphcomv1alpha1.MemgraphClusterSpec{
+					Monitoring: &memgraphcomv1alpha1.MonitoringSpec{
+						VMAgentRemote: &memgraphcomv1alpha1.VMAgentRemoteSpec{},
+					},
+				},
+				"spec.monitoring.vmagentRemote.remoteWrite.url"),
+			Entry("a remote-write endpoint that is not an http URL", "invalid-vmagent-url-scheme",
+				memgraphcomv1alpha1.MemgraphClusterSpec{
+					Monitoring: &memgraphcomv1alpha1.MonitoringSpec{
+						VMAgentRemote: &memgraphcomv1alpha1.VMAgentRemoteSpec{
+							RemoteWrite: memgraphcomv1alpha1.RemoteWriteSpec{URL: "vmsingle:8428/api/v1/write"},
+						},
+					},
+				},
+				"in body should match"),
+			Entry("a basic-auth block naming no Secret", "invalid-vmagent-basic-auth-no-secret",
+				memgraphcomv1alpha1.MemgraphClusterSpec{
+					Monitoring: &memgraphcomv1alpha1.MonitoringSpec{
+						VMAgentRemote: &memgraphcomv1alpha1.VMAgentRemoteSpec{
+							RemoteWrite: memgraphcomv1alpha1.RemoteWriteSpec{
+								URL:       "http://vmsingle:8428/api/v1/write",
+								BasicAuth: &memgraphcomv1alpha1.RemoteWriteBasicAuthSpec{},
+							},
+						},
+					},
+				},
+				"spec.monitoring.vmagentRemote.remoteWrite.basicAuth.secretName"),
+			Entry("an external label that is not a Prometheus label name", "invalid-vmagent-external-label",
+				memgraphcomv1alpha1.MemgraphClusterSpec{
+					Monitoring: &memgraphcomv1alpha1.MonitoringSpec{
+						VMAgentRemote: &memgraphcomv1alpha1.VMAgentRemoteSpec{
+							RemoteWrite:    memgraphcomv1alpha1.RemoteWriteSpec{URL: "http://vmsingle:8428/api/v1/write"},
+							ExternalLabels: map[string]string{"cluster-name": "production"},
+						},
+					},
+				},
+				"externalLabels keys must be Prometheus label names"),
 			Entry("a zero vm.max_map_count floor", "invalid-max-map-count-zero",
 				memgraphcomv1alpha1.MemgraphClusterSpec{
 					SysctlInitContainer: &memgraphcomv1alpha1.SysctlInitContainerSpec{MaxMapCount: -1},
