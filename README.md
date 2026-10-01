@@ -152,7 +152,7 @@ kubectl port-forward -n memgraph pod/memgraph-data-0 7687:7687
 kubectl delete mgc memgraph -n memgraph
 ```
 
-Deleting the resource removes the StatefulSets and Services through garbage collection, but **the PersistentVolumeClaims are kept** — the default retention policy protects data against an accidental delete. Remove them (and with them the data) explicitly, or set `spec.storage.retentionPolicy: Delete` on dev clusters that should clean up after themselves:
+Deleting the resource removes the StatefulSets and Services through garbage collection, but **the PersistentVolumeClaims are kept** — the default retention policy protects data against an accidental delete, and is what a [volume-snapshot restore](docs/backup-restore.md) builds on. Remove them (and with them the data) explicitly, or set `spec.storage.retentionPolicy: Delete` on dev clusters that should clean up after themselves:
 
 ```sh
 kubectl delete pvc -n memgraph --all
@@ -248,7 +248,7 @@ Both counts have a floor the schema enforces at creation and on every update: `c
 What it does not do yet:
 
 - **Failover.** The operator promotes a MAIN only when the cluster has none: once at bootstrap, and once more when it demotes an instance that is retiring. It never overrides a MAIN that is staying — leadership belongs to the Raft coordinators, so two control systems never fight over which instance is MAIN.
-- **Other day-2 operations**: orchestrated or rolling version upgrades, backup and restore, storage-mode changes.
+- **Other day-2 operations**: orchestrated or rolling version upgrades, storage-mode changes, and a backup feature of its own — volume-snapshot backup and restore work through the claims' names and the retention policy without one, see [`docs/backup-restore.md`](docs/backup-restore.md).
 - **Deleting storage**: the operator owns no finalizer and runs no cleanup of its own — deleting a volume is left entirely to the StatefulSet's own retention policy.
 - **Liveness or startup probes.** Pods carry a readiness probe only. Memgraph opens no port until every database is recovered, so a liveness check could only ever kill a recovery that outlived a guessed budget — and a recovery longer than the guess would never finish, because every kill starts it over. A recovering data instance shows `0/1` until it is done and is restarted by nothing but its own exit; restarting a running instance is the [rolling restart](#what-v1alpha1-does-and-does-not-do)'s job, which knows the cluster's state.
 - **NodePort or ingress exposure**, a declared hostname without external-dns, or attaching to a Gateway you already run — see [what external access leaves out](docs/external-access.md#not-in-scope).
