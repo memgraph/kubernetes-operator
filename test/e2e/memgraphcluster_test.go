@@ -64,6 +64,9 @@ const (
 	// column.
 	roleMain = "main"
 
+	// roleReplica is the replica data-instance role reported in the same column.
+	roleReplica = "replica"
+
 	// roleLeader is the Raft leader coordinator role reported in the same column.
 	// Which coordinator holds it decides whether a shrink can remove a member at
 	// all: Raft refuses to remove its own leader.
@@ -571,10 +574,26 @@ var _ = Describe("MemgraphCluster", Ordered, func() {
 			Expect(out).To(ContainSubstring(pod+"=memgraph,vector,"), "%s carries Memgraph and the sidecar", pod)
 		}
 
+		// Memgraph pushes a line to the websocket only as it is written, and
+		// an instance that has finished starting may write none for minutes:
+		// an idle Raft follower logs through NuRaft's own logger, not the
+		// sink the websocket reads. One Bolt session per pod makes every
+		// instance log something, so the assertion is about the pipeline and
+		// not about who happened to be chatty.
 		By("waiting for every pod's lines to reach the sink with the extra label")
 		query := fmt.Sprintf("http://%s.%s.svc.cluster.local:9428/select/logsql/query?query=%s", sinkName, clusterNamespace,
 			url.QueryEscape(`app:memgraph job:memgraph cluster_id:e2e | stats by (pod) count()`))
 		Eventually(func(g Gomega) {
+			for ordinal := range quickstartCluster.coordinators {
+				cmd := exec.Command("kubectl", "exec", quickstartCluster.coordinatorPod(ordinal), "-n", clusterNamespace,
+					"-c", "memgraph", "--", "bash", "-c", quickstartCluster.mgconsole("SHOW INSTANCES;"))
+				_, _ = utils.Run(cmd)
+			}
+			for ordinal := range quickstartCluster.dataInstances {
+				cmd := exec.Command("kubectl", "exec", quickstartCluster.dataPod(ordinal), "-n", clusterNamespace,
+					"-c", "memgraph", "--", "bash", "-c", quickstartCluster.mgconsole("RETURN 1;"))
+				_, _ = utils.Run(cmd)
+			}
 			body, err := curlInsecure(clusterNamespace, query)
 			g.Expect(err).NotTo(HaveOccurred())
 			var pods []string
@@ -626,13 +645,12 @@ var _ = Describe("MemgraphCluster", Ordered, func() {
 	// action. This runs after the bootstrap spec (Ordered) against the same
 	// converged cluster.
 	It("re-registers a data instance whose registration was wiped", func() {
-		const wiped = "instance_1"
-
 		By("confirming the cluster is converged before wiping a registration")
 		Eventually(quickstartCluster.verifyRegistered, 10*time.Minute, 10*time.Second).Should(Succeed())
 
-		By("unregistering a data instance on the coordinator leader")
-		Expect(wipeInstanceRegistration(wiped)).To(Succeed())
+		By("unregistering a replica data instance on the coordinator leader")
+		wiped, err := wipeReplicaRegistration()
+		Expect(err).NotTo(HaveOccurred())
 
 		By("confirming the instance really left the cluster view")
 		view, err := quickstartCluster.leaderView()
@@ -1435,21 +1453,35 @@ func metricsFromPod(namespace, pod string) (string, error) {
 	return utils.Run(cmd)
 }
 
-// wipeInstanceRegistration unregisters the named data instance on the
+// wipeReplicaRegistration unregisters a replica data instance on the
 // coordinator leader, simulating registration state a pod loses when it is
-// rescheduled onto a fresh node. UNREGISTER INSTANCE must run on the leader —
-// only it holds the authoritative cluster view — which leaderPod locates.
-func wipeInstanceRegistration(name string) error {
-	pod, _, err := quickstartCluster.leaderPod()
+// rescheduled onto a fresh node, and returns the name it wiped. UNREGISTER
+// INSTANCE must run on the leader — only it holds the authoritative cluster
+// view — which leaderPod locates. A replica is chosen from that view rather
+// than named in advance: Memgraph refuses to unregister a live MAIN, and
+// which instance is MAIN depends on the rolls earlier specs put the cluster
+// through.
+func wipeReplicaRegistration() (string, error) {
+	pod, view, err := quickstartCluster.leaderPod()
 	if err != nil {
-		return fmt.Errorf("no coordinator leader found to unregister %s: %w", name, err)
+		return "", fmt.Errorf("no coordinator leader found to unregister a replica: %w", err)
+	}
+	var name string
+	for _, instance := range view {
+		if instance.role == roleReplica {
+			name = instance.name
+			break
+		}
+	}
+	if name == "" {
+		return "", fmt.Errorf("no replica in the leader's view to unregister: %v", instanceNames(view))
 	}
 	cmd := exec.Command("kubectl", "exec", pod, "-n", clusterNamespace, "-c", "memgraph", "--",
 		"bash", "-c", quickstartCluster.mgconsole(fmt.Sprintf("UNREGISTER INSTANCE %s;", name)))
 	if _, err := utils.Run(cmd); err != nil {
-		return fmt.Errorf("unregistering %s on %s: %w", name, pod, err)
+		return "", fmt.Errorf("unregistering %s on %s: %w", name, pod, err)
 	}
-	return nil
+	return name, nil
 }
 
 // removeCoordinatorRegistration removes a follower coordinator from the Raft
@@ -1492,6 +1524,11 @@ func dumpDiagnosticsOnFailure(clusterNamespace string) {
 		{"get", "memgraphclusters", "-n", clusterNamespace, "-o", "yaml"},
 		{"get", "events", "-n", clusterNamespace, "--sort-by=.lastTimestamp"},
 		{"logs", "deploy/" + controllerDeploymentName, "-n", namespace, "--tail=200"},
+		// The Vector sidecars, when the cluster has them: whether each one
+		// reached its instance's websocket and the endpoint is in here and
+		// nowhere else.
+		{"logs", "-n", clusterNamespace, "-l", "app.kubernetes.io/component in (coordinator,data)",
+			"-c", "vector", "--tail=40", "--prefix", "--ignore-errors"},
 	} {
 		cmd := exec.Command("kubectl", args...)
 		output, err := utils.Run(cmd)

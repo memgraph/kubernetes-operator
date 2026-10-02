@@ -112,6 +112,7 @@ sinks:
     type: loki
 sources:
   memgraph:
+    connect_timeout_secs: 86400
     type: websocket
     uri: ws://127.0.0.1:7444
 transforms:
