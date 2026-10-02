@@ -868,15 +868,10 @@ var _ = Describe("MemgraphCluster", Ordered, func() {
 		mainPod := quickstartCluster.dataPod(mainOrdinal)
 		patchFlags(`{"query-execution-timeout-sec":"456","log-retention-days":"36"}`)
 
-		By("watching the run-time value land on the pods while the roll is still ahead of them")
-		Eventually(func(g Gomega) {
-			for _, pod := range quickstartCluster.workloadPodNames() {
-				value, err := quickstartCluster.settingOnPod(pod, "query.timeout")
-				g.Expect(err).NotTo(HaveOccurred())
-				g.Expect(value).To(Equal("456"), "pod %s", pod)
-			}
-		}, 5*time.Minute, 5*time.Second).Should(Succeed())
-
+		// The roll is watched from the moment of the patch: on Kind it can
+		// finish in seconds, and a sampled watch started any later sees every
+		// pod already replaced and cannot tell the order. The run-time value
+		// is checked on every pod once the roll is done.
 		By("watching the operator roll every pod for the startup-only flag, data instances first and MAIN last of them")
 		order, maxDown := quickstartCluster.watchRoll(before, 25*time.Minute)
 		Expect(order).To(HaveLen(len(before)), "every pod must be replaced exactly once")
