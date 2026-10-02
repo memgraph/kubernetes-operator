@@ -690,10 +690,12 @@ func statefulSet(
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: labels(cluster, component, role.podLabels),
 					// The startup-only flags are part of the template through
-					// this hash, so a change to one is a roll; the run-time
-					// flags are deliberately not, so a change to one is not.
+					// their digests, so a change to one is a new revision and
+					// the controller can see which keys a pod lacks; the
+					// run-time flags are deliberately not, so a change to one
+					// changes nothing here.
 					Annotations: map[string]string{
-						FlagsRestartAnnotation: flagsRestartHash(roleFlags(role)),
+						FlagsAnnotation: flagsDigests(roleFlags(role)),
 					},
 				},
 				Spec: corev1.PodSpec{

@@ -80,47 +80,6 @@ spec:
                 minLength: 1
                 pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
                 type: string
-              coordinatorSettings:
-                additionalProperties:
-                  description: SettingValue is one coordinator setting's value, verbatim.
-                  maxLength: 64
-                  pattern: ^[^\n\r]*$
-                  type: string
-                description: |-
-                  coordinatorSettings sets the cluster-wide coordinator settings: the ones
-                  SHOW COORDINATOR SETTINGS lists and SET COORDINATOR SETTING changes, such
-                  as enabled_reads_on_main, sync_failover_only, max_failover_replica_lag,
-                  max_replica_read_lag, instance_down_timeout_sec,
-                  instance_health_check_frequency_sec and global_read_only. They are not
-                  flags: a coordinator setting is written to the Raft log once, on any
-                  coordinator (a follower forwards it to the leader), and every coordinator
-                  present or future reads it from there, so nothing lands in a flag file and
-                  no pod restarts. The operator issues a SET for every key whose value
-                  differs from what the coordinators report, as soon as the cluster is
-                  registered. Removing a key issues no SET: the setting keeps its value,
-                  which Raft persists.
-
-                  Keys are the setting names as Memgraph spells them. Values are strings,
-                  as for flags: a boolean setting takes "true" or "false", a numeric one
-                  digits. Admission checks both for the settings it knows; one it does not
-                  know is passed through and refused by the coordinators if they do not
-                  have it, which the Converged condition then reports.
-                maxProperties: 16
-                type: object
-                x-kubernetes-validations:
-                - message: coordinatorSettings keys are setting names as Memgraph
-                    spells them, such as instance_down_timeout_sec
-                  rule: self.all(k, k.matches('^[a-z][a-z0-9_]*$'))
-                - message: enabled_reads_on_main, sync_failover_only and global_read_only
-                    take "true" or "false"
-                  rule: self.all(k, !(k in ['enabled_reads_on_main', 'sync_failover_only',
-                    'global_read_only']) || self[k] in ['true', 'false'])
-                - message: instance_down_timeout_sec, instance_health_check_frequency_sec,
-                    max_failover_replica_lag, max_replica_read_lag and deltas_batch_progress_size
-                    take a non-negative integer
-                  rule: self.all(k, !(k in ['instance_down_timeout_sec', 'instance_health_check_frequency_sec',
-                    'max_failover_replica_lag', 'max_replica_read_lag', 'deltas_batch_progress_size'])
-                    || self[k].matches('^[0-9]+$'))
               coordinators:
                 default: 3
                 description: |-
@@ -814,20 +773,34 @@ spec:
                       maxLength: 4096
                       pattern: ^[^\n\r]*$
                       type: string
-                    description: coordinators are the flags every coordinator pod
-                      starts with.
+                    description: |-
+                      coordinators are the flags every coordinator pod starts with, and the
+                      cluster-wide coordinator settings.
                     maxProperties: 64
                     type: object
                     x-kubernetes-validations:
+                    - message: enabled_reads_on_main, sync_failover_only and global_read_only
+                        take "true" or "false"
+                      rule: self.all(k, !(k.replace('-', '_') in ['enabled_reads_on_main',
+                        'sync_failover_only', 'global_read_only']) || self[k] in ['true',
+                        'false'])
+                    - message: instance_down_timeout_sec, instance_health_check_frequency_sec,
+                        max_failover_replica_lag, max_replica_read_lag and deltas_batch_progress_size
+                        take a non-negative integer
+                      rule: self.all(k, !(k.replace('-', '_') in ['instance_down_timeout_sec',
+                        'instance_health_check_frequency_sec', 'max_failover_replica_lag',
+                        'max_replica_read_lag', 'deltas_batch_progress_size']) ||
+                        self[k].matches('^[0-9]+$'))
                     - message: flags keys are flag names without leading dashes, such
                         as log-level
                       rule: self.all(k, k.matches('^[A-Za-z][A-Za-z0-9_-]*$'))
                     - message: 'flags must not set a port, a listen address, the coordinator
                         identity, the data directory, the log file, a TLS file, the
-                        metrics format or an AWS credential: the operator derives
-                        the former, and the latter is secret material to set with
-                        SET DATABASE SETTING'
-                      rule: self.all(k, !k.replace('-', '_').matches('^(bolt_port|management_port|coordinator_port|coordinator_id|coordinator_hostname|data_directory|log_file|bolt_cert_file|bolt_key_file|cluster_cert_file|cluster_key_file|cluster_ca_file|metrics_format|metrics_port|monitoring_port|bolt_address|monitoring_address|aws_access_key|aws_secret_key)$'))
+                        metrics format or a credential (aws-access-key, aws-secret-key,
+                        license-key, organization-name): the operator derives the
+                        former, and the latter is secret material that comes from
+                        the secrets block or SET DATABASE SETTING'
+                      rule: self.all(k, !k.replace('-', '_').matches('^(bolt_port|management_port|coordinator_port|coordinator_id|coordinator_hostname|data_directory|log_file|bolt_cert_file|bolt_key_file|cluster_cert_file|cluster_key_file|cluster_ca_file|metrics_format|metrics_port|monitoring_port|bolt_address|monitoring_address|aws_access_key|aws_secret_key|license_key|organization_name)$'))
                     - message: two keys spell the same flag
                       rule: self.all(k, self.all(j, k == j || k.replace('-', '_')
                         != j.replace('-', '_')))
@@ -850,15 +823,22 @@ spec:
                     maxProperties: 64
                     type: object
                     x-kubernetes-validations:
+                    - message: a coordinator setting is set under flags.coordinators,
+                        not flags.data
+                      rule: self.all(k, !(k.replace('-', '_') in ['enabled_reads_on_main',
+                        'sync_failover_only', 'global_read_only', 'instance_down_timeout_sec',
+                        'instance_health_check_frequency_sec', 'max_failover_replica_lag',
+                        'max_replica_read_lag', 'deltas_batch_progress_size']))
                     - message: flags keys are flag names without leading dashes, such
                         as log-level
                       rule: self.all(k, k.matches('^[A-Za-z][A-Za-z0-9_-]*$'))
                     - message: 'flags must not set a port, a listen address, the coordinator
                         identity, the data directory, the log file, a TLS file, the
-                        metrics format or an AWS credential: the operator derives
-                        the former, and the latter is secret material to set with
-                        SET DATABASE SETTING'
-                      rule: self.all(k, !k.replace('-', '_').matches('^(bolt_port|management_port|coordinator_port|coordinator_id|coordinator_hostname|data_directory|log_file|bolt_cert_file|bolt_key_file|cluster_cert_file|cluster_key_file|cluster_ca_file|metrics_format|metrics_port|monitoring_port|bolt_address|monitoring_address|aws_access_key|aws_secret_key)$'))
+                        metrics format or a credential (aws-access-key, aws-secret-key,
+                        license-key, organization-name): the operator derives the
+                        former, and the latter is secret material that comes from
+                        the secrets block or SET DATABASE SETTING'
+                      rule: self.all(k, !k.replace('-', '_').matches('^(bolt_port|management_port|coordinator_port|coordinator_id|coordinator_hostname|data_directory|log_file|bolt_cert_file|bolt_key_file|cluster_cert_file|cluster_key_file|cluster_ca_file|metrics_format|metrics_port|monitoring_port|bolt_address|monitoring_address|aws_access_key|aws_secret_key|license_key|organization_name)$'))
                     - message: two keys spell the same flag
                       rule: self.all(k, self.all(j, k == j || k.replace('-', '_')
                         != j.replace('-', '_')))

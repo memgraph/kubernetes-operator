@@ -159,6 +159,14 @@ func (c *boltClient) ShowSettings(ctx context.Context) (map[string]string, error
 	return settingsFromRecords(records)
 }
 
+func (c *boltClient) ShowConfig(ctx context.Context) (map[string]string, error) {
+	records, err := c.run(ctx, showConfigQuery)
+	if err != nil {
+		return nil, err
+	}
+	return namedValuesFromRecords(records, "name", "current_value")
+}
+
 func (c *boltClient) ShowCoordinatorSettings(ctx context.Context) (map[string]string, error) {
 	records, err := c.run(ctx, showCoordinatorSettingsQuery)
 	if err != nil {
@@ -173,20 +181,25 @@ func (c *boltClient) SetCoordinatorSetting(ctx context.Context, name, value stri
 }
 
 // settingsFromRecords maps the SHOW DATABASE SETTINGS or SHOW COORDINATOR
-// SETTINGS rows, which share their shape, to setting name
-// and value. A row without a name is refused: filed under the empty string
-// it would never match a flag, and the planner would then re-issue a SET the
-// instance already holds on every pass.
+// SETTINGS rows, which share their shape, to setting name and value.
 func settingsFromRecords(records []*db.Record) (map[string]string, error) {
-	settings := make(map[string]string, len(records))
+	return namedValuesFromRecords(records, "setting_name", "setting_value")
+}
+
+// namedValuesFromRecords maps two-column name/value rows to a map. A row
+// without a name is refused: filed under the empty string it would never
+// match a key, and a settings diff would then re-issue a SET the instance
+// already holds on every pass.
+func namedValuesFromRecords(records []*db.Record, nameColumn, valueColumn string) (map[string]string, error) {
+	values := make(map[string]string, len(records))
 	for _, record := range records {
-		name := stringColumn(record, "setting_name")
+		name := stringColumn(record, nameColumn)
 		if name == "" {
-			return nil, errors.New("settings row carries no setting_name")
+			return nil, fmt.Errorf("row carries no %s", nameColumn)
 		}
-		settings[name] = stringColumn(record, "setting_value")
+		values[name] = stringColumn(record, valueColumn)
 	}
-	return settings, nil
+	return values, nil
 }
 
 func (c *boltClient) SetSetting(ctx context.Context, name, value string) error {

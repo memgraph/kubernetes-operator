@@ -218,6 +218,15 @@ type Client interface {
 	// report, because retrying changes neither.
 	SetSetting(ctx context.Context, name, value string) error
 
+	// ShowConfig reports every flag the running Memgraph has, flag name to
+	// current value, as SHOW CONFIG lists them: the authority on what is a
+	// flag at all, which the operator consults rather than keeping a list.
+	// Memgraph leaves its hidden flags out of the view; the settings package
+	// knows the two a spec may legitimately name. Every instance answers it,
+	// coordinators included, and the answer is the same for every pod of one
+	// image, so one read covers the cluster.
+	ShowConfig(ctx context.Context) (map[string]string, error)
+
 	// ShowCoordinatorSettings reports the cluster-wide coordinator settings,
 	// setting name to value, as SHOW COORDINATOR SETTINGS lists them. Only a
 	// coordinator answers it, and a follower relays the leader's answer; a

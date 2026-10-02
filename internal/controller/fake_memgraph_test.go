@@ -72,6 +72,11 @@ type fakeMemgraph struct {
 	// makes SHOW answer with no rows the way a real coordinator does.
 	coordinatorSettings        map[string]string
 	coordinatorSettingsUnknown bool
+	// knownFlags is the SHOW CONFIG view every instance answers with: the
+	// flags the suites use, each at some current value. configUnknown makes
+	// the query fail, the way a Memgraph without the view would.
+	knownFlags    map[string]string
+	configUnknown bool
 	// rejected are commands the cluster refuses whatever its state, keyed by
 	// command prefix. It stands in for the rejections the operator cannot reason
 	// about — a coordinator refusing a registration a healthy one would accept —
@@ -113,11 +118,37 @@ func (f *fakeMemgraph) setUnreachable(address string, unreachable bool) {
 	f.unreachable[address] = unreachable
 }
 
+// baselineConfig is the SHOW CONFIG view of the fake's Memgraph: every flag a
+// spec in this suite names, hidden ones excluded as the real view excludes
+// them. A key not in it is a flag the fake's Memgraph does not have.
+func baselineConfig() map[string]string {
+	return map[string]string{
+		"log_level":                   "TRACE",
+		"log_retention_days":          "35",
+		"log_file":                    "/var/log/memgraph/memgraph.log",
+		"query_execution_timeout_sec": "600",
+		"storage_snapshot_interval":   "300",
+		"storage_snapshot_on_exit":    "true",
+		"memory_limit":                "0",
+		"bolt_num_workers":            "0",
+		"query_modules_directory":     "/usr/lib/memgraph/query_modules",
+		"experimental_enabled":        "",
+		"bolt_port":                   "7687",
+	}
+}
+
+// setConfigUnknown makes every SHOW CONFIG fail, or answer again.
+func (f *fakeMemgraph) setConfigUnknown(unknown bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.configUnknown = unknown
+}
+
 // baselineCoordinatorSettings is the SHOW COORDINATOR SETTINGS view of a
 // cluster nobody has changed a setting on: Memgraph 3.13.0's defaults.
 func baselineCoordinatorSettings() map[string]string {
 	return map[string]string{
-		"enabled_reads_on_main":               string(settingOff),
+		readsOnMainSetting:                    string(settingOff),
 		"sync_failover_only":                  string(settingOn),
 		"max_failover_replica_lag":            "10",
 		"max_replica_read_lag":                "10",
@@ -549,6 +580,23 @@ func (c *fakeClient) SetSetting(_ context.Context, name, value string) error {
 		settings[name] = value
 		return nil
 	})
+}
+
+// ShowConfig answers with the flags the fake's Memgraph has, the same on
+// every instance.
+func (c *fakeClient) ShowConfig(context.Context) (map[string]string, error) {
+	c.cluster.mu.Lock()
+	defer c.cluster.mu.Unlock()
+	if c.closed {
+		return nil, fmt.Errorf("fake memgraph: connection to %s already closed", c.address)
+	}
+	if c.cluster.configUnknown {
+		return nil, fmt.Errorf("fake memgraph: %s does not answer SHOW CONFIG", c.address)
+	}
+	if c.cluster.knownFlags == nil {
+		c.cluster.knownFlags = baselineConfig()
+	}
+	return maps.Clone(c.cluster.knownFlags), nil
 }
 
 // ShowCoordinatorSettings relays the cluster-wide view, or nothing when the

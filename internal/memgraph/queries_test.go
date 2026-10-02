@@ -347,7 +347,7 @@ func TestSetSettingQuery(t *testing.T) {
 	for _, tc := range []struct {
 		name, value, want string
 	}{
-		{logLevelSetting, "INFO", `SET DATABASE SETTING "` + logLevelSetting + `" TO "INFO"`},
+		{logLevelSetting, "WARNING", `SET DATABASE SETTING "` + logLevelSetting + `" TO "WARNING"`},
 		{"timezone", "", `SET DATABASE SETTING "timezone" TO ""`},
 		{"server.name", `a"b\c 'd' $e {f} %g`, `SET DATABASE SETTING "server.name" TO "a\"b\\c 'd' $e {f} %g"`},
 		{"timezone", "Europe/Zagreb", `SET DATABASE SETTING "timezone" TO "Europe/Zagreb"`},
@@ -365,5 +365,11 @@ func TestCoordinatorSettingQueries(t *testing.T) {
 	got := setCoordinatorSettingQuery("instance_down_timeout_sec", "7")
 	if want := `SET COORDINATOR SETTING "instance_down_timeout_sec" TO "7"`; got != want {
 		t.Errorf("setCoordinatorSettingQuery() = %s, want %s", got, want)
+	}
+}
+
+func TestShowConfigQuery(t *testing.T) {
+	if want := "SHOW CONFIG"; showConfigQuery != want {
+		t.Errorf("showConfigQuery = %q, want %q", showConfigQuery, want)
 	}
 }

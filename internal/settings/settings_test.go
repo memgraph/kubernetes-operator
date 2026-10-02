@@ -30,6 +30,10 @@ const (
 	hopsLimit         = "hops_limit_partial_results"
 	downTimeout       = "instance_down_timeout_sec"
 	readsOnMain       = "enabled_reads_on_main"
+	stderrFlag        = "also_log_to_stderr"
+	schedulerName     = "scheduler"
+	snapshotOnExit    = "storage_snapshot_on_exit"
+	infoValue         = "INFO"
 	on                = "true"
 	off               = "false"
 
@@ -204,5 +208,34 @@ func TestDiff(t *testing.T) {
 				t.Errorf("Diff mismatch (-want +got):\n%s", diff)
 			}
 		})
+	}
+}
+
+// TestClassify pins how a role's keys are sorted against the two views a
+// coordinator answers with, in either spelling, and that the hidden flags
+// SHOW CONFIG leaves out still count as flags.
+func TestClassify(t *testing.T) {
+	config := map[string]string{logLevelCanonical: infoValue, snapshotOnExit: "false", "memory_limit": "0"}
+	coordinatorSettings := map[string]string{readsOnMain: off, downTimeout: "5"}
+
+	got := Classify([]string{
+		"log-level", snapshotOnExit, "also-log-to-stderr", schedulerName,
+		"enabled-reads-on-main", downTimeout,
+		"enabled_reads_on_mai", "memory-limti",
+	}, config, coordinatorSettings)
+	want := Classification{
+		Flags:               []string{stderrFlag, logLevelCanonical, schedulerName, snapshotOnExit},
+		CoordinatorSettings: []string{readsOnMain, downTimeout},
+		Unknown:             []string{"enabled_reads_on_mai", "memory_limti"},
+	}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("Classify mismatch (-want +got):\n%s", diff)
+	}
+
+	// With no config view nothing is a flag: the caller must read that as
+	// "cannot tell", which is why it is pinned here rather than guessed at.
+	empty := Classify([]string{logLevelCanonical, readsOnMain}, nil, coordinatorSettings)
+	if len(empty.Flags) != 0 || len(empty.Unknown) != 1 || len(empty.CoordinatorSettings) != 1 {
+		t.Errorf("Classify with no config view = %+v, want every non-coordinator key unknown", empty)
 	}
 }

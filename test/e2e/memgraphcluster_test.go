@@ -807,20 +807,49 @@ var _ = Describe("MemgraphCluster", Ordered, func() {
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred(), "the MemgraphCluster must stay Updated: nothing about the pod template changed")
 
-		By("setting a coordinator setting, which is written to Raft once and restarts nothing either")
+		By("setting a coordinator setting beside the coordinators' flags, which is written to Raft once")
 		cmd = exec.Command("kubectl", "patch", "memgraphcluster", quickstartCluster.name,
 			"-n", quickstartCluster.namespace, "--type=merge", "-p",
-			`{"spec":{"coordinatorSettings":{"instance_down_timeout_sec":"7"}}}`)
+			`{"spec":{"flags":{"coordinators":{"query-execution-timeout-sec":"123","instance-down-timeout-sec":"7"}}}}`)
 		_, err = utils.Run(cmd)
-		Expect(err).NotTo(HaveOccurred(), "the operator must accept the coordinatorSettings block")
+		Expect(err).NotTo(HaveOccurred(), "the operator must accept a coordinator setting under flags.coordinators")
 		Eventually(func(g Gomega) {
 			value, err := quickstartCluster.coordinatorSetting("instance_down_timeout_sec")
 			g.Expect(err).NotTo(HaveOccurred())
 			g.Expect(value).To(Equal("7"))
 		}, 3*time.Minute, 5*time.Second).Should(Succeed())
+		quickstartCluster.awaitConverged(2 * time.Minute)
 		after, err = quickstartCluster.podUIDs()
 		Expect(err).NotTo(HaveOccurred())
 		Expect(after).To(Equal(before), "a coordinator setting must not replace any pod")
+
+		By("naming a flag Memgraph does not have, which is reported and restarts nothing")
+		cmd = exec.Command("kubectl", "patch", "memgraphcluster", quickstartCluster.name,
+			"-n", quickstartCluster.namespace, "--type=merge", "-p",
+			`{"spec":{"flags":{"coordinators":{"query-execution-timeout-sec":"123","instance-down-timeout-sec":"7","enabled-reads-on-mai":"true"}}}}`)
+		_, err = utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred())
+		Eventually(func(g Gomega) {
+			cmd := exec.Command("kubectl", "get", "memgraphcluster", quickstartCluster.name, "-n", quickstartCluster.namespace,
+				"-o", `jsonpath={.status.conditions[?(@.type=="Converged")].reason}`)
+			reason, err := utils.Run(cmd)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(reason).To(Equal("UnknownFlags"))
+		}, 3*time.Minute, 5*time.Second).Should(Succeed())
+		Consistently(func(g Gomega) {
+			now, err := quickstartCluster.podUIDs()
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(now).To(Equal(before), "a flag that does not exist must not replace any pod")
+		}, time.Minute, 5*time.Second).Should(Succeed())
+		cmd = exec.Command("kubectl", "patch", "memgraphcluster", quickstartCluster.name,
+			"-n", quickstartCluster.namespace, "--type=merge", "-p",
+			`{"spec":{"flags":{"coordinators":{"query-execution-timeout-sec":"123","instance-down-timeout-sec":"7"}}}}`)
+		_, err = utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred())
+		quickstartCluster.awaitConverged(3 * time.Minute)
+		after, err = quickstartCluster.podUIDs()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(after).To(Equal(before), "removing an unknown flag must not replace any pod either")
 
 		By("confirming the flag file carries the value for the next start")
 		for _, role := range []string{"coordinator", "data"} {

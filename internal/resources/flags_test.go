@@ -30,6 +30,8 @@ import (
 // The flag names and values the cases in this package share.
 const (
 	logLevelFlag    = "log-level"
+	retentionFlag   = "log-retention-days"
+	retentionKey    = "log_retention_days"
 	memoryLimitFlag = "memory-limit"
 	snapshotOnExit  = "storage-snapshot-on-exit"
 
@@ -105,7 +107,7 @@ func TestFlagsConfigMapMergesTheRole(t *testing.T) {
 	wantFlags := map[string]string{
 		"also_log_to_stderr":        string(flagOn),
 		"log_level":                 string(infoLevel),
-		"log_retention_days":        "35",
+		retentionKey:                "35",
 		"memory_limit":              "2048",
 		"storage_snapshot_interval": "",
 		"storage_snapshot_on_exit":  string(flagOff),
@@ -115,21 +117,23 @@ func TestFlagsConfigMapMergesTheRole(t *testing.T) {
 	}
 }
 
-// TestFlagsRestartHashFollowsStartupFlagsOnly is the contract the whole
-// feature rests on: a change to a run-time flag leaves the pod template as it
-// was, so nothing rolls, while a change to a startup-only flag changes the
-// template, so the roll carries it. Both are read off the template annotation
-// the StatefulSet revision hashes.
-func TestFlagsRestartHashFollowsStartupFlagsOnly(t *testing.T) {
-	hashOf := func(flags map[string]memgraphcomv1alpha1.FlagValue) string {
+// TestFlagsAnnotationFollowsStartupFlagsOnly is the contract the roll rests
+// on: a change to a run-time flag leaves the pod template as it was, so
+// nothing rolls, while a change to a startup-only flag changes the template.
+// The annotation carries the startup keys with a digest of each value, so the
+// controller can also tell *which* keys a pod lacks and ask Memgraph what they
+// are. Both are read off the template annotation the StatefulSet revision
+// hashes.
+func TestFlagsAnnotationFollowsStartupFlagsOnly(t *testing.T) {
+	annotationOf := func(flags map[string]memgraphcomv1alpha1.FlagValue) string {
 		cluster := minimalCluster()
 		cluster.Spec.Flags = memgraphcomv1alpha1.FlagsSpec{Data: flags}
-		return dataStatefulSet(cluster).Spec.Template.Annotations[resources.FlagsRestartAnnotation]
+		return dataStatefulSet(cluster).Spec.Template.Annotations[resources.FlagsAnnotation]
 	}
 
-	base := hashOf(nil)
-	if base != defaultRestartHash {
-		t.Errorf("default restart hash = %q, want %q", base, defaultRestartHash)
+	base := annotationOf(nil)
+	if base != defaultFlagsAnnotation {
+		t.Errorf("default flags annotation = %q, want %q", base, defaultFlagsAnnotation)
 	}
 
 	for name, flags := range map[string]map[string]memgraphcomv1alpha1.FlagValue{
@@ -138,8 +142,8 @@ func TestFlagsRestartHashFollowsStartupFlagsOnly(t *testing.T) {
 		"a run-time flag added":                 {"query-execution-timeout-sec": "10"},
 		"a run-time default restated":           {"also-log-to-stderr": flagOn},
 	} {
-		if got := hashOf(flags); got != base {
-			t.Errorf("%s: restart hash changed to %q, so the pods would roll for a run-time flag", name, got)
+		if got := annotationOf(flags); got != base {
+			t.Errorf("%s: annotation changed to %q, so the pods would roll for a run-time flag", name, got)
 		}
 	}
 
@@ -147,22 +151,44 @@ func TestFlagsRestartHashFollowsStartupFlagsOnly(t *testing.T) {
 	for name, flags := range map[string]map[string]memgraphcomv1alpha1.FlagValue{
 		"a startup-only flag added":                 {snapshotOnExit: flagOff},
 		"a startup-only flag changed":               {snapshotOnExit: flagOn},
-		"a startup-only default overridden":         {"log-retention-days": "7"},
+		"a startup-only default overridden":         {retentionFlag: "7"},
 		"a startup-only flag beside a run-time one": {memoryLimitFlag: "2048", logLevelFlag: infoLevel},
+		// Not a flag at all, but the builder cannot know that: it is in the
+		// annotation, and the controller asks Memgraph before restarting.
+		"a coordinator setting": {"enabled_reads_on_main": flagOn},
 	} {
-		got := hashOf(flags)
-		for other, hash := range seen {
-			if got == hash {
-				t.Errorf("%s: restart hash %q equals the one for %q, so the pods would not roll", name, got, other)
+		got := annotationOf(flags)
+		for other, annotation := range seen {
+			if got == annotation {
+				t.Errorf("%s: annotation %q equals the one for %q", name, got, other)
 			}
 		}
 		seen[name] = got
 	}
 
-	// The coordinators' hash follows their own flags, not the data instances'.
+	// The keys are legible: which ones changed is what the controller asks.
+	changed := resources.ChangedFlags(base, annotationOf(map[string]memgraphcomv1alpha1.FlagValue{
+		snapshotOnExit: flagOff, retentionFlag: "7", logLevelFlag: infoLevel,
+	}))
+	if diff := cmp.Diff([]string{retentionKey, "storage_snapshot_on_exit"}, changed); diff != "" {
+		t.Errorf("ChangedFlags mismatch (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff([]string{retentionKey}, resources.ChangedFlags(base, annotationOf(
+		map[string]memgraphcomv1alpha1.FlagValue{retentionFlag: "7"}))); diff != "" {
+		t.Errorf("ChangedFlags for one key mismatch (-want +got):\n%s", diff)
+	}
+	if got := resources.ChangedFlags(base, base); len(got) != 0 {
+		t.Errorf("ChangedFlags of identical annotations = %v, want none", got)
+	}
+	// A pod from before the annotation existed differs in every current key.
+	if diff := cmp.Diff([]string{retentionKey}, resources.ChangedFlags("", base)); diff != "" {
+		t.Errorf("ChangedFlags from an empty annotation mismatch (-want +got):\n%s", diff)
+	}
+
+	// The coordinators' annotation follows their own flags, not the data instances'.
 	cluster := minimalCluster()
 	cluster.Spec.Flags = memgraphcomv1alpha1.FlagsSpec{Data: map[string]memgraphcomv1alpha1.FlagValue{memoryLimitFlag: "2048"}}
-	if got := coordinatorStatefulSet(cluster).Spec.Template.Annotations[resources.FlagsRestartAnnotation]; got != base {
-		t.Errorf("coordinator restart hash = %q after a data flag change, want %q", got, base)
+	if got := coordinatorStatefulSet(cluster).Spec.Template.Annotations[resources.FlagsAnnotation]; got != base {
+		t.Errorf("coordinator annotation = %q after a data flag change, want %q", got, base)
 	}
 }

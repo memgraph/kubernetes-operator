@@ -538,3 +538,31 @@ func TestStaleStatefulSetStatusStopsTheRoll(t *testing.T) {
 		t.Fatalf("expected the roll to proceed once both statuses are current, got %+v", decision)
 	}
 }
+
+// TestCurrentPodsNeedNoRestart pins the caller's one override: a pod whose
+// revision differs from the role's but which the caller marked Current — the
+// changed flags were coordinator settings or names Memgraph does not have —
+// is neither restarted nor waited on, and a role of such pods is Done.
+func TestCurrentPodsNeedNoRestart(t *testing.T) {
+	data := dataRole(oldRevision, oldRevision)
+	coordinators := coordinatorRole(oldRevision, oldRevision, oldRevision)
+	for i := range coordinators.Pods {
+		coordinators.Pods[i].Current = true
+	}
+	data.Pods[1].Current = true
+
+	// The data pod left outdated is restarted; the Current one is not even a
+	// candidate, MAIN or not.
+	decision := Next(data, coordinators, cluster(2, 3, "instance_1"), caughtUp("instance_0", "instance_1"))
+	if decision.Action != Delete || decision.Pod.Name != data.Pods[0].Name {
+		t.Fatalf("Next() = %+v, want the one outdated data pod deleted", decision)
+	}
+
+	data.Pods[0].Current = true
+	if decision := Next(data, coordinators, cluster(2, 3, "instance_1"), caughtUp("instance_0", "instance_1")); decision.Action != Done {
+		t.Errorf("Next() with every pod Current = %+v, want Done", decision)
+	}
+	if InProgress(coordinators) || InProgress(data) {
+		t.Error("InProgress() with every pod Current, want false")
+	}
+}

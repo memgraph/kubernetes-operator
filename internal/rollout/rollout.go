@@ -101,6 +101,15 @@ type Pod struct {
 	// StatefulSet controller.
 	RevisionHash string
 
+	// Current, set by the caller, says the pod differs from its role's current
+	// revision only in ways that need no restart: the keys of the flags
+	// annotation that changed are, by the running Memgraph's own account,
+	// coordinator settings written to Raft or names it does not have. Such a
+	// pod is up to date for this decision however its revision label reads.
+	// The caller decides it, not this package, because deciding takes a
+	// coordinator's answer and this package observes nothing.
+	Current bool
+
 	// Ready is the pod's Kubernetes readiness, which for these pods is a TCP
 	// connect to a port. It is necessary but never sufficient: an instance
 	// answering on its port has not necessarily rejoined replication.
@@ -365,8 +374,8 @@ func present(role Role) (Decision, bool) {
 	return Decision{}, true
 }
 
-// outdated are the role's pods not carrying its current revision, which is the
-// work left to do.
+// outdated are the role's pods not carrying its current revision and not
+// declared Current by the caller, which is the work left to do.
 //
 // A StatefulSet without a status yet has no revision to compare against, and a
 // pod without the label cannot be classified; both read as up to date. Guessing
@@ -377,22 +386,23 @@ func outdated(role Role) []Pod {
 	}
 	var pending []Pod
 	for _, pod := range role.Pods {
-		if pod.RevisionHash != "" && pod.RevisionHash != role.UpdateRevision {
+		if pod.RevisionHash != "" && pod.RevisionHash != role.UpdateRevision && !pod.Current {
 			pending = append(pending, pod)
 		}
 	}
 	return pending
 }
 
-// updated are the role's pods already carrying its current revision — the ones
-// this roll has restarted, once it is under way.
+// updated are the role's pods already carrying its current revision, or
+// Current despite their label — the ones this roll has restarted or need not
+// restart, once it is under way.
 func updated(role Role) []Pod {
 	if role.UpdateRevision == "" {
 		return nil
 	}
 	var done []Pod
 	for _, pod := range role.Pods {
-		if pod.RevisionHash == role.UpdateRevision {
+		if pod.RevisionHash == role.UpdateRevision || pod.Current {
 			done = append(done, pod)
 		}
 	}

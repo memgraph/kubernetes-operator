@@ -63,11 +63,12 @@ const (
 	flagsPath   = "/etc/memgraph-flags"
 	flagFile    = flagsPath + "/memgraph.flags"
 
-	// defaultRestartHash is the restart hash of a role without spec.flags:
-	// sha256 over the one startup-only default, "log_retention_days=35\n".
+	// defaultFlagsAnnotation is the flags annotation of a role without
+	// spec.flags: the one startup-only default, log_retention_days, with the
+	// digest of its value (the first sixteen hex characters of sha256("35")).
 	// The two run-time defaults, log_level and also_log_to_stderr, are not
 	// part of it.
-	defaultRestartHash = "602679c59f5afaa94e6bef046ff00efdb3397a6b4741bee429ebbd6910ba1aa6"
+	defaultFlagsAnnotation = "log_retention_days=9f14025af0065b30\n"
 
 	// The Bolt TLS Secret a fixture names, and the volume the builder mounts
 	// it as.
@@ -410,11 +411,11 @@ func expectedVolumes(component string) []corev1.Volume {
 }
 
 // expectedTemplateMeta is the pod template metadata of a role without
-// spec.flags: its labels, and the restart hash of the default flag file.
+// spec.flags: its labels, and the flags annotation of the default flag file.
 func expectedTemplateMeta(component string) metav1.ObjectMeta {
 	return metav1.ObjectMeta{
 		Labels:      expectedLabels(component),
-		Annotations: map[string]string{"memgraph.com/flags-restart-hash": defaultRestartHash},
+		Annotations: map[string]string{"memgraph.com/flags": defaultFlagsAnnotation},
 	}
 }
 

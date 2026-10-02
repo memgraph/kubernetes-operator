@@ -312,6 +312,11 @@ spec:
   # - Any other flag is read at startup only, so changing it rolls both
   #   roles' pods in the usual order: data instances first, MAIN last of them,
   #   then the coordinators with the Raft leader last.
+  # - A coordinator setting under coordinators (enabled_reads_on_main,
+  #   instance_down_timeout_sec, ...; whatever SHOW COORDINATOR SETTINGS
+  #   lists) is written to Raft once. No pod restarts.
+  # - A name Memgraph does not have restarts nothing and is reported as
+  #   Converged=False with reason UnknownFlags until you fix or remove it.
   # - Removing a flag issues no SET: a run-time setting keeps its value until
   #   the instance next restarts without the flag.
   #
@@ -324,24 +329,18 @@ spec:
     coordinators:
       # Run-time: edit it and every coordinator logs at the new level at once.
       log-level: INFO
+      # Coordinator settings: SHOW COORDINATOR SETTINGS lists them, and they
+      # are written to Raft once with SET COORDINATOR SETTING. Nothing
+      # restarts for them. Serve reads from MAIN too, the one knob a
+      # single-data-instance cluster needs, since the routing table otherwise
+      # lists no reader at all.
+      enabled-reads-on-main: "true"
+      # How long a coordinator waits before declaring an instance down.
+      instance-down-timeout-sec: "5"
     data:
       log-level: INFO
-      # Startup-only: changing it rolls the data pods,
+      # Startup-only: changing it rolls the data pods, MAIN last of them.
       storage-snapshot-on-exit: "false"
-  # The cluster-wide coordinator settings, which are not flags: SHOW
-  # COORDINATOR SETTINGS lists them and SET COORDINATOR SETTING changes them,
-  # once, in Raft, for every coordinator. Nothing restarts and nothing lands
-  # in a flag file. Keys are the setting names as Memgraph spells them; the
-  # three boolean ones (enabled_reads_on_main, sync_failover_only,
-  # global_read_only) take "true"/"false", the numeric ones digits. Removing a
-  # key leaves the setting where it is. See docs/flags.md.
-  coordinatorSettings:
-    # How long a coordinator waits before declaring an instance down. Lower
-    # for a faster failover, higher on a network that drops heartbeats.
-    instance_down_timeout_sec: "5"
-    # Serve reads from MAIN too. The one knob a single-data-instance cluster
-    # needs, since the routing table otherwise lists no reader at all.
-    enabled_reads_on_main: "false"
   # Any pod volume the operator does not provision itself, plus where to mount
   # it in the Memgraph container. Entries are plain core/v1 volumes and volume
   # mounts, appended after the operator's own — the usual reason to reach for

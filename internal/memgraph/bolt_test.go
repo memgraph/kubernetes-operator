@@ -70,3 +70,23 @@ func TestShowSettingsParsing(t *testing.T) {
 		t.Error("settingsFromRecords() accepted a row without a setting_name")
 	}
 }
+
+// TestShowConfigParsing pins the SHOW CONFIG columns the client reads a flag
+// by: the name and its current value, the two of its four columns the
+// operator uses.
+func TestShowConfigParsing(t *testing.T) {
+	const nameColumn, level = "name", "DEBUG"
+	columns := []string{nameColumn, "default_value", "current_value", "description"}
+	records := []*db.Record{
+		{Keys: columns, Values: []any{"log_level", "WARNING", level, "Minimum log level."}},
+		{Keys: columns, Values: []any{"memory_limit", "0", "0", "Total memory limit in MiB."}},
+	}
+	got, err := namedValuesFromRecords(records, nameColumn, "current_value")
+	if err != nil {
+		t.Fatalf("namedValuesFromRecords() error = %v", err)
+	}
+	want := map[string]string{"log_level": level, "memory_limit": "0"}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("SHOW CONFIG parsing mismatch (-want +got):\n%s", diff)
+	}
+}

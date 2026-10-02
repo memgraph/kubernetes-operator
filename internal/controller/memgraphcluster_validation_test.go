@@ -226,10 +226,13 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 				ExtraEnv: memgraphcomv1alpha1.ExtraEnvSpec{
 					Data: []memgraphcomv1alpha1.EnvVar{{Name: "DATA_LABEL_ONE", Value: "one"}},
 				},
-				CoordinatorSettings: map[string]memgraphcomv1alpha1.SettingValue{
-					downTimeoutSetting: "7", globalReadOnly: settingOff, futureSetting: "x",
-				},
 				Flags: memgraphcomv1alpha1.FlagsSpec{
+					// Coordinator settings live beside the coordinators' flags, and
+					// a name the operator does not know passes through for the
+					// coordinators to judge.
+					Coordinators: map[string]memgraphcomv1alpha1.FlagValue{
+						downTimeoutSetting: "7", globalReadOnly: settingOff, futureSetting: "x",
+					},
 					// The second one shares a prefix with the reserved bolt-port
 					// without being it: the guard matches whole flag names, so a
 					// legitimate neighbour is not caught by it. The third is a
@@ -248,9 +251,9 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 			Expect(stored.Spec.ReadinessProbe.PeriodSeconds).To(BeNil(),
 				"an unset timing stays unset; its default is resolved by the builders, not the schema")
 			Expect(stored.Spec.ExtraEnv.Data).To(HaveLen(1))
-			Expect(stored.Spec.CoordinatorSettings).To(Equal(map[string]memgraphcomv1alpha1.SettingValue{
+			Expect(stored.Spec.Flags.Coordinators).To(Equal(map[string]memgraphcomv1alpha1.FlagValue{
 				downTimeoutSetting: "7", globalReadOnly: settingOff, futureSetting: "x",
-			}), "a setting the operator does not know passes through for the coordinators to judge")
+			}))
 			Expect(stored.Spec.Flags.Data).To(Equal(map[string]memgraphcomv1alpha1.FlagValue{
 				snapshotOnExitFlag: flagOn,
 				"bolt-num-workers": "8",
@@ -819,24 +822,32 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 					Flags: memgraphcomv1alpha1.FlagsSpec{Coordinators: map[string]memgraphcomv1alpha1.FlagValue{logLevelUnderscore: "info"}},
 				},
 				"log-level must be one of"),
-			// The coordinator settings the operator knows are checked for the
-			// value shape Memgraph parses, so a typo is caught here and not as a
-			// SET the coordinators refuse on every pass.
+			// The coordinator settings the operator knows by name are checked for
+			// the value shape Memgraph parses, so a typo is caught here and not as
+			// a SET the coordinators refuse on every pass; and they belong to the
+			// coordinators, so the data map refuses them.
 			Entry("a boolean coordinator setting with a non-boolean value", "invalid-coordinator-setting-bool",
 				memgraphcomv1alpha1.MemgraphClusterSpec{
-					CoordinatorSettings: map[string]memgraphcomv1alpha1.SettingValue{"enabled_reads_on_main": "yes"},
+					Flags: memgraphcomv1alpha1.FlagsSpec{Coordinators: map[string]memgraphcomv1alpha1.FlagValue{readsOnMainSetting: "yes"}},
 				},
 				`take "true" or "false"`),
 			Entry("a numeric coordinator setting with a non-numeric value", "invalid-coordinator-setting-number",
 				memgraphcomv1alpha1.MemgraphClusterSpec{
-					CoordinatorSettings: map[string]memgraphcomv1alpha1.SettingValue{downTimeoutSetting: "5s"},
+					Flags: memgraphcomv1alpha1.FlagsSpec{Coordinators: map[string]memgraphcomv1alpha1.FlagValue{"instance-down-timeout-sec": "5s"}},
 				},
 				"take a non-negative integer"),
-			Entry("a coordinator setting key that is not a setting name", "invalid-coordinator-setting-key",
+			Entry("a coordinator setting under the data role", "invalid-coordinator-setting-on-data",
 				memgraphcomv1alpha1.MemgraphClusterSpec{
-					CoordinatorSettings: map[string]memgraphcomv1alpha1.SettingValue{"instance-down-timeout-sec": "5"},
+					Flags: memgraphcomv1alpha1.FlagsSpec{Data: map[string]memgraphcomv1alpha1.FlagValue{downTimeoutSetting: "5"}},
 				},
-				"setting names as Memgraph spells them"),
+				"set under flags.coordinators"),
+			// The license flags are secret material like the AWS keys; the license
+			// comes from the secrets block.
+			Entry("a flag carrying the license", "invalid-flags-license",
+				memgraphcomv1alpha1.MemgraphClusterSpec{
+					Flags: memgraphcomv1alpha1.FlagsSpec{Coordinators: map[string]memgraphcomv1alpha1.FlagValue{"license-key": "hunter2"}},
+				},
+				"secret material"),
 			// Two spellings of one flag would be two lines for one flag, with
 			// gflags silently taking whichever came last.
 			Entry("two keys spelling the same flag", "invalid-flags-duplicate",

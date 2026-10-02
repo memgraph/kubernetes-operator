@@ -51,13 +51,19 @@ const (
 	flagsMountPath = "/etc/memgraph-flags"
 	flagFilePath   = flagsMountPath + "/" + FlagFileKey
 
-	// FlagsRestartAnnotation is the pod-template annotation that carries a
-	// hash of the role's startup-only flags. It is what turns a change to one
-	// of them into a changed pod template, and so into a roll, while leaving
-	// a change to a run-time flag — which is applied with SET DATABASE
-	// SETTING and read from the file at the next start — out of the revision
-	// entirely.
-	FlagsRestartAnnotation = "memgraph.com/flags-restart-hash"
+	// FlagsAnnotation is the pod-template annotation that carries, one per
+	// line, every startup-only key of the role's flag file with a digest of
+	// its value. It is what makes a change to one of them a changed pod
+	// template, and what lets the controller tell *which* keys a pod was
+	// started without: pod template annotations propagate to the pods, so a
+	// pod carries the keys it was started with and the StatefulSet template
+	// carries the keys the spec wants now. A key Memgraph says is not a flag at
+	// all — a coordinator setting, or a name it does not have — then needs no
+	// restart however much the template differs. Run-time flags are left out
+	// entirely: they reach a running instance with SET DATABASE SETTING and
+	// the file carries them for the next start, so a change to them must not
+	// change the template.
+	FlagsAnnotation = "memgraph.com/flags"
 
 	flagsComponent = "flags"
 )
@@ -85,19 +91,6 @@ func CoordinatorFlags(cluster *memgraphcomv1alpha1.MemgraphCluster) map[string]s
 // DataFlags is the same for the data instance pods.
 func DataFlags(cluster *memgraphcomv1alpha1.MemgraphCluster) map[string]string {
 	return roleFlags(normalize(cluster.Spec).dataRole)
-}
-
-// CoordinatorSettings is the cluster-wide coordinator settings the spec asks
-// for, by setting name, as the controller diffs them against SHOW COORDINATOR
-// SETTINGS. They are not flags: nothing here reaches a flag file or a pod
-// template, and there is no default to merge in — a key the spec does not
-// name is the coordinators' to keep.
-func CoordinatorSettings(cluster *memgraphcomv1alpha1.MemgraphCluster) map[string]string {
-	desired := make(map[string]string, len(cluster.Spec.CoordinatorSettings))
-	for key, value := range cluster.Spec.CoordinatorSettings {
-		desired[key] = string(value)
-	}
-	return desired
 }
 
 // CoordinatorFlagsConfigMap builds the ConfigMap holding the coordinators'
@@ -175,22 +168,59 @@ func flagFile(flags map[string]string) string {
 	return b.String()
 }
 
-// flagsRestartHash hashes the startup-only flags of the file, name and value,
-// for the pod-template annotation. Run-time flags are left out: they reach a
-// running instance without a restart and the file carries them for the next
-// one, so a change to them must not change the template.
-func flagsRestartHash(flags map[string]string) string {
-	h := sha256.New()
+// flagsDigests renders the startup-only keys of the file for the pod-template
+// annotation: one "key=digest" line per key, sorted, the digest being the
+// first sixteen hex characters of the value's SHA-256. The value itself is
+// not written — a flag value can be 4096 characters and an annotation has to
+// stay small — and a digest is enough, since the only question ever asked of
+// two annotations is which keys differ. Run-time flags are left out, for the
+// reason FlagsAnnotation gives.
+func flagsDigests(flags map[string]string) string {
+	var b strings.Builder
 	for _, key := range slices.Sorted(maps.Keys(flags)) {
 		if settings.IsRuntime(key) {
 			continue
 		}
-		h.Write([]byte(key))
-		h.Write([]byte{'='})
-		h.Write([]byte(flags[key]))
-		h.Write([]byte{'\n'})
+		sum := sha256.Sum256([]byte(flags[key]))
+		b.WriteString(key)
+		b.WriteString("=")
+		b.WriteString(hex.EncodeToString(sum[:8]))
+		b.WriteString("\n")
 	}
-	return hex.EncodeToString(h.Sum(nil))
+	return b.String()
+}
+
+// ParseFlagsDigests reads a FlagsAnnotation value back into key to digest.
+// A pod from before the annotation existed, or a malformed line, yields
+// nothing for that line; the controller then sees every current key as new.
+func ParseFlagsDigests(annotation string) map[string]string {
+	digests := map[string]string{}
+	for line := range strings.SplitSeq(annotation, "\n") {
+		key, digest, ok := strings.Cut(line, "=")
+		if ok && key != "" {
+			digests[key] = digest
+		}
+	}
+	return digests
+}
+
+// ChangedFlags are the keys whose digest differs between two FlagsAnnotation
+// values — added, removed or changed — sorted. It is what a pod is measured
+// against the current template by.
+func ChangedFlags(before, after string) []string {
+	old, current := ParseFlagsDigests(before), ParseFlagsDigests(after)
+	changed := map[string]bool{}
+	for key, digest := range current {
+		if old[key] != digest {
+			changed[key] = true
+		}
+	}
+	for key := range old {
+		if _, ok := current[key]; !ok {
+			changed[key] = true
+		}
+	}
+	return slices.Sorted(maps.Keys(changed))
 }
 
 // flagsVolume is the ConfigMap volume a role's pods mount the flag file from.

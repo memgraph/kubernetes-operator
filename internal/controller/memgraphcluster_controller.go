@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"time"
@@ -730,6 +731,14 @@ func (r *MemgraphClusterReconciler) replicaCounts(
 type rolloutRoles struct {
 	coordinators rollout.Role
 	data         rollout.Role
+	// coordinatorFlags and dataFlags are each role's flags annotation as its
+	// StatefulSet template carries it now, and podFlags each pod's as it was
+	// started with, by pod name. Which keys differ between the two is what
+	// decides whether a pod that is not on the current revision needs a
+	// restart at all.
+	coordinatorFlags string
+	dataFlags        string
+	podFlags         map[string]string
 }
 
 // observeRollout reads both roles' pods and the revision their StatefulSet
@@ -754,8 +763,20 @@ func (r *MemgraphClusterReconciler) observeRollout(
 	if err != nil {
 		return rolloutRoles{}, err
 	}
-	roles.coordinators, roles.data = coordinators, data
+	roles.coordinators, roles.data = coordinators.Role, data.Role
+	roles.coordinatorFlags, roles.dataFlags = coordinators.flags, data.flags
+	roles.podFlags = map[string]string{}
+	maps.Copy(roles.podFlags, coordinators.podFlags)
+	maps.Copy(roles.podFlags, data.podFlags)
 	return roles, nil
+}
+
+// observedRole is one role's rollout view plus the flags annotations the
+// rollout package does not look at.
+type observedRole struct {
+	rollout.Role
+	flags    string
+	podFlags map[string]string
 }
 
 // observeRolloutRole reads one role's pods, in ordinal order, each tagged with
@@ -787,8 +808,8 @@ func (r *MemgraphClusterReconciler) observeRolloutRole(
 	selector map[string]string,
 	instanceName func(ordinal int32) string,
 	appliedGeneration int64,
-) (rollout.Role, error) {
-	observed := rollout.Role{Replicas: role.applied}
+) (observedRole, error) {
+	observed := observedRole{Role: rollout.Role{Replicas: role.applied}, podFlags: map[string]string{}}
 
 	var sts appsv1.StatefulSet
 	if err := r.Get(ctx, types.NamespacedName{Name: role.name, Namespace: cluster.Namespace}, &sts); err != nil {
@@ -797,15 +818,16 @@ func (r *MemgraphClusterReconciler) observeRolloutRole(
 			// pods against and nothing to restart.
 			return observed, nil
 		}
-		return rollout.Role{}, fmt.Errorf("getting StatefulSet %s: %w", role.name, err)
+		return observedRole{}, fmt.Errorf("getting StatefulSet %s: %w", role.name, err)
 	}
 	observed.UpdateRevision = sts.Status.UpdateRevision
 	observed.Stale = sts.Generation < appliedGeneration || sts.Status.ObservedGeneration != sts.Generation
+	observed.flags = sts.Spec.Template.Annotations[resources.FlagsAnnotation]
 
 	var pods corev1.PodList
 	if err := r.List(ctx, &pods,
 		client.InNamespace(cluster.Namespace), client.MatchingLabels(selector)); err != nil {
-		return rollout.Role{}, fmt.Errorf("listing pods of StatefulSet %s: %w", role.name, err)
+		return observedRole{}, fmt.Errorf("listing pods of StatefulSet %s: %w", role.name, err)
 	}
 	byName := make(map[string]*corev1.Pod, len(pods.Items))
 	for i := range pods.Items {
@@ -825,6 +847,7 @@ func (r *MemgraphClusterReconciler) observeRolloutRole(
 			RevisionHash: pod.Labels[appsv1.StatefulSetRevisionLabel],
 			Ready:        pod.DeletionTimestamp == nil && podReady(pod),
 		})
+		observed.podFlags[pod.Name] = pod.Annotations[resources.FlagsAnnotation]
 	}
 	return observed, nil
 }
@@ -1024,8 +1047,22 @@ func (r *MemgraphClusterReconciler) reconcileRegistration(
 		// already carries it for any pod the roll replaces. A pod the roll has
 		// down is simply not ready and is caught up on the next pass.
 		applied := r.reconcileSettings(ctx, cluster, replicas, roles)
-		applied.merge(r.reconcileCoordinatorSettings(ctx, cluster, leader))
+
+		// What each key of spec.flags is, by the running Memgraph's own account:
+		// a flag, a coordinator setting, or nothing it has. The two views are
+		// read once over the leader connection — every pod of one image has the
+		// same flags, and the coordinator settings are cluster-wide — and feed
+		// three decisions: which coordinators keys to SET COORDINATOR SETTING,
+		// which keys to report as unknown, and which pods a changed template
+		// leaves with nothing to restart for.
+		classes := r.classifyFlags(ctx, cluster, leader)
+		applied.merge(r.reconcileCoordinatorSettings(ctx, cluster, leader, classes))
+		applied.unknown = classes.unknownMessage()
 		converged := r.convergedCondition(ctx, cluster, topology, exposure, applied)
+
+		if waitFor, ok := exemptCurrentPods(&roles, classes); !ok {
+			return r.waitForFlagClasses(ctx, cluster, latest, converged, waitFor)
+		}
 
 		switch decision := rollout.Next(roles.data, roles.coordinators, observed, lag); decision.Action {
 		case rollout.Delete:
@@ -1158,6 +1195,11 @@ func (r *MemgraphClusterReconciler) convergedCondition(
 		log.Info("Could not apply a run-time setting", "reason", applied.rejected)
 		return notConvergedCondition(memgraphcomv1alpha1.ReasonSettingsRejected,
 			truncateMessage(strings.Join(applied.rejected, "; ")))
+	case applied.unknown != "":
+		// spec.flags names something Memgraph does not have. Nothing applies
+		// it and nothing restarts for it; only the spec can clear this.
+		log.Info("Found flags the running Memgraph does not have", "reason", applied.unknown)
+		return notConvergedCondition(memgraphcomv1alpha1.ReasonUnknownFlags, truncateMessage(applied.unknown))
 	case len(applied.pending) > 0:
 		log.Info("Waited to apply run-time settings", "pods", applied.pending)
 		return notConvergedCondition(memgraphcomv1alpha1.ReasonSettingsPending,
@@ -1174,10 +1216,13 @@ func (r *MemgraphClusterReconciler) convergedCondition(
 type settingsOutcome struct {
 	pending  []string
 	rejected []string
+	// unknown names the keys of spec.flags the running Memgraph has neither
+	// as a flag nor as a coordinator setting, per role, or is empty.
+	unknown string
 }
 
 func (o settingsOutcome) done() bool {
-	return len(o.pending) == 0 && len(o.rejected) == 0
+	return len(o.pending) == 0 && len(o.rejected) == 0 && o.unknown == ""
 }
 
 func (o *settingsOutcome) merge(other settingsOutcome) {
@@ -1208,21 +1253,29 @@ func (r *MemgraphClusterReconciler) reconcileCoordinatorSettings(
 	ctx context.Context,
 	cluster *memgraphcomv1alpha1.MemgraphCluster,
 	leader memgraph.Client,
+	classes flagClasses,
 ) settingsOutcome {
 	log := logf.FromContext(ctx)
-	desired := resources.CoordinatorSettings(cluster)
+	flags := resources.CoordinatorFlags(cluster)
+	if !classes.coordinatorSettingsKnown {
+		// Without the view nothing can be told apart, let alone written. It
+		// is only owed if the spec could name a coordinator setting at all:
+		// a role with no flags beyond the operator's defaults has nothing to
+		// wait for.
+		if len(cluster.Spec.Flags.Coordinators) == 0 {
+			return settingsOutcome{}
+		}
+		log.Info("Could not read the coordinator settings", "reason", classes.coordinatorSettingsErr)
+		return settingsOutcome{pending: []string{coordinatorSettingsSubject}}
+	}
+	desired := map[string]string{}
+	for _, key := range classes.coordinators.CoordinatorSettings {
+		desired[key] = flags[key]
+	}
 	if len(desired) == 0 {
 		return settingsOutcome{}
 	}
-	observed, err := leader.ShowCoordinatorSettings(ctx)
-	if err != nil || len(observed) == 0 {
-		reason := "no rows reported"
-		if err != nil {
-			reason = err.Error()
-		}
-		log.Info("Could not read the coordinator settings", "reason", reason)
-		return settingsOutcome{pending: []string{coordinatorSettingsSubject}}
-	}
+	observed := classes.coordinatorSettings
 	for _, change := range settings.Diff(desired, observed) {
 		if err := leader.SetCoordinatorSetting(ctx, change.Setting, change.Value); err != nil {
 			return settingsOutcome{rejected: []string{fmt.Sprintf(
@@ -1296,6 +1349,166 @@ func (r *MemgraphClusterReconciler) reconcileSettings(
 		}
 	}
 	return outcome
+}
+
+// flagClasses is what the running Memgraph said each role's flags are, with
+// the two views it said it from. configKnown and coordinatorSettingsKnown say
+// whether each view was read at all; a classification made without one is
+// not to be acted on, which is why they travel together.
+type flagClasses struct {
+	config                   map[string]string
+	configKnown              bool
+	coordinatorSettings      map[string]string
+	coordinatorSettingsKnown bool
+	coordinatorSettingsErr   string
+	coordinators             settings.Classification
+	data                     settings.Classification
+}
+
+// classifyFlags reads SHOW CONFIG and SHOW COORDINATOR SETTINGS over the
+// leader connection and sorts both roles' startup keys by them. Either view
+// may be missing — SHOW COORDINATOR SETTINGS answers with no rows without a
+// ready leader — and the result records that rather than guessing.
+func (r *MemgraphClusterReconciler) classifyFlags(
+	ctx context.Context,
+	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	leader memgraph.Client,
+) flagClasses {
+	log := logf.FromContext(ctx)
+	var classes flagClasses
+	config, err := leader.ShowConfig(ctx)
+	switch {
+	case err != nil:
+		log.Info("Could not read the flags the running Memgraph has", "reason", err.Error())
+	case len(config) == 0:
+		log.Info("Could not read the flags the running Memgraph has", "reason", "SHOW CONFIG reported no rows")
+	default:
+		classes.config, classes.configKnown = config, true
+	}
+	coordinatorSettings, err := leader.ShowCoordinatorSettings(ctx)
+	switch {
+	case err != nil:
+		classes.coordinatorSettingsErr = err.Error()
+	case len(coordinatorSettings) == 0:
+		classes.coordinatorSettingsErr = "no ready leader reported them"
+	default:
+		classes.coordinatorSettings, classes.coordinatorSettingsKnown = coordinatorSettings, true
+	}
+	if !classes.configKnown {
+		return classes
+	}
+	// Only the startup keys are classified: a run-time flag is applied through
+	// its own table, and the operator's own defaults are flags by construction.
+	classes.coordinators = settings.Classify(
+		startupKeys(cluster.Spec.Flags.Coordinators), classes.config, classes.coordinatorSettings)
+	classes.data = settings.Classify(
+		startupKeys(cluster.Spec.Flags.Data), classes.config, classes.coordinatorSettings)
+	return classes
+}
+
+// waitForFlagClasses reports that pods differ from their template in keys
+// nobody can classify yet, and requeues. Restarting them might be a restart
+// for a coordinator setting or a typo, which is what the classification exists
+// to prevent, so the roll waits instead.
+func (r *MemgraphClusterReconciler) waitForFlagClasses(
+	ctx context.Context,
+	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	latest observation,
+	converged metav1.Condition,
+	keys []string,
+) (ctrl.Result, error) {
+	msg := "Waiting for a coordinator leader to say whether " + strings.Join(keys, ", ") +
+		" are startup flags before restarting any pod for them"
+	logf.FromContext(ctx).Info("Deferred the next pod restart", "reason", msg)
+	if err := r.writeStatus(ctx, cluster, latest, readyOrNot(latest.main), converged,
+		notUpdatedCondition(memgraphcomv1alpha1.ReasonFlagsUnclassified, msg)); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{RequeueAfter: requeueWhilePending}, nil
+}
+
+// startupKeys are the role's own keys that are not run-time flags.
+func startupKeys(flags map[string]memgraphcomv1alpha1.FlagValue) []string {
+	var keys []string
+	for key := range flags {
+		if !settings.IsRuntime(key) {
+			keys = append(keys, key)
+		}
+	}
+	return keys
+}
+
+// unknownMessage names, per role, the keys the running Memgraph has neither as
+// a flag nor as a coordinator setting, or is empty. A coordinator setting
+// under the data role is named too: the coordinators would never see it there.
+// Without both views nothing is named: a coordinator setting looks unknown to
+// a pass that could not read SHOW COORDINATOR SETTINGS, and that pass reports
+// the settings as pending instead.
+func (c flagClasses) unknownMessage() string {
+	if !c.configKnown || !c.coordinatorSettingsKnown {
+		return ""
+	}
+	var parts []string
+	if len(c.coordinators.Unknown) > 0 {
+		parts = append(parts, "coordinators: "+strings.Join(c.coordinators.Unknown, ", "))
+	}
+	if unknown := append(slices.Clone(c.data.Unknown), c.data.CoordinatorSettings...); len(unknown) > 0 {
+		slices.Sort(unknown)
+		parts = append(parts, "data: "+strings.Join(unknown, ", "))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	msg := "spec.flags names flags this Memgraph does not have (" + strings.Join(parts, "; ") +
+		"); nothing is restarted or applied for them until they are removed or corrected"
+	if len(c.data.CoordinatorSettings) > 0 {
+		msg += "; a coordinator setting belongs under flags.coordinators"
+	}
+	return msg
+}
+
+// exemptCurrentPods marks Current every pod whose only difference from its
+// role's template is in keys that need no restart: coordinator settings, which
+// Raft carries to every coordinator, and names Memgraph does not have, which
+// gflags ignores. A pod differing in any startup flag stays outdated, and so
+// does one differing in nothing the annotation covers — an environment
+// variable, an image — because the revision then changed for another reason.
+//
+// It returns false, with the keys in question, when pods differ in keys that
+// could not be classified: restarting then might be a restart for nothing,
+// and the caller waits instead.
+func exemptCurrentPods(roles *rolloutRoles, classes flagClasses) ([]string, bool) {
+	var unclassified []string
+	for _, role := range []struct {
+		pods     *rollout.Role
+		template string
+	}{
+		{&roles.data, roles.dataFlags},
+		{&roles.coordinators, roles.coordinatorFlags},
+	} {
+		template := role.template
+		for i := range role.pods.Pods {
+			pod := &role.pods.Pods[i]
+			if pod.RevisionHash == "" || pod.RevisionHash == role.pods.UpdateRevision {
+				continue
+			}
+			changed := resources.ChangedFlags(roles.podFlags[pod.Name], template)
+			if len(changed) == 0 {
+				continue
+			}
+			if !classes.configKnown || !classes.coordinatorSettingsKnown {
+				unclassified = append(unclassified, changed...)
+				continue
+			}
+			sorted := settings.Classify(changed, classes.config, classes.coordinatorSettings)
+			pod.Current = len(sorted.Flags) == 0
+		}
+	}
+	if len(unclassified) > 0 {
+		slices.Sort(unclassified)
+		return slices.Compact(unclassified), false
+	}
+	return nil, true
 }
 
 // settingRejected is a SET DATABASE SETTING the instance refused, as opposed

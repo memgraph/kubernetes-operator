@@ -1,6 +1,6 @@
 # Memgraph flags: a map, a flag file, and no restart for what Memgraph can change live
 
-`spec.flags` passes Memgraph flags to each role by name, and `spec.coordinatorSettings` sets the cluster-wide coordinator settings that are not flags at all. This document is the contract for both: where the flags go, which ones take effect without a restart and how, which ones roll the pods, what may not be set, what removing a flag does, and how the coordinator settings differ.
+`spec.flags` passes Memgraph flags to each role by name, and under `coordinators` also the cluster-wide coordinator settings that are not flags at all. This document is the contract: where the keys go, how the operator decides what each one is, which ones take effect without a restart and how, which ones roll the pods, what may not be set, and what removing a key does.
 
 ```yaml
 spec:
@@ -55,7 +55,7 @@ The command line itself carries only what you may not override: the ports and li
 
 Two consequences of the file worth knowing:
 
-- **A misspelt flag name is silently ignored.** gflags skips a flag-file line naming a flag it does not know, where the same flag on the command line would refuse to start. Check `SHOW DATABASE SETTINGS` for a run-time flag, or the instance's startup log for any other, when a flag seems not to take.
+- **A name Memgraph does not have restarts nothing.** gflags skips a flag-file line naming a flag it does not know, so the operator asks the running Memgraph, never a list of its own: `SHOW CONFIG` lists every flag, `SHOW COORDINATOR SETTINGS` every coordinator setting. A key in neither is reported as `Converged=False` with reason `UnknownFlags`, naming it per role, and no pod is restarted for it. Fixing or removing it clears the condition, again with no restart. Memgraph hides four flags from `SHOW CONFIG`; the operator counts `also-log-to-stderr` and `scheduler` as flags and admission rejects the other two, `license-key` and `organization-name`.
 - **A bad value is still fatal at startup**, as on the command line: an instance started on `log-level: LOUD` exits, and the pod crash-loops until the flag is fixed. For a run-time flag the same value is caught earlier and more gently, see below.
 
 ## Flags Memgraph can change live
@@ -106,18 +106,24 @@ One exception, by design: a flag the operator has a default for (`log-level`, `a
 
 ## Coordinator settings
 
-The coordinators keep a handful of cluster-wide settings in Raft that are not flags: `enabled_reads_on_main`, `sync_failover_only`, `max_failover_replica_lag`, `max_replica_read_lag`, `instance_down_timeout_sec`, `instance_health_check_frequency_sec`, `global_read_only` (and `deltas_batch_progress_size`). `SHOW COORDINATOR SETTINGS` lists them and `SET COORDINATOR SETTING` changes them, once, for every coordinator present or future. They have their own block:
+The coordinators keep a handful of cluster-wide settings in Raft that are not flags: `enabled_reads_on_main`, `sync_failover_only`, `max_failover_replica_lag`, `max_replica_read_lag`, `instance_down_timeout_sec`, `instance_health_check_frequency_sec`, `global_read_only` and `deltas_batch_progress_size`. They go in the same map as the coordinators' flags:
 
 ```yaml
 spec:
-  coordinatorSettings:
-    instance_down_timeout_sec: "7"
-    enabled_reads_on_main: "true"
+  flags:
+    coordinators:
+      log-level: INFO
+      enabled-reads-on-main: "true"
+      instance-down-timeout-sec: "7"
 ```
 
-Keys are the setting names as Memgraph spells them, values strings as for flags: `"true"`/`"false"` for the three boolean settings, digits for the numeric ones, both checked at admission for the settings the operator knows. A setting it does not know passes through, and the coordinators refuse it if they do not have it, reported as `SettingsRejected` like a refused flag.
+The operator tells a coordinator setting from a flag by asking: a key `SHOW COORDINATOR SETTINGS` lists is one, whatever Memgraph version adds next. It issues `SET COORDINATOR SETTING` once, for the keys whose value differs, over the coordinator connection it already holds for registration; any coordinator accepts the write, because a follower forwards it to the Raft leader. Nothing restarts. The line is in the flag file too, where gflags ignores it, so the file stays a function of the spec alone.
 
-What differs from flags: nothing lands in a flag file or a pod template, so nothing restarts; the operator issues the `SET` once, over the coordinator connection it already holds for registration, and any coordinator accepts it because a follower forwards the write to the Raft leader; and the setting is persisted by Raft, so removing a key issues no `SET` and the value simply stays. `SHOW COORDINATOR SETTINGS` answers with no rows while no ready leader can be reached, which the operator treats as "cannot tell": it reports `SettingsPending` naming the coordinator settings and writes nothing until a view comes back, rather than re-issuing every setting blind.
+Values are strings as for flags. Admission checks `"true"`/`"false"` for the three boolean settings and digits for the five numeric ones, and rejects a coordinator setting under `flags.data`. A refused `SET` is `SettingsRejected`. Raft persists the setting, so removing the key issues no `SET` and the value stays. `SHOW COORDINATOR SETTINGS` answers with no rows while no ready leader is reachable; the operator then reports `SettingsPending` and writes nothing.
+
+## How a changed key decides a restart
+
+The pod template carries one annotation, `memgraph.com/flags`, listing every key that is not a run-time flag with a digest of its value. A changed key therefore changes the template, and a pod keeps the annotation it was started with. When a pod is not on the current template, the operator lists the keys whose digest differs and asks Memgraph what they are. If they are all coordinator settings or names Memgraph does not have, the pod needs no restart and counts as current. If any is a flag, the pod is restarted in the usual order. While no coordinator answers `SHOW CONFIG` and `SHOW COORDINATOR SETTINGS`, the operator restarts nothing and reports `Updated=False` with reason `FlagsUnclassified`, naming the keys.
 
 ## What may not be set
 
@@ -128,6 +134,6 @@ Admission rejects these keys, in either spelling:
 - **`data-directory`, `log-file`**: where the lib and log claims are mounted. `log-file` follows the log claim: empty when the role has none, which is what keeps a read-only root filesystem from crash-looping.
 - **`bolt-cert-file`, `bolt-key-file`, `cluster-cert-file`, `cluster-key-file`, `cluster-ca-file`**: derived from `spec.tls`, see [TLS](tls.md).
 - **`metrics-format`**: always OpenMetrics, see [monitoring](monitoring.md).
-- **`aws-access-key`, `aws-secret-key`**: the CR carries no secret material. Set them on each instance with `SET DATABASE SETTING "aws.access_key" TO "..."` for now; a Secret reference may follow if there is demand.
+- **`aws-access-key`, `aws-secret-key`, `license-key`, `organization-name`**: the CR carries no secret material. The license comes from the `secrets` block. Set the AWS keys on each instance with `SET DATABASE SETTING "aws.access_key" TO "..."` for now; a Secret reference may follow if there is demand.
 
 Everything else is yours, including the operator's own logging defaults. Memgraph's [configuration reference](https://memgraph.com/docs/database-management/configuration) lists the flags.

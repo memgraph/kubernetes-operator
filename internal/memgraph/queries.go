@@ -114,3 +114,7 @@ const showCoordinatorSettingsQuery = "SHOW COORDINATOR SETTINGS"
 func setCoordinatorSettingQuery(name, value string) string {
 	return fmt.Sprintf("SET COORDINATOR SETTING %s TO %s", cypherString(name), cypherString(value))
 }
+
+// showConfigQuery lists every non-hidden flag of the instance it runs on as
+// name, default_value, current_value, description rows.
+const showConfigQuery = "SHOW CONFIG"

@@ -42,7 +42,7 @@ var runtimeSettings = map[string]string{
 	"query_execution_timeout_sec":                    "query.timeout",
 	"hops_limit_partial_results":                     "hops_limit_partial_results",
 	"log_level":                                      "log.level",
-	"also_log_to_stderr":                             "log.to_stderr",
+	alsoLogToStderr:                                  "log.to_stderr",
 	"cartesian_product_enabled":                      "cartesian-product-enabled",
 	"debug_query_plans":                              "debug-query-plans",
 	"storage_gc_aggressive":                          "storage-gc-aggressive",
@@ -135,4 +135,70 @@ func Diff(desired map[string]string, observed map[string]string) []Change {
 		return strings.Compare(a.Setting, b.Setting)
 	})
 	return changes
+}
+
+// The two hidden flags a spec may name, spelled once.
+const (
+	alsoLogToStderr = "also_log_to_stderr"
+	schedulerFlag   = "scheduler"
+)
+
+// hiddenFlags are the flags Memgraph declares with DEFINE_HIDDEN_* and so
+// leaves out of SHOW CONFIG, while gflags reads them like any other. Without
+// this allowance a spec naming one would be reported as unknown. The two
+// credential flags Memgraph also hides, license_key and organization_name,
+// are not here: admission rejects them.
+var hiddenFlags = map[string]bool{
+	alsoLogToStderr: true,
+	schedulerFlag:   true,
+}
+
+// Classification sorts a role's keys by what the running Memgraph says they
+// are, every name in its canonical spelling and each list sorted.
+type Classification struct {
+	// Flags are the keys SHOW CONFIG lists, or the hidden flags: read at
+	// startup, or at run time for the ones in the run-time table.
+	Flags []string
+	// CoordinatorSettings are the keys SHOW COORDINATOR SETTINGS lists: written
+	// to Raft once, never restarted for.
+	CoordinatorSettings []string
+	// Unknown are the keys neither view has. gflags ignores such a line in a
+	// flag file, so nothing applies them and nothing should restart for them.
+	Unknown []string
+}
+
+// Classify sorts keys against the two views a coordinator answers with:
+// config is SHOW CONFIG (flag name to current value) and coordinatorSettings
+// is SHOW COORDINATOR SETTINGS. The operator keeps no list of Memgraph's flags
+// or coordinator settings of its own; the running version is the authority,
+// so a flag added upstream works without an operator release and a typo is
+// found by asking.
+//
+// An empty config view classifies nothing as a flag, so a caller holding one
+// must treat the result as "cannot tell" rather than "every key is unknown":
+// SHOW CONFIG never legitimately answers with no rows.
+func Classify(keys []string, config, coordinatorSettings map[string]string) Classification {
+	var c Classification
+	for _, key := range keys {
+		name := Normalize(key)
+		switch {
+		case hiddenFlags[name]:
+			c.Flags = append(c.Flags, name)
+		case hasKey(config, name):
+			c.Flags = append(c.Flags, name)
+		case hasKey(coordinatorSettings, name):
+			c.CoordinatorSettings = append(c.CoordinatorSettings, name)
+		default:
+			c.Unknown = append(c.Unknown, name)
+		}
+	}
+	slices.Sort(c.Flags)
+	slices.Sort(c.CoordinatorSettings)
+	slices.Sort(c.Unknown)
+	return c
+}
+
+func hasKey(view map[string]string, name string) bool {
+	_, ok := view[name]
+	return ok
 }
