@@ -104,3 +104,13 @@ func setSettingQuery(name, value string) string {
 func cypherString(s string) string {
 	return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(s) + `"`
 }
+
+// showCoordinatorSettingsQuery lists the cluster-wide coordinator settings as
+// setting_name, setting_value rows, relayed from the Raft leader.
+const showCoordinatorSettingsQuery = "SHOW COORDINATOR SETTINGS"
+
+// setCoordinatorSettingQuery changes one cluster-wide coordinator setting.
+// String literals only, like setSettingQuery, and for the same reason.
+func setCoordinatorSettingQuery(name, value string) string {
+	return fmt.Sprintf("SET COORDINATOR SETTING %s TO %s", cypherString(name), cypherString(value))
+}

@@ -592,6 +592,13 @@ func (in *MemgraphClusterSpec) DeepCopyInto(out *MemgraphClusterSpec) {
 	in.Scheduling.DeepCopyInto(&out.Scheduling)
 	in.ExtraEnv.DeepCopyInto(&out.ExtraEnv)
 	in.Flags.DeepCopyInto(&out.Flags)
+	if in.CoordinatorSettings != nil {
+		in, out := &in.CoordinatorSettings, &out.CoordinatorSettings
+		*out = make(map[string]SettingValue, len(*in))
+		for key, val := range *in {
+			(*out)[key] = val
+		}
+	}
 	in.ExtraVolumes.DeepCopyInto(&out.ExtraVolumes)
 	in.ExtraVolumeMounts.DeepCopyInto(&out.ExtraVolumeMounts)
 	in.UserContainers.DeepCopyInto(&out.UserContainers)

@@ -66,6 +66,12 @@ type fakeMemgraph struct {
 	// has nothing to SET, and a test that wants an instance out of line puts
 	// it there.
 	settings map[string]map[string]string
+	// coordinatorSettings is the cluster-wide view every coordinator relays
+	// from the leader, starting from the core's defaults. A test that wants
+	// the leader unreachable for them sets coordinatorSettingsUnknown, which
+	// makes SHOW answer with no rows the way a real coordinator does.
+	coordinatorSettings        map[string]string
+	coordinatorSettingsUnknown bool
 	// rejected are commands the cluster refuses whatever its state, keyed by
 	// command prefix. It stands in for the rejections the operator cannot reason
 	// about — a coordinator refusing a registration a healthy one would accept —
@@ -105,6 +111,45 @@ func (f *fakeMemgraph) setUnreachable(address string, unreachable bool) {
 		f.unreachable = map[string]bool{}
 	}
 	f.unreachable[address] = unreachable
+}
+
+// baselineCoordinatorSettings is the SHOW COORDINATOR SETTINGS view of a
+// cluster nobody has changed a setting on: Memgraph 3.13.0's defaults.
+func baselineCoordinatorSettings() map[string]string {
+	return map[string]string{
+		"enabled_reads_on_main":               string(settingOff),
+		"sync_failover_only":                  string(settingOn),
+		"max_failover_replica_lag":            "10",
+		"max_replica_read_lag":                "10",
+		"deltas_batch_progress_size":          "1000",
+		downTimeoutSetting:                    "5",
+		"instance_health_check_frequency_sec": "1",
+		globalReadOnly:                        string(settingOff),
+	}
+}
+
+// coordinatorSettingsView is the cluster-wide coordinator settings as the
+// coordinators currently hold them.
+func (f *fakeMemgraph) coordinatorSettingsView() map[string]string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return maps.Clone(f.coordinatorSettingsLocked())
+}
+
+// setCoordinatorSettingsUnknown makes every coordinator answer SHOW
+// COORDINATOR SETTINGS with no rows, as one does without a ready leader.
+func (f *fakeMemgraph) setCoordinatorSettingsUnknown(unknown bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.coordinatorSettingsUnknown = unknown
+}
+
+// coordinatorSettingsLocked must be called with the cluster lock held.
+func (f *fakeMemgraph) coordinatorSettingsLocked() map[string]string {
+	if f.coordinatorSettings == nil {
+		f.coordinatorSettings = baselineCoordinatorSettings()
+	}
+	return f.coordinatorSettings
 }
 
 // baselineSettings is the SHOW DATABASE SETTINGS view of an instance started
@@ -497,9 +542,41 @@ func (c *fakeClient) SetSetting(_ context.Context, name, value string) error {
 		if _, ok := settings[name]; !ok {
 			return fmt.Errorf("fake memgraph: Unknown setting name '%s'", name)
 		}
-		if name == "log.to_stderr" && value != "true" && value != "false" {
+		if name == "log.to_stderr" && value != string(flagOn) && value != string(flagOff) {
 			return fmt.Errorf("fake memgraph: Cannot update setting '%s': "+
 				"Boolean value supports only 'false' or 'true' as the input.", name)
+		}
+		settings[name] = value
+		return nil
+	})
+}
+
+// ShowCoordinatorSettings relays the cluster-wide view, or nothing when the
+// leader is unreachable, as the real thing does.
+func (c *fakeClient) ShowCoordinatorSettings(context.Context) (map[string]string, error) {
+	c.cluster.mu.Lock()
+	defer c.cluster.mu.Unlock()
+	if c.closed {
+		return nil, fmt.Errorf("fake memgraph: connection to %s already closed", c.address)
+	}
+	if c.cluster.coordinatorSettingsUnknown {
+		return map[string]string{}, nil
+	}
+	return maps.Clone(c.cluster.coordinatorSettingsLocked()), nil
+}
+
+// SetCoordinatorSetting writes one cluster-wide setting, on whichever
+// coordinator it arrives at. Like Memgraph it refuses a setting it does not
+// have and a boolean that is not true or false.
+func (c *fakeClient) SetCoordinatorSetting(_ context.Context, name, value string) error {
+	command := fmt.Sprintf("SET COORDINATOR SETTING %q TO %q", name, value)
+	return c.execute(command, func() error {
+		settings := c.cluster.coordinatorSettingsLocked()
+		if _, ok := settings[name]; !ok {
+			return fmt.Errorf("fake memgraph: Setting %s doesn't exist on coordinators.", name)
+		}
+		if name == globalReadOnly && value != string(settingOn) && value != string(settingOff) {
+			return fmt.Errorf("fake memgraph: Invalid argument detected while trying to update setting %s", name)
 		}
 		settings[name] = value
 		return nil

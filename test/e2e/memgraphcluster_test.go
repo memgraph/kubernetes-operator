@@ -807,6 +807,21 @@ var _ = Describe("MemgraphCluster", Ordered, func() {
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred(), "the MemgraphCluster must stay Updated: nothing about the pod template changed")
 
+		By("setting a coordinator setting, which is written to Raft once and restarts nothing either")
+		cmd = exec.Command("kubectl", "patch", "memgraphcluster", quickstartCluster.name,
+			"-n", quickstartCluster.namespace, "--type=merge", "-p",
+			`{"spec":{"coordinatorSettings":{"instance_down_timeout_sec":"7"}}}`)
+		_, err = utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred(), "the operator must accept the coordinatorSettings block")
+		Eventually(func(g Gomega) {
+			value, err := quickstartCluster.coordinatorSetting("instance_down_timeout_sec")
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(value).To(Equal("7"))
+		}, 3*time.Minute, 5*time.Second).Should(Succeed())
+		after, err = quickstartCluster.podUIDs()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(after).To(Equal(before), "a coordinator setting must not replace any pod")
+
 		By("confirming the flag file carries the value for the next start")
 		for _, role := range []string{"coordinator", "data"} {
 			file, err := quickstartCluster.flagFile(role)
@@ -1558,6 +1573,24 @@ func (c clusterUnderTest) settingOnPod(pod, name string) (string, error) {
 		return "", fmt.Errorf("no setting_value row in mgconsole output: %q", output)
 	}
 	return unquoteCell(lines[len(lines)-1]), nil
+}
+
+// coordinatorSetting reads one cluster-wide coordinator setting off any
+// coordinator: a follower relays the leader's view.
+func (c clusterUnderTest) coordinatorSetting(name string) (string, error) {
+	cmd := exec.Command("kubectl", "exec", c.coordinatorPod(0), "-n", c.namespace, "-c", "memgraph", "--",
+		"bash", "-c", c.mgconsole("SHOW COORDINATOR SETTINGS;", "--output-format=csv"))
+	output, err := utils.Run(cmd)
+	if err != nil {
+		return "", err
+	}
+	for _, line := range utils.GetNonEmptyLines(output) {
+		cells := strings.SplitN(line, ",", 2)
+		if len(cells) == 2 && unquoteCell(cells[0]) == name {
+			return unquoteCell(cells[1]), nil
+		}
+	}
+	return "", fmt.Errorf("no %s row in SHOW COORDINATOR SETTINGS output: %q", name, output)
 }
 
 // flagFile is the flag file the operator rendered for the given role.

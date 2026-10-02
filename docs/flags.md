@@ -1,6 +1,6 @@
 # Memgraph flags: a map, a flag file, and no restart for what Memgraph can change live
 
-`spec.flags` passes Memgraph flags to each role by name. This document is the contract: where the flags go, which ones take effect without a restart and how, which ones roll the pods, what may not be set, and what removing a flag does.
+`spec.flags` passes Memgraph flags to each role by name, and `spec.coordinatorSettings` sets the cluster-wide coordinator settings that are not flags at all. This document is the contract for both: where the flags go, which ones take effect without a restart and how, which ones roll the pods, what may not be set, what removing a flag does, and how the coordinator settings differ.
 
 ```yaml
 spec:
@@ -103,6 +103,21 @@ Run-time settings are applied on the pass that finds the cluster registered, bef
 Removing a key removes its line from the flag file and issues no `SET`. For a startup-only flag that is a template change like any other, and the roll brings every pod onto Memgraph's default. For a run-time flag the running instances keep their current value until they next restart without the flag — and for the few settings Memgraph persists across restarts (`timezone`, `storage-gc-aggressive`, `hops-limit-partial-results`, `storage-omit-vector-index-properties-on-return`, `bolt-server-name-for-init`, `file-download-conn-timeout-sec`, the AWS settings, the three slow-query log settings), even then: Memgraph restores the last value it was set to whenever the flag is not given explicitly, and has no way to reset one to its default. Set the default by hand with `SET DATABASE SETTING`, or write it into the map, if you need it back before the core offers a reset.
 
 One exception, by design: a flag the operator has a default for (`log-level`, `also-log-to-stderr`, `log-retention-days`) goes back to that default when you remove your override, because the flag file then says so and the operator keeps the running instances in line with the file.
+
+## Coordinator settings
+
+The coordinators keep a handful of cluster-wide settings in Raft that are not flags: `enabled_reads_on_main`, `sync_failover_only`, `max_failover_replica_lag`, `max_replica_read_lag`, `instance_down_timeout_sec`, `instance_health_check_frequency_sec`, `global_read_only` (and `deltas_batch_progress_size`). `SHOW COORDINATOR SETTINGS` lists them and `SET COORDINATOR SETTING` changes them, once, for every coordinator present or future. They have their own block:
+
+```yaml
+spec:
+  coordinatorSettings:
+    instance_down_timeout_sec: "7"
+    enabled_reads_on_main: "true"
+```
+
+Keys are the setting names as Memgraph spells them, values strings as for flags: `"true"`/`"false"` for the three boolean settings, digits for the numeric ones, both checked at admission for the settings the operator knows. A setting it does not know passes through, and the coordinators refuse it if they do not have it, reported as `SettingsRejected` like a refused flag.
+
+What differs from flags: nothing lands in a flag file or a pod template, so nothing restarts; the operator issues the `SET` once, over the coordinator connection it already holds for registration, and any coordinator accepts it because a follower forwards the write to the Raft leader; and the setting is persisted by Raft, so removing a key issues no `SET` and the value simply stays. `SHOW COORDINATOR SETTINGS` answers with no rows while no ready leader can be reached, which the operator treats as "cannot tell": it reports `SettingsPending` naming the coordinator settings and writes nothing until a view comes back, rather than re-issuing every setting blind.
 
 ## What may not be set
 

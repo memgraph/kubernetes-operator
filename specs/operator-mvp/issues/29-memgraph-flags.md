@@ -18,6 +18,10 @@ Removing a key removes its line and issues no `SET`: a non-persisted run-time se
 
 Denied keys, in either spelling, by CEL on the map: the ports, `bolt-address`, `monitoring-address`, `monitoring-port`, `metrics-port`, `coordinator-id`, `coordinator-hostname`, `data-directory`, `log-file`, the five TLS file flags, `metrics-format`, and `aws-access-key`/`aws-secret-key` because the CR carries no secret material (docs say to use `SET DATABASE SETTING` by hand; a Secret reference may follow). `replication-port` leaves the list: Memgraph has no such flag. Further rules: keys are flag names without dashes, values are single-line and at most 4096 characters, no two keys normalise to one flag, at most 64 per role.
 
+### Added in review: coordinator settings
+
+Andi asked, in the same PR, for the Raft-persisted cluster-wide coordinator settings (`enabled_reads_on_main`, `instance_down_timeout_sec`, `instance_health_check_frequency_sec`, `sync_failover_only`, `max_failover_replica_lag`, `max_replica_read_lag`, `global_read_only`). They are set only on coordinators, persisted by Raft and not startup flags, and any coordinator accepts the `SET` because Memgraph forwards it to the leader. They get their own block, `spec.coordinatorSettings` (`map[string]SettingValue`, keys as Memgraph spells them), diffed with the same pure core (`settings.Diff`) against `SHOW COORDINATOR SETTINGS` over the leader connection the pass already holds, one `SET COORDINATOR SETTING` per differing key, nothing in a flag file or the pod template. An empty `SHOW` view is "no ready leader" and reported `SettingsPending` without writing; a refused `SET` is `SettingsRejected`. Removing a key issues no `SET`. CEL checks the booleans and numerics by shape for the known names and lets unknown names through for the coordinators to judge.
+
 ## Acceptance criteria
 
 - [ ] `spec.flags.{coordinators,data}` are `map[string]string`; `extraArgs` is gone from the types, the CRD, the chart, the sample, the docs and `CLAUDE.md`
@@ -28,7 +32,8 @@ Denied keys, in either spelling, by CEL on the map: the ports, `bolt-address`, `
 - [ ] Admission rejects every denied key in both spellings, leading dashes, a multi-line value, two spellings of one flag and an AWS credential; accepts a legitimate neighbour such as `bolt-num-workers` and both spellings of a run-time flag
 - [ ] `make manifests generate chart-sync` regenerated, `make chart-verify` green, the CRD's compact JSON stays under the 256KB client-side apply limit
 - [ ] E2E (quickstart cluster): a run-time flag set on both roles reaches every pod's `SHOW DATABASE SETTING` with no pod UID changing and `Updated` staying True; a following edit changing a startup-only flag and the run-time one together lands the run-time value on every pod, rolls every pod in ISSU order, and leaves every pod on the new values afterwards; the ConfigMaps carry the rendered lines
-- [ ] `docs/flags.md` documents the map, the file, the pinned command line, the live table, the conditions, removal semantics, the denied keys and the silently-ignored-typo caveat; the README, the sample and `CLAUDE.md` describe the block
+- [ ] `spec.coordinatorSettings`: builder exposes it, the controller writes only differing keys once through the leader connection, waits on an empty view, reports a refused key, and leaves a removed key alone; envtest covers all four, admission the three shape rules; the e2e sets `instance_down_timeout_sec` and reads it back with no pod replaced
+- [ ] `docs/flags.md` documents the map, the file, the pinned command line, the live table, the conditions, removal semantics, the denied keys, the silently-ignored-typo caveat and the coordinator settings block; the README, the sample and `CLAUDE.md` describe both
 
 ## Blocked by
 

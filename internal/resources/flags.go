@@ -87,6 +87,19 @@ func DataFlags(cluster *memgraphcomv1alpha1.MemgraphCluster) map[string]string {
 	return roleFlags(normalize(cluster.Spec).dataRole)
 }
 
+// CoordinatorSettings is the cluster-wide coordinator settings the spec asks
+// for, by setting name, as the controller diffs them against SHOW COORDINATOR
+// SETTINGS. They are not flags: nothing here reaches a flag file or a pod
+// template, and there is no default to merge in — a key the spec does not
+// name is the coordinators' to keep.
+func CoordinatorSettings(cluster *memgraphcomv1alpha1.MemgraphCluster) map[string]string {
+	desired := make(map[string]string, len(cluster.Spec.CoordinatorSettings))
+	for key, value := range cluster.Spec.CoordinatorSettings {
+		desired[key] = string(value)
+	}
+	return desired
+}
+
 // CoordinatorFlagsConfigMap builds the ConfigMap holding the coordinators'
 // flag file.
 func CoordinatorFlagsConfigMap(cluster *memgraphcomv1alpha1.MemgraphCluster) *corev1.ConfigMap {

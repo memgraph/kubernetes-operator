@@ -1024,6 +1024,7 @@ func (r *MemgraphClusterReconciler) reconcileRegistration(
 		// already carries it for any pod the roll replaces. A pod the roll has
 		// down is simply not ready and is caught up on the next pass.
 		applied := r.reconcileSettings(ctx, cluster, replicas, roles)
+		applied.merge(r.reconcileCoordinatorSettings(ctx, cluster, leader))
 		converged := r.convergedCondition(ctx, cluster, topology, exposure, applied)
 
 		switch decision := rollout.Next(roles.data, roles.coordinators, observed, lag); decision.Action {
@@ -1177,6 +1178,59 @@ type settingsOutcome struct {
 
 func (o settingsOutcome) done() bool {
 	return len(o.pending) == 0 && len(o.rejected) == 0
+}
+
+func (o *settingsOutcome) merge(other settingsOutcome) {
+	o.pending = append(o.pending, other.pending...)
+	o.rejected = append(o.rejected, other.rejected...)
+}
+
+// coordinatorSettingsSubject is how the cluster-wide coordinator settings are
+// named among the pods in a SettingsPending message ("Waiting to apply
+// run-time settings on ..."): they belong to no pod, they are the Raft
+// leader's.
+const coordinatorSettingsSubject = "the Raft leader, which did not report the coordinator settings"
+
+// reconcileCoordinatorSettings brings the cluster-wide coordinator settings in
+// line with spec.coordinatorSettings over the leader connection the pass
+// already holds. Unlike the per-instance settings there is one view and one
+// write path: a coordinator setting is a Raft log entry, every coordinator
+// reads it from there, and any coordinator accepts the SET and forwards it to
+// the leader. Read before write, only the keys the spec names, nothing when
+// the spec names none.
+//
+// An empty view is "cannot tell", not "nothing is set": a coordinator that
+// cannot reach a ready leader answers SHOW COORDINATOR SETTINGS with no rows
+// and a warning rather than an error. Writing on the strength of it would
+// re-issue every setting on every such pass, so the pass reports it pending
+// and tries again. A refused SET is reported like a refused per-instance one.
+func (r *MemgraphClusterReconciler) reconcileCoordinatorSettings(
+	ctx context.Context,
+	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	leader memgraph.Client,
+) settingsOutcome {
+	log := logf.FromContext(ctx)
+	desired := resources.CoordinatorSettings(cluster)
+	if len(desired) == 0 {
+		return settingsOutcome{}
+	}
+	observed, err := leader.ShowCoordinatorSettings(ctx)
+	if err != nil || len(observed) == 0 {
+		reason := "no rows reported"
+		if err != nil {
+			reason = err.Error()
+		}
+		log.Info("Could not read the coordinator settings", "reason", reason)
+		return settingsOutcome{pending: []string{coordinatorSettingsSubject}}
+	}
+	for _, change := range settings.Diff(desired, observed) {
+		if err := leader.SetCoordinatorSetting(ctx, change.Setting, change.Value); err != nil {
+			return settingsOutcome{rejected: []string{fmt.Sprintf(
+				"the coordinators rejected SET COORDINATOR SETTING %q TO %q: %v", change.Setting, change.Value, err)}}
+		}
+		log.Info("Applied coordinator setting", "setting", change.Setting, "value", change.Value)
+	}
+	return settingsOutcome{}
 }
 
 // reconcileSettings brings every ready pod's run-time settings in line with the

@@ -28,6 +28,10 @@ const (
 	logLevelCanonical = "log_level"
 	snapshotFlag      = "storage-snapshot-interval"
 	hopsLimit         = "hops_limit_partial_results"
+	downTimeout       = "instance_down_timeout_sec"
+	readsOnMain       = "enabled_reads_on_main"
+	on                = "true"
+	off               = "false"
 
 	logLevel         = "log.level"
 	logToStderr      = "log.to_stderr"
@@ -104,7 +108,7 @@ func TestSettingTable(t *testing.T) {
 func TestPlan(t *testing.T) {
 	observed := map[string]string{
 		logLevel:         "TRACE",
-		logToStderr:      "true",
+		logToStderr:      on,
 		queryTimeout:     "600",
 		snapshotInterval: "300",
 	}
@@ -117,7 +121,7 @@ func TestPlan(t *testing.T) {
 		{
 			name: "converged flags plan nothing",
 			flags: map[string]string{
-				logLevelCanonical: "TRACE", "also_log_to_stderr": "true", "log_retention_days": "35",
+				logLevelCanonical: "TRACE", "also_log_to_stderr": on, "log_retention_days": "35",
 			},
 		},
 		{
@@ -140,7 +144,7 @@ func TestPlan(t *testing.T) {
 		},
 		{
 			name:  "a startup-only flag is never planned",
-			flags: map[string]string{"storage-snapshot-on-exit": "false", "memory-limit": "2048"},
+			flags: map[string]string{"storage-snapshot-on-exit": off, "memory-limit": "2048"},
 		},
 		{
 			name:  "a setting the instance does not report is planned, so an old image surfaces as a rejection",
@@ -160,6 +164,44 @@ func TestPlan(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if diff := cmp.Diff(tc.want, Plan(tc.flags, observed)); diff != "" {
 				t.Errorf("Plan mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestDiff pins the rules Plan and the coordinator settings share, without
+// the flag table in the way: desired keys only, sorted, an unreported setting
+// planned, an absent key left alone.
+func TestDiff(t *testing.T) {
+	observed := map[string]string{
+		readsOnMain:        off,
+		downTimeout:        "5",
+		"global_read_only": off,
+	}
+	for _, tc := range []struct {
+		name    string
+		desired map[string]string
+		want    []Change
+	}{
+		{name: "nothing desired plans nothing"},
+		{name: "a matching value plans nothing", desired: map[string]string{downTimeout: "5"}},
+		{
+			name:    "differing values come out by name",
+			desired: map[string]string{downTimeout: "7", readsOnMain: on},
+			want: []Change{
+				{Setting: readsOnMain, Value: on},
+				{Setting: downTimeout, Value: "7"},
+			},
+		},
+		{
+			name:    "an unreported setting is planned, so the coordinators get to refuse it",
+			desired: map[string]string{"no_such_setting": "1"},
+			want:    []Change{{Setting: "no_such_setting", Value: "1"}},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if diff := cmp.Diff(tc.want, Diff(tc.desired, observed)); diff != "" {
+				t.Errorf("Diff mismatch (-want +got):\n%s", diff)
 			}
 		})
 	}

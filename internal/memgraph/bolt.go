@@ -159,7 +159,21 @@ func (c *boltClient) ShowSettings(ctx context.Context) (map[string]string, error
 	return settingsFromRecords(records)
 }
 
-// settingsFromRecords maps the SHOW DATABASE SETTINGS rows to setting name
+func (c *boltClient) ShowCoordinatorSettings(ctx context.Context) (map[string]string, error) {
+	records, err := c.run(ctx, showCoordinatorSettingsQuery)
+	if err != nil {
+		return nil, err
+	}
+	return settingsFromRecords(records)
+}
+
+func (c *boltClient) SetCoordinatorSetting(ctx context.Context, name, value string) error {
+	_, err := c.run(ctx, setCoordinatorSettingQuery(name, value))
+	return err
+}
+
+// settingsFromRecords maps the SHOW DATABASE SETTINGS or SHOW COORDINATOR
+// SETTINGS rows, which share their shape, to setting name
 // and value. A row without a name is refused: filed under the empty string
 // it would never match a flag, and the planner would then re-issue a SET the
 // instance already holds on every pass.
@@ -168,7 +182,7 @@ func settingsFromRecords(records []*db.Record) (map[string]string, error) {
 	for _, record := range records {
 		name := stringColumn(record, "setting_name")
 		if name == "" {
-			return nil, fmt.Errorf("%s row carries no setting_name", showSettingsQuery)
+			return nil, errors.New("settings row carries no setting_name")
 		}
 		settings[name] = stringColumn(record, "setting_value")
 	}

@@ -63,6 +63,13 @@ const (
 	infoLevel memgraphcomv1alpha1.FlagValue = "INFO"
 	flagOn    memgraphcomv1alpha1.FlagValue = "true"
 	flagOff   memgraphcomv1alpha1.FlagValue = "false"
+
+	// The coordinator settings the specs and the fake share.
+	downTimeoutSetting = "instance_down_timeout_sec"
+	globalReadOnly     = "global_read_only"
+	futureSetting      = "some_future_setting"
+	settingOn          = memgraphcomv1alpha1.SettingValue(flagOn)
+	settingOff         = memgraphcomv1alpha1.SettingValue(flagOff)
 )
 
 // memgraphContainerName is the name of the database container in every pod,
@@ -1799,7 +1806,10 @@ var _ = Describe("MemgraphCluster Controller", func() {
 	})
 
 	Context("when the spec carries Memgraph flags", func() {
-		const resourceName = "mgc-flags"
+		const (
+			resourceName  = "mgc-flags"
+			firstInstance = "instance_0"
+		)
 
 		cluster := &memgraphcomv1alpha1.MemgraphCluster{}
 
@@ -1822,7 +1832,7 @@ var _ = Describe("MemgraphCluster Controller", func() {
 				observedCoordinator(0, memgraph.RoleLeader),
 				observedCoordinator(1, memgraph.RoleFollower),
 				observedCoordinator(2, memgraph.RoleFollower),
-				{Name: "instance_0", Health: "up", Role: memgraph.RoleMain},
+				{Name: firstInstance, Health: "up", Role: memgraph.RoleMain},
 				{Name: "instance_1", Health: "up", Role: memgraph.RoleReplica},
 			}
 		}
@@ -2073,6 +2083,150 @@ var _ = Describe("MemgraphCluster Controller", func() {
 				"a removed flag issues no SET: the setting reverts when the instance next restarts without it")
 			Expect(settings).To(HaveKeyWithValue("log.level", "TRACE"),
 				"a removed flag the operator has a default for goes back to the default, which the flag file now says")
+			Expect(condition(memgraphcomv1alpha1.ConditionConverged).Status).To(Equal(metav1.ConditionTrue))
+		})
+	})
+
+	Context("when the spec carries coordinator settings", func() {
+		const (
+			resourceName  = "mgc-coordinator-settings"
+			firstInstance = "instance_0"
+		)
+
+		cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+
+		observedCoordinator := func(id int, role string) memgraph.Instance {
+			host := fmt.Sprintf("%s-coordinator-%d.%s-coordinator.%s.svc.cluster.local",
+				resourceName, id, resourceName, resourceNamespace)
+			return memgraph.Instance{
+				Name:              fmt.Sprintf("coordinator_%d", id),
+				BoltServer:        fmt.Sprintf("%s:%d", host, memgraphcomv1alpha1.BoltPort),
+				CoordinatorServer: fmt.Sprintf("%s:%d", host, memgraphcomv1alpha1.CoordinatorPort),
+				ManagementServer:  fmt.Sprintf("%s:%d", host, memgraphcomv1alpha1.ManagementPort),
+				Health:            "up", Role: role,
+			}
+		}
+		setSettings := func(settings map[string]memgraphcomv1alpha1.SettingValue) {
+			GinkgoHelper()
+			get(resourceName, cluster)
+			cluster.Spec.CoordinatorSettings = settings
+			Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
+		}
+		condition := func(condType string) *metav1.Condition {
+			GinkgoHelper()
+			get(resourceName, cluster)
+			return apimeta.FindStatusCondition(cluster.Status.Conditions, condType)
+		}
+		coordinatorSets := func() []string {
+			var sets []string
+			for _, command := range fake.executedCommands() {
+				if strings.Contains(command, "SET COORDINATOR SETTING") {
+					sets = append(sets, command)
+				}
+			}
+			return sets
+		}
+
+		BeforeEach(func() {
+			resource := &memgraphcomv1alpha1.MemgraphCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: resourceNamespace},
+				Spec: memgraphcomv1alpha1.MemgraphClusterSpec{
+					CoordinatorSettings: map[string]memgraphcomv1alpha1.SettingValue{
+						downTimeoutSetting:   "7",
+						"sync_failover_only": settingOn,
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+			get(resourceName, cluster)
+
+			// The leader is coordinator_1: the pass must write wherever it
+			// connected, not on a coordinator it picked by ordinal.
+			fake.setInstances([]memgraph.Instance{
+				observedCoordinator(0, memgraph.RoleFollower),
+				observedCoordinator(1, memgraph.RoleLeader),
+				observedCoordinator(2, memgraph.RoleFollower),
+				{Name: firstInstance, Health: "up", Role: memgraph.RoleMain},
+				{Name: "instance_1", Health: "up", Role: memgraph.RoleReplica},
+			})
+			reconcileCluster(resourceName)
+			markWorkloadsReady(resourceName)
+		})
+
+		AfterEach(func() {
+			get(resourceName, cluster)
+			Expect(k8sClient.Delete(ctx, cluster)).To(Succeed())
+			deleteOwned(resourceName)
+			for _, suffix := range []string{coordinatorSuffix, dataSuffix} {
+				cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
+					Name: resourceName + suffix + "-flags", Namespace: resourceNamespace,
+				}}
+				Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, cm))).To(Succeed())
+			}
+		})
+
+		It("should write only the settings that differ, once, through the leader connection", func() {
+			reconcileCluster(resourceName)
+
+			view := fake.coordinatorSettingsView()
+			Expect(view).To(HaveKeyWithValue(downTimeoutSetting, "7"))
+			Expect(view).To(HaveKeyWithValue("sync_failover_only", string(settingOn)), "already the default, so untouched")
+			Expect(view).To(HaveKeyWithValue(globalReadOnly, string(settingOff)), "a setting the spec does not name is left alone")
+			Expect(coordinatorSets()).To(ConsistOf(
+				observedCoordinator(1, memgraph.RoleLeader).BoltServer +
+					`: SET COORDINATOR SETTING "` + downTimeoutSetting + `" TO "7"`,
+			))
+			Expect(condition(memgraphcomv1alpha1.ConditionConverged).Status).To(Equal(metav1.ConditionTrue))
+
+			sts := &appsv1.StatefulSet{}
+			get(resourceName+coordinatorSuffix, sts)
+			cm := &corev1.ConfigMap{}
+			get(resourceName+coordinatorSuffix+"-flags", cm)
+			Expect(cm.Data[resources.FlagFileKey]).NotTo(ContainSubstring("instance_down"),
+				"a coordinator setting is not a flag and never reaches the flag file")
+
+			By("issuing nothing on the next pass")
+			reconcileCluster(resourceName)
+			Expect(coordinatorSets()).To(HaveLen(1))
+
+			By("leaving the setting as it is once its key is removed")
+			setSettings(map[string]memgraphcomv1alpha1.SettingValue{})
+			reconcileCluster(resourceName)
+			Expect(fake.coordinatorSettingsView()).To(HaveKeyWithValue(downTimeoutSetting, "7"))
+			Expect(coordinatorSets()).To(HaveLen(1))
+		})
+
+		It("should wait while no ready leader reports the settings, and never write on an empty view", func() {
+			fake.setCoordinatorSettingsUnknown(true)
+			result := reconcileCluster(resourceName)
+
+			Expect(coordinatorSets()).To(BeEmpty())
+			converged := condition(memgraphcomv1alpha1.ConditionConverged)
+			Expect(converged.Status).To(Equal(metav1.ConditionFalse))
+			Expect(converged.Reason).To(Equal(memgraphcomv1alpha1.ReasonSettingsPending))
+			Expect(converged.Message).To(ContainSubstring("coordinator settings"))
+			Expect(result.RequeueAfter).To(Equal(requeueWhilePending))
+
+			fake.setCoordinatorSettingsUnknown(false)
+			reconcileCluster(resourceName)
+			Expect(fake.coordinatorSettingsView()).To(HaveKeyWithValue(downTimeoutSetting, "7"))
+			Expect(condition(memgraphcomv1alpha1.ConditionConverged).Status).To(Equal(metav1.ConditionTrue))
+		})
+
+		It("should report a setting the coordinators refuse and clear once it is fixed", func() {
+			setSettings(map[string]memgraphcomv1alpha1.SettingValue{futureSetting: "1"})
+			reconcileCluster(resourceName)
+
+			converged := condition(memgraphcomv1alpha1.ConditionConverged)
+			Expect(converged.Status).To(Equal(metav1.ConditionFalse))
+			Expect(converged.Reason).To(Equal(memgraphcomv1alpha1.ReasonSettingsRejected))
+			Expect(converged.Message).To(ContainSubstring(`SET COORDINATOR SETTING "` + futureSetting + `" TO "1"`))
+			Expect(converged.Message).To(ContainSubstring("doesn't exist on coordinators"))
+			Expect(condition(memgraphcomv1alpha1.ConditionReady).Status).To(Equal(metav1.ConditionTrue))
+
+			setSettings(map[string]memgraphcomv1alpha1.SettingValue{globalReadOnly: settingOn})
+			reconcileCluster(resourceName)
+			Expect(fake.coordinatorSettingsView()).To(HaveKeyWithValue(globalReadOnly, string(settingOn)))
 			Expect(condition(memgraphcomv1alpha1.ConditionConverged).Status).To(Equal(metav1.ConditionTrue))
 		})
 	})

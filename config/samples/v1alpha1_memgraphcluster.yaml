@@ -328,6 +328,20 @@ spec:
       log-level: INFO
       # Startup-only: changing it rolls the data pods,
       storage-snapshot-on-exit: "false"
+  # The cluster-wide coordinator settings, which are not flags: SHOW
+  # COORDINATOR SETTINGS lists them and SET COORDINATOR SETTING changes them,
+  # once, in Raft, for every coordinator. Nothing restarts and nothing lands
+  # in a flag file. Keys are the setting names as Memgraph spells them; the
+  # three boolean ones (enabled_reads_on_main, sync_failover_only,
+  # global_read_only) take "true"/"false", the numeric ones digits. Removing a
+  # key leaves the setting where it is. See docs/flags.md.
+  coordinatorSettings:
+    # How long a coordinator waits before declaring an instance down. Lower
+    # for a faster failover, higher on a network that drops heartbeats.
+    instance_down_timeout_sec: "5"
+    # Serve reads from MAIN too. The one knob a single-data-instance cluster
+    # needs, since the routing table otherwise lists no reader at all.
+    enabled_reads_on_main: "false"
   # Any pod volume the operator does not provision itself, plus where to mount
   # it in the Memgraph container. Entries are plain core/v1 volumes and volume
   # mounts, appended after the operator's own — the usual reason to reach for

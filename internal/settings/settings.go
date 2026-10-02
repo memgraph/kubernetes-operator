@@ -14,12 +14,13 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package settings is the pure core behind spec.flags: which Memgraph flags
-// can be changed on a running instance, under which SHOW DATABASE SETTINGS
-// name, and what SET DATABASE SETTING commands bring one instance's settings
-// in line with the flags it should run with. Nothing here touches Kubernetes
-// or Bolt; the controller feeds it the rendered flag file and one instance's
-// observed settings and issues what comes back.
+// Package settings is the pure core behind spec.flags and
+// spec.coordinatorSettings: which Memgraph flags can be changed on a running
+// instance, under which SHOW DATABASE SETTINGS name, and what SET commands
+// bring an observed settings view in line with a desired one. Nothing here
+// touches Kubernetes or Bolt; the controller feeds it the rendered flag file
+// or the coordinator settings block plus the observed view and issues what
+// comes back.
 package settings
 
 import (
@@ -106,12 +107,25 @@ type Change struct {
 // reports, so removing a flag changes nothing until the instance restarts
 // without it. A startup-only flag is never planned.
 func Plan(flags map[string]string, observed map[string]string) []Change {
-	var changes []Change
+	desired := make(map[string]string, len(flags))
 	for flag, value := range flags {
-		setting, ok := Setting(flag)
-		if !ok {
-			continue
+		if setting, ok := Setting(flag); ok {
+			desired[setting] = value
 		}
+	}
+	return Diff(desired, observed)
+}
+
+// Diff is the diff behind Plan without the flag table: desired settings by
+// their setting name against the observed view, the changes that bring the
+// observed in line, ordered by name. It is what the cluster-wide coordinator
+// settings use, since spec.coordinatorSettings already speaks in setting
+// names. The rules are Plan's: only desired keys are compared, a setting the
+// view does not report is planned, and a key absent from desired is left
+// alone whatever the view says.
+func Diff(desired map[string]string, observed map[string]string) []Change {
+	var changes []Change
+	for setting, value := range desired {
 		if current, reported := observed[setting]; reported && current == value {
 			continue
 		}

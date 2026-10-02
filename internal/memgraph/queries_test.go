@@ -357,3 +357,13 @@ func TestSetSettingQuery(t *testing.T) {
 		}
 	}
 }
+
+func TestCoordinatorSettingQueries(t *testing.T) {
+	if want := "SHOW COORDINATOR SETTINGS"; showCoordinatorSettingsQuery != want {
+		t.Errorf("showCoordinatorSettingsQuery = %q, want %q", showCoordinatorSettingsQuery, want)
+	}
+	got := setCoordinatorSettingQuery("instance_down_timeout_sec", "7")
+	if want := `SET COORDINATOR SETTING "instance_down_timeout_sec" TO "7"`; got != want {
+		t.Errorf("setCoordinatorSettingQuery() = %s, want %s", got, want)
+	}
+}

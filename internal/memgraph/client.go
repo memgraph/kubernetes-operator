@@ -218,6 +218,20 @@ type Client interface {
 	// report, because retrying changes neither.
 	SetSetting(ctx context.Context, name, value string) error
 
+	// ShowCoordinatorSettings reports the cluster-wide coordinator settings,
+	// setting name to value, as SHOW COORDINATOR SETTINGS lists them. Only a
+	// coordinator answers it, and a follower relays the leader's answer; a
+	// coordinator that cannot reach a ready leader answers with no rows and a
+	// warning rather than failing, so an empty view means "cannot tell" and
+	// nothing is written on the strength of it.
+	ShowCoordinatorSettings(ctx context.Context) (map[string]string, error)
+
+	// SetCoordinatorSetting changes one cluster-wide coordinator setting. It is
+	// a Raft write, so it can be issued on any coordinator — a follower forwards
+	// it to the leader — and every coordinator sees it. Memgraph refuses a
+	// setting it does not have and a value it cannot parse, and says which.
+	SetCoordinatorSetting(ctx context.Context, name, value string) error
+
 	Close(ctx context.Context) error
 }
 
