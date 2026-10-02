@@ -48,6 +48,7 @@ import (
 	"github.com/memgraph/kubernetes-operator/internal/planner"
 	"github.com/memgraph/kubernetes-operator/internal/resources"
 	"github.com/memgraph/kubernetes-operator/internal/rollout"
+	"github.com/memgraph/kubernetes-operator/internal/settings"
 )
 
 // fieldOwner identifies this controller as the server-side-apply field
@@ -193,10 +194,14 @@ func (r *MemgraphClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	// is shed, and the pass that sheds the pod is the one that drops its way in.
 	external := r.desiredExternal(&cluster, replicas.data.applied)
 	monitoring := r.desiredMonitoring(&cluster, replicas)
-	desired := make([]client.Object, 0, 4+len(external)+len(monitoring))
+	desired := make([]client.Object, 0, 6+len(external)+len(monitoring))
 	desired = append(desired,
 		resources.CoordinatorHeadlessService(&cluster),
 		resources.DataHeadlessService(&cluster),
+		// The flag files go before the StatefulSets that mount them, so a pod
+		// the apply creates finds its file already there.
+		resources.CoordinatorFlagsConfigMap(&cluster),
+		resources.DataFlagsConfigMap(&cluster),
 		resources.CoordinatorStatefulSet(&cluster, replicas.coordinators.applied),
 		resources.DataStatefulSet(&cluster, replicas.data.applied),
 	)
@@ -1012,27 +1017,14 @@ func (r *MemgraphClusterReconciler) reconcileRegistration(
 		// retirement is still moving MAIN around and a pending registration means
 		// the cluster is not the one the spec describes, so neither is a moment to
 		// start deleting pods.
-		converged := trueCondition(memgraphcomv1alpha1.ConditionConverged,
-			memgraphcomv1alpha1.ReasonAllInstancesRegistered,
-			fmt.Sprintf("All %d declared instances are registered", len(topology.Coordinators)+len(topology.DataInstances)))
-		switch unservable := joinNonEmpty(exposure.failure, r.serviceMonitorFailure(cluster)); {
-		case unservable != "":
-			// The exposure or the ServiceMonitor the spec asks for cannot be
-			// served on this cluster, and waiting will not change that: reported
-			// the way a rejected apply is, while the cluster keeps serving —
-			// in-cluster at pod addresses, unscraped by the operator's object.
-			log.Info("Could not serve what the spec asks for", "reason", unservable)
-			converged = notConvergedCondition(memgraphcomv1alpha1.ReasonApplyFailed, unservable)
-		case len(exposure.pending) > 0:
-			// Every member is registered, but not yet at the address the spec
-			// asks for: the members behind these objects are announced at their
-			// pod addresses until the LoadBalancers or the Gateway get theirs. That
-			// is cloud provisioning the operator can only wait on, and it does not
-			// hold up the restart below — the pods are none of its business.
-			log.Info("Waited for external addresses", "objects", exposure.pending)
-			converged = notConvergedCondition(memgraphcomv1alpha1.ReasonExternalAddressPending,
-				"Waiting for an external address on "+strings.Join(exposure.pending, ", "))
-		}
+		//
+		// The run-time flags are applied first, before the roll below picks a
+		// pod: a flag Memgraph can change on a running instance reaches every
+		// ready pod now, whatever else the pass goes on to do, and the flag file
+		// already carries it for any pod the roll replaces. A pod the roll has
+		// down is simply not ready and is caught up on the next pass.
+		applied := r.reconcileSettings(ctx, cluster, replicas, roles)
+		converged := r.convergedCondition(ctx, cluster, topology, exposure, applied)
 
 		switch decision := rollout.Next(roles.data, roles.coordinators, observed, lag); decision.Action {
 		case rollout.Delete:
@@ -1068,6 +1060,12 @@ func (r *MemgraphClusterReconciler) reconcileRegistration(
 		if statusErr := r.writeStatus(ctx, cluster, latest,
 			readyOrNot(latest.main), converged, updated); statusErr != nil {
 			return ctrl.Result{}, statusErr
+		}
+		if !applied.done() {
+			// A setting is still owed to some pod: a Bolt endpoint lagging its
+			// pod's readiness clears on its own, and a rejection is retried for
+			// the reason a rejected registration is.
+			return ctrl.Result{RequeueAfter: requeueWhilePending}, nil
 		}
 		return ctrl.Result{RequeueAfter: resyncInterval}, nil
 	}
@@ -1119,6 +1117,177 @@ func (r *MemgraphClusterReconciler) reconcileRegistration(
 	// Registration was issued, not yet observed back; verify convergence on a
 	// follow-up reconcile instead of assuming success.
 	return ctrl.Result{RequeueAfter: requeueAfterRegistration}, nil
+}
+
+// convergedCondition is the Converged condition of a cluster whose every
+// declared member is registered: True, unless something the spec asks for
+// beyond registration is not there yet. The reasons are ranked: an exposure
+// or ServiceMonitor the cluster cannot serve at all, then an external address
+// still being provisioned, then a run-time setting an instance refused, then
+// one owed to a pod that did not answer — most permanent first, so the message
+// names what a human has to act on before what will clear on its own.
+func (r *MemgraphClusterReconciler) convergedCondition(
+	ctx context.Context,
+	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	topology planner.Topology,
+	exposure externalAccess,
+	applied settingsOutcome,
+) metav1.Condition {
+	log := logf.FromContext(ctx)
+	switch unservable := joinNonEmpty(exposure.failure, r.serviceMonitorFailure(cluster)); {
+	case unservable != "":
+		// The exposure or the ServiceMonitor the spec asks for cannot be
+		// served on this cluster, and waiting will not change that: reported
+		// the way a rejected apply is, while the cluster keeps serving —
+		// in-cluster at pod addresses, unscraped by the operator's object.
+		log.Info("Could not serve what the spec asks for", "reason", unservable)
+		return notConvergedCondition(memgraphcomv1alpha1.ReasonApplyFailed, unservable)
+	case len(exposure.pending) > 0:
+		// Every member is registered, but not yet at the address the spec
+		// asks for: the members behind these objects are announced at their
+		// pod addresses until the LoadBalancers or the Gateway get theirs. That
+		// is cloud provisioning the operator can only wait on, and it does not
+		// hold up the roll — the pods are none of its business.
+		log.Info("Waited for external addresses", "objects", exposure.pending)
+		return notConvergedCondition(memgraphcomv1alpha1.ReasonExternalAddressPending,
+			"Waiting for an external address on "+strings.Join(exposure.pending, ", "))
+	case len(applied.rejected) > 0:
+		// An instance refused a run-time setting. Nothing the operator can do
+		// clears that; the message names what to change.
+		log.Info("Could not apply a run-time setting", "reason", applied.rejected)
+		return notConvergedCondition(memgraphcomv1alpha1.ReasonSettingsRejected,
+			truncateMessage(strings.Join(applied.rejected, "; ")))
+	case len(applied.pending) > 0:
+		log.Info("Waited to apply run-time settings", "pods", applied.pending)
+		return notConvergedCondition(memgraphcomv1alpha1.ReasonSettingsPending,
+			"Waiting to apply run-time settings on "+strings.Join(applied.pending, ", "))
+	}
+	return trueCondition(memgraphcomv1alpha1.ConditionConverged,
+		memgraphcomv1alpha1.ReasonAllInstancesRegistered,
+		fmt.Sprintf("All %d declared instances are registered", len(topology.Coordinators)+len(topology.DataInstances)))
+}
+
+// settingsOutcome is what reconcileSettings could not finish in a pass: the
+// pods it could not read settings from, and the SETs an instance refused,
+// each as a message naming the pod, the setting and Memgraph's error.
+type settingsOutcome struct {
+	pending  []string
+	rejected []string
+}
+
+func (o settingsOutcome) done() bool {
+	return len(o.pending) == 0 && len(o.rejected) == 0
+}
+
+// reconcileSettings brings every ready pod's run-time settings in line with the
+// flags its role's flag file says it runs with, one Bolt connection per pod:
+// a run-time setting is local to the instance that receives it, so unlike the
+// registration commands there is no leader to issue them through. Each pod is
+// read before it is written, and a pod already in line is left alone.
+//
+// Nothing here fails the pass. A pod that does not answer is reported pending
+// and read again next pass; a SET an instance refuses is reported with
+// Memgraph's error and retried the same way, because a value the validator
+// rejects at run time would be rejected at startup too, and restarting onto
+// it would only crash-loop the pod. A pod that is not ready is skipped
+// outright and not reported: it is the roll's or the kubelet's business, and
+// the flag file carries its settings for when it comes up.
+func (r *MemgraphClusterReconciler) reconcileSettings(
+	ctx context.Context,
+	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	replicas replicaCounts,
+	roles rolloutRoles,
+) settingsOutcome {
+	log := logf.FromContext(ctx)
+	var outcome settingsOutcome
+
+	for _, role := range []struct {
+		endpoints []resources.Endpoint
+		flags     map[string]string
+		pods      rollout.Role
+	}{
+		{
+			resources.DataEndpoints(cluster, replicas.data.applied),
+			resources.DataFlags(cluster),
+			roles.data,
+		},
+		{
+			resources.CoordinatorEndpoints(cluster, replicas.coordinators.applied),
+			resources.CoordinatorFlags(cluster),
+			roles.coordinators,
+		},
+	} {
+		ready := make(map[string]bool, len(role.pods.Pods))
+		for _, pod := range role.pods.Pods {
+			ready[pod.Name] = pod.Ready
+		}
+		for _, endpoint := range role.endpoints {
+			if !ready[endpoint.Pod] {
+				continue
+			}
+			changes, err := r.applySettings(ctx, endpoint, role.flags)
+			for _, change := range changes {
+				log.Info("Applied run-time setting", "pod", endpoint.Pod, "setting", change.Setting, "value", change.Value)
+			}
+			var rejection *settingRejected
+			switch {
+			case err == nil:
+			case errors.As(err, &rejection):
+				outcome.rejected = append(outcome.rejected, fmt.Sprintf("%s rejected %s: %v",
+					endpoint.Pod, rejection.command, rejection.err))
+			default:
+				log.Info("Could not read run-time settings from a ready pod", "pod", endpoint.Pod, "reason", err.Error())
+				outcome.pending = append(outcome.pending, endpoint.Pod)
+			}
+		}
+	}
+	return outcome
+}
+
+// settingRejected is a SET DATABASE SETTING the instance refused, as opposed
+// to a pod the operator could not talk to.
+type settingRejected struct {
+	command string
+	err     error
+}
+
+func (e *settingRejected) Error() string { return fmt.Sprintf("%s: %v", e.command, e.err) }
+func (e *settingRejected) Unwrap() error { return e.err }
+
+// applySettings reads one instance's settings and issues the SETs that bring
+// them in line with its flags, returning the changes that landed. A refused
+// SET stops the pod's remaining changes for this pass and comes back as a
+// settingRejected; any other error is a pod that could not be read.
+func (r *MemgraphClusterReconciler) applySettings(
+	ctx context.Context,
+	endpoint resources.Endpoint,
+	flags map[string]string,
+) ([]settings.Change, error) {
+	log := logf.FromContext(ctx)
+	conn, err := r.Memgraph.Connect(ctx, endpoint.Address, endpoint.TLS)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if err := conn.Close(ctx); err != nil {
+			log.Error(err, "Failed to close instance connection", "pod", endpoint.Pod)
+		}
+	}()
+	observed, err := conn.ShowSettings(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var applied []settings.Change
+	for _, change := range settings.Plan(flags, observed) {
+		if err := conn.SetSetting(ctx, change.Setting, change.Value); err != nil {
+			return applied, &settingRejected{
+				command: fmt.Sprintf("SET DATABASE SETTING %q TO %q", change.Setting, change.Value),
+				err:     err,
+			}
+		}
+		applied = append(applied, change)
+	}
+	return applied, nil
 }
 
 // shedRetiredPods applies the shrinking roles' StatefulSets at their declared
@@ -1376,7 +1545,7 @@ var errNoCoordinatorLeader = errors.New("no coordinator reported a leader")
 // state that is neither current nor writable.
 func (r *MemgraphClusterReconciler) observeCluster(
 	ctx context.Context,
-	endpoints []resources.CoordinatorEndpoint,
+	endpoints []resources.Endpoint,
 ) (memgraph.Client, []memgraph.Instance, error) {
 	var errs []error
 	leaderless := false
@@ -1436,7 +1605,7 @@ func (r *MemgraphClusterReconciler) observeCluster(
 // exposed cluster may be the coordinators' shared LoadBalancer; the connection
 // then lands on whichever coordinator it picks and, if that is not the leader,
 // the mutating commands are forwarded to the leader by the coordinator anyway.
-func leaderAddress(endpoints []resources.CoordinatorEndpoint, observed []memgraph.Instance, name string) (string, bool) {
+func leaderAddress(endpoints []resources.Endpoint, observed []memgraph.Instance, name string) (string, bool) {
 	for _, coordinator := range endpoints {
 		if coordinator.Name == name {
 			return coordinator.Address, true

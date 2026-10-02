@@ -34,8 +34,8 @@ step after the replica is provably caught up.
 
 ## Anatomy of one step, measured
 
-Measured on AKS on 2026-09-23 (Memgraph 3.13.0, two data instances, a flag flipped in
-`extraArgs.data`). The non-MAIN pod `data-1` was deleted at 10:03:33; the MAIN's pod `data-0` was
+Measured on AKS on 2026-09-23 (Memgraph 3.13.0, two data instances, a startup-only flag flipped in
+what is now `flags.data`). The non-MAIN pod `data-1` was deleted at 10:03:33; the MAIN's pod `data-0` was
 deleted 37 s later.
 
 | Phase | Window | Time |

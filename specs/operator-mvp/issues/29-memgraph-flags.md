@@ -1,0 +1,35 @@
+# Memgraph flags: a map, a flag file, and run-time settings applied live
+
+**Type**: AFK
+
+## Parent
+
+`specs/operator-mvp/PRD.md` — user story 18, "pass additional non-secret Memgraph flags ... per role, so that I can use any Memgraph flag without waiting for a typed CRD field". `09-pod-tuning-knobs.md` delivered it as `extraArgs`, a raw argument list; this replaces it. Scoped in the 2026-10-02 interview.
+
+## What to build
+
+`spec.flags.coordinators` and `spec.flags.data`, each a `map[string]string` from flag name (no leading dashes, either gflags spelling) to value, replacing `extraArgs` outright: nothing is released, and two ways of spelling one flag would need a precedence rule between them. The HA chart's `commonArgs.<role>` vocabulary, as a map.
+
+The flags do not travel as container arguments. An argument is part of the pod template, so a change to one bumps the StatefulSet revision and the operator rolls every pod — which is exactly wrong for a flag Memgraph can change on a running instance, and also misses a container restart, which keeps the old pod spec. Each role's flags go into a ConfigMap `<cluster>-<role>-flags` as a gflags flag file (`--name=value` per line, canonical underscore spelling, sorted), mounted whole so the kubelet refreshes it, and loaded with `--flag-file` as the first flag on the command line. The operator's own overridable logging defaults (`log-level TRACE`, `also-log-to-stderr true`, `log-retention-days 35`) move into the file as the base the map is merged over, user key winning. The command line then carries exactly the pinned flags — the ones admission denies in the map — and gflags takes the last occurrence, so a pinned flag after the file wins regardless. Facts proven against the pinned image: Memgraph's gflags build names the flag `flag_file` and processes it in argument order; a flag set from the file counts as explicitly set, so it beats a persisted run-time setting at startup like a command-line flag does; an unknown name in the file is silently ignored while a bad value is still fatal.
+
+A new pure core, `internal/settings`, holds the table of the flags Memgraph also exposes as run-time settings (eighteen, from `src/flags/run_time_configurable.cpp`, flag name ≠ setting name: `query-execution-timeout-sec` is `query.timeout`) and the diff: the rendered flag file plus one instance's `SHOW DATABASE SETTINGS` in, the `SET DATABASE SETTING` commands for that instance out, only for flags present in the file, sorted, empty when in line. The pod template carries one annotation hashing only the startup-only lines of the file, so a run-time change leaves the revision alone and a startup-only change rolls through the existing rollout core with no new code there. `memgraph.Client` gains `ShowSettings` and `SetSetting` (string literals rendered as Cypher strings; Memgraph refuses Bolt parameters in that grammar). The controller, in the converged branch before the roll picks a pod, dials every ready pod of both roles over pod DNS — new for data instances — reads before writing, and reports what it could not finish on `Converged`: `SettingsPending` naming ready pods that did not answer, `SettingsRejected` naming the pod, the command and Memgraph's error verbatim; neither fails the pass, neither escalates to a restart, and an unready pod is skipped without being reported.
+
+Removing a key removes its line and issues no `SET`: a non-persisted run-time setting reverts at the next restart, a persisted one keeps its last value until core offers a reset (documented; Andi will say if core changes). The one exception is by construction: a removed override of an operator default goes back to the default, because the file then says so.
+
+Denied keys, in either spelling, by CEL on the map: the ports, `bolt-address`, `monitoring-address`, `monitoring-port`, `metrics-port`, `coordinator-id`, `coordinator-hostname`, `data-directory`, `log-file`, the five TLS file flags, `metrics-format`, and `aws-access-key`/`aws-secret-key` because the CR carries no secret material (docs say to use `SET DATABASE SETTING` by hand; a Secret reference may follow). `replication-port` leaves the list: Memgraph has no such flag. Further rules: keys are flag names without dashes, values are single-line and at most 4096 characters, no two keys normalise to one flag, at most 64 per role.
+
+## Acceptance criteria
+
+- [ ] `spec.flags.{coordinators,data}` are `map[string]string`; `extraArgs` is gone from the types, the CRD, the chart, the sample, the docs and `CLAUDE.md`
+- [ ] Both roles' pods mount `<cluster>-<role>-flags` read-only at `/etc/memgraph-flags` and start with `--flag-file=/etc/memgraph-flags/memgraph.flags` first, followed by exactly the pinned flags; no value from `spec.flags` appears on either role's command line (the coordinator's shell wrapper included); builder tests pin both roles, the file contents, the merge over the defaults and the underscore normalisation
+- [ ] The pod template annotation `memgraph.com/flags-restart-hash` changes for a startup-only flag and not for a run-time one; a builder test proves both directions and the per-role independence
+- [ ] `internal/settings` pins the eighteen-entry table against Memgraph 3.13.0 and the diff's rules (only flags present, sorted, unreported setting planned, startup-only never planned)
+- [ ] Envtest: the ConfigMaps are owned and hold the rendered file; a run-time flag is `SET` on every ready pod of its role and nowhere else, once, with no template change; a startup-only change changes the template; an unready pod is skipped silently and an unreachable ready one is reported `SettingsPending` and caught up later; a refused `SET` is reported `SettingsRejected` with Memgraph's error, retried, and clears when the flag is fixed; a removed flag issues no `SET` while a removed override of a default does
+- [ ] Admission rejects every denied key in both spellings, leading dashes, a multi-line value, two spellings of one flag and an AWS credential; accepts a legitimate neighbour such as `bolt-num-workers` and both spellings of a run-time flag
+- [ ] `make manifests generate chart-sync` regenerated, `make chart-verify` green, the CRD's compact JSON stays under the 256KB client-side apply limit
+- [ ] E2E (quickstart cluster): a run-time flag set on both roles reaches every pod's `SHOW DATABASE SETTING` with no pod UID changing and `Updated` staying True; a following edit changing a startup-only flag and the run-time one together lands the run-time value on every pod, rolls every pod in ISSU order, and leaves every pod on the new values afterwards; the ConfigMaps carry the rendered lines
+- [ ] `docs/flags.md` documents the map, the file, the pinned command line, the live table, the conditions, removal semantics, the denied keys and the silently-ignored-typo caveat; the README, the sample and `CLAUDE.md` describe the block
+
+## Blocked by
+
+- `17-sequenced-rolling-restart.md`: the roll a startup-only flag change rides on

@@ -28,6 +28,9 @@ import (
 
 const testInstanceName = "instance_1"
 
+// logLevelSetting is the run-time setting the settings cases use.
+const logLevelSetting = "log.level"
+
 // The SHOW REPLICATION LAG column and map keys, plus the two databases the cases
 // below report on. They are spelled out here rather than shared with the parser
 // on purpose: pinning the names the parser reads off the wire is what these tests
@@ -327,5 +330,30 @@ func TestInstanceFromRecordToleratesMissingColumns(t *testing.T) {
 	want := Instance{Name: testInstanceName, Role: "main"}
 	if diff := cmp.Diff(want, instanceFromRecord(record)); diff != "" {
 		t.Errorf("instanceFromRecord() mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestShowSettingsQuery(t *testing.T) {
+	if want := "SHOW DATABASE SETTINGS"; showSettingsQuery != want {
+		t.Errorf("showSettingsQuery = %q, want %q", showSettingsQuery, want)
+	}
+}
+
+// TestSetSettingQuery pins the literal rendering: Memgraph's grammar takes
+// string literals only, and the value is user text, so a quote or a backslash
+// in it has to come out escaped the way Cypher reads it and nothing else may
+// be touched.
+func TestSetSettingQuery(t *testing.T) {
+	for _, tc := range []struct {
+		name, value, want string
+	}{
+		{logLevelSetting, "INFO", `SET DATABASE SETTING "` + logLevelSetting + `" TO "INFO"`},
+		{"timezone", "", `SET DATABASE SETTING "timezone" TO ""`},
+		{"server.name", `a"b\c 'd' $e {f} %g`, `SET DATABASE SETTING "server.name" TO "a\"b\\c 'd' $e {f} %g"`},
+		{"timezone", "Europe/Zagreb", `SET DATABASE SETTING "timezone" TO "Europe/Zagreb"`},
+	} {
+		if got := setSettingQuery(tc.name, tc.value); got != tc.want {
+			t.Errorf("setSettingQuery(%q, %q) = %s, want %s", tc.name, tc.value, got, tc.want)
+		}
 	}
 }

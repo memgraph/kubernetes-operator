@@ -20,6 +20,7 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/neo4j/neo4j-go-driver/v5/neo4j/db"
 )
 
 // TestDialSchemes pins the connector's contract for a cluster mid-roll: the
@@ -41,5 +42,31 @@ func TestDialSchemes(t *testing.T) {
 				t.Errorf("dialSchemes(%t) mismatch (-want +got):\n%s", tt.tls, diff)
 			}
 		})
+	}
+}
+
+// TestShowSettingsParsing pins the SHOW DATABASE SETTINGS column names the
+// client reads a setting off the wire by, and that a row without a name is
+// refused rather than filed under the empty string.
+func TestShowSettingsParsing(t *testing.T) {
+	const level = "DEBUG"
+	columns := []string{"setting_name", "setting_value"}
+	records := []*db.Record{
+		{Keys: columns, Values: []any{logLevelSetting, level}},
+		{Keys: columns, Values: []any{"storage.snapshot.interval", ""}},
+	}
+	got, err := settingsFromRecords(records)
+	if err != nil {
+		t.Fatalf("settingsFromRecords() error = %v", err)
+	}
+	want := map[string]string{logLevelSetting: level, "storage.snapshot.interval": ""}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("settingsFromRecords() mismatch (-want +got):\n%s", diff)
+	}
+
+	if _, err := settingsFromRecords([]*db.Record{
+		{Keys: columns[1:], Values: []any{level}},
+	}); err == nil {
+		t.Error("settingsFromRecords() accepted a row without a setting_name")
 	}
 }

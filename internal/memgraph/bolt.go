@@ -151,6 +151,35 @@ func (c *boltClient) YieldLeadership(ctx context.Context) error {
 	return err
 }
 
+func (c *boltClient) ShowSettings(ctx context.Context) (map[string]string, error) {
+	records, err := c.run(ctx, showSettingsQuery)
+	if err != nil {
+		return nil, err
+	}
+	return settingsFromRecords(records)
+}
+
+// settingsFromRecords maps the SHOW DATABASE SETTINGS rows to setting name
+// and value. A row without a name is refused: filed under the empty string
+// it would never match a flag, and the planner would then re-issue a SET the
+// instance already holds on every pass.
+func settingsFromRecords(records []*db.Record) (map[string]string, error) {
+	settings := make(map[string]string, len(records))
+	for _, record := range records {
+		name := stringColumn(record, "setting_name")
+		if name == "" {
+			return nil, fmt.Errorf("%s row carries no setting_name", showSettingsQuery)
+		}
+		settings[name] = stringColumn(record, "setting_value")
+	}
+	return settings, nil
+}
+
+func (c *boltClient) SetSetting(ctx context.Context, name, value string) error {
+	_, err := c.run(ctx, setSettingQuery(name, value))
+	return err
+}
+
 func (c *boltClient) Close(ctx context.Context) error {
 	return c.driver.Close(ctx)
 }

@@ -49,7 +49,21 @@ import (
 const dataHostnamePattern = "data-{ordinal}.memgraph.example.com"
 
 // instanceLabel is the identity label every object of a cluster carries.
-const instanceLabel = "app.kubernetes.io/instance"
+const (
+	instanceLabel = "app.kubernetes.io/instance"
+	nameLabel     = "app.kubernetes.io/name"
+)
+
+// The flag names and values the flags specs share, so each is spelled once.
+const (
+	logLevelFlag       = "log-level"
+	logLevelUnderscore = "log_level"
+	snapshotOnExitFlag = "storage-snapshot-on-exit"
+
+	infoLevel memgraphcomv1alpha1.FlagValue = "INFO"
+	flagOn    memgraphcomv1alpha1.FlagValue = "true"
+	flagOff   memgraphcomv1alpha1.FlagValue = "false"
+)
 
 // memgraphContainerName is the name of the database container in every pod,
 // which the sidecar specs assert their container lands beside.
@@ -1568,7 +1582,7 @@ var _ = Describe("MemgraphCluster Controller", func() {
 					Name:      name,
 					Namespace: resourceNamespace,
 					Labels: map[string]string{
-						"app.kubernetes.io/name":        memgraphDbName,
+						nameLabel:                       memgraphDbName,
 						instanceLabel:                   resourceName,
 						"app.kubernetes.io/component":   component,
 						"app.kubernetes.io/managed-by":  "memgraph-operator",
@@ -1781,6 +1795,285 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			Expect(podExists(dataSuffix, 1)).To(BeTrue())
 			Expect(podExists(coordinatorSuffix, 2)).To(BeTrue())
 			Expect(fake.executedCommands()).To(ContainElement(ContainSubstring("REGISTER INSTANCE instance_1")))
+		})
+	})
+
+	Context("when the spec carries Memgraph flags", func() {
+		const resourceName = "mgc-flags"
+
+		cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+
+		podAddress := func(suffix string, ordinal int) string {
+			return fmt.Sprintf("%s%s-%d.%s%s.%s.svc.cluster.local:%d",
+				resourceName, suffix, ordinal, resourceName, suffix, resourceNamespace, memgraphcomv1alpha1.BoltPort)
+		}
+		observedCoordinator := func(id int, role string) memgraph.Instance {
+			host, _, _ := strings.Cut(podAddress(coordinatorSuffix, id), ":")
+			return memgraph.Instance{
+				Name:              fmt.Sprintf("coordinator_%d", id),
+				BoltServer:        fmt.Sprintf("%s:%d", host, memgraphcomv1alpha1.BoltPort),
+				CoordinatorServer: fmt.Sprintf("%s:%d", host, memgraphcomv1alpha1.CoordinatorPort),
+				ManagementServer:  fmt.Sprintf("%s:%d", host, memgraphcomv1alpha1.ManagementPort),
+				Health:            "up", Role: role,
+			}
+		}
+		convergedCluster := func() []memgraph.Instance {
+			return []memgraph.Instance{
+				observedCoordinator(0, memgraph.RoleLeader),
+				observedCoordinator(1, memgraph.RoleFollower),
+				observedCoordinator(2, memgraph.RoleFollower),
+				{Name: "instance_0", Health: "up", Role: memgraph.RoleMain},
+				{Name: "instance_1", Health: "up", Role: memgraph.RoleReplica},
+			}
+		}
+
+		// putPod stands in for the StatefulSet controller and the kubelet envtest
+		// does not run: one role pod, ready or not. The settings pass dials only
+		// ready pods, so a pod has to exist and be ready to be reached at all.
+		putPod := func(suffix, component string, ordinal int, ready bool) {
+			GinkgoHelper()
+			name := fmt.Sprintf("%s%s-%d", resourceName, suffix, ordinal)
+			existing := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: resourceNamespace}}
+			Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, existing))).To(Succeed())
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      name,
+					Namespace: resourceNamespace,
+					Labels: map[string]string{
+						nameLabel:                      memgraphDbName,
+						instanceLabel:                  resourceName,
+						"app.kubernetes.io/component":  component,
+						"app.kubernetes.io/managed-by": "memgraph-operator",
+					},
+				},
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: memgraphDbName, Image: memgraphDbName}}},
+			}
+			Expect(k8sClient.Create(ctx, pod)).To(Succeed())
+			status := corev1.ConditionFalse
+			if ready {
+				status = corev1.ConditionTrue
+			}
+			pod.Status.Conditions = []corev1.PodCondition{{
+				Type: corev1.PodReady, Status: status, LastTransitionTime: metav1.Now(),
+			}}
+			Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
+		}
+		putPods := func() {
+			GinkgoHelper()
+			for ordinal := range 3 {
+				putPod(coordinatorSuffix, "coordinator", ordinal, true)
+			}
+			for ordinal := range 2 {
+				putPod(dataSuffix, "data", ordinal, true)
+			}
+		}
+
+		setFlags := func(flags memgraphcomv1alpha1.FlagsSpec) {
+			GinkgoHelper()
+			get(resourceName, cluster)
+			cluster.Spec.Flags = flags
+			Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
+		}
+		condition := func(condType string) *metav1.Condition {
+			GinkgoHelper()
+			get(resourceName, cluster)
+			return apimeta.FindStatusCondition(cluster.Status.Conditions, condType)
+		}
+		restartHash := func(suffix string) string {
+			GinkgoHelper()
+			sts := &appsv1.StatefulSet{}
+			get(resourceName+suffix, sts)
+			return sts.Spec.Template.Annotations[resources.FlagsRestartAnnotation]
+		}
+		setCommands := func() []string {
+			var sets []string
+			for _, command := range fake.executedCommands() {
+				if strings.Contains(command, "SET DATABASE SETTING") {
+					sets = append(sets, command)
+				}
+			}
+			return sets
+		}
+
+		BeforeEach(func() {
+			resource := &memgraphcomv1alpha1.MemgraphCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: resourceNamespace},
+				Spec: memgraphcomv1alpha1.MemgraphClusterSpec{
+					Flags: memgraphcomv1alpha1.FlagsSpec{
+						Data: map[string]memgraphcomv1alpha1.FlagValue{
+							logLevelFlag:       infoLevel,
+							snapshotOnExitFlag: flagOff,
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+			get(resourceName, cluster)
+
+			fake.setInstances(convergedCluster())
+			reconcileCluster(resourceName)
+			markWorkloadsReady(resourceName)
+			putPods()
+		})
+
+		AfterEach(func() {
+			get(resourceName, cluster)
+			Expect(k8sClient.Delete(ctx, cluster)).To(Succeed())
+			deleteOwned(resourceName)
+			for _, suffix := range []string{coordinatorSuffix, dataSuffix} {
+				cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
+					Name: resourceName + suffix + "-flags", Namespace: resourceNamespace,
+				}}
+				Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, cm))).To(Succeed())
+			}
+			Expect(k8sClient.DeleteAllOf(ctx, &corev1.Pod{},
+				client.InNamespace(resourceNamespace),
+				client.MatchingLabels{instanceLabel: resourceName},
+				client.GracePeriodSeconds(0),
+			)).To(Succeed())
+		})
+
+		It("should write each role's flag file into an owned ConfigMap the pods mount", func() {
+			data := &corev1.ConfigMap{}
+			get(resourceName+dataSuffix+"-flags", data)
+			expectControlledBy(data, cluster)
+			Expect(data.Data[resources.FlagFileKey]).To(Equal(
+				"--also_log_to_stderr=true\n--log_level=INFO\n--log_retention_days=35\n--storage_snapshot_on_exit=false\n"))
+
+			coordinators := &corev1.ConfigMap{}
+			get(resourceName+coordinatorSuffix+"-flags", coordinators)
+			Expect(coordinators.Data[resources.FlagFileKey]).To(Equal(
+				"--also_log_to_stderr=true\n--log_level=TRACE\n--log_retention_days=35\n"),
+				"the data flags are not the coordinators'")
+
+			sts := &appsv1.StatefulSet{}
+			get(resourceName+dataSuffix, sts)
+			container := sts.Spec.Template.Spec.Containers[0]
+			Expect(container.Args[0]).To(Equal("--flag-file=/etc/memgraph-flags/memgraph.flags"))
+			Expect(container.Args).NotTo(ContainElement(ContainSubstring("snapshot")),
+				"spec.flags must not reach the command line")
+			Expect(sts.Spec.Template.Spec.Volumes).To(ContainElement(HaveField("ConfigMap.Name", data.Name)))
+		})
+
+		It("should apply a run-time flag to every ready pod of the role and roll nothing", func() {
+			hashBefore := restartHash(dataSuffix)
+			reconcileCluster(resourceName)
+
+			for ordinal := range 2 {
+				Expect(fake.settingsOf(podAddress(dataSuffix, ordinal))).To(HaveKeyWithValue("log.level", string(infoLevel)),
+					"data pod %d must have been SET", ordinal)
+			}
+			for ordinal := range 3 {
+				Expect(fake.settingsOf(podAddress(coordinatorSuffix, ordinal))).To(HaveKeyWithValue("log.level", "TRACE"),
+					"the coordinators keep their default, the flag is the data instances'")
+			}
+			Expect(setCommands()).To(ConsistOf(
+				podAddress(dataSuffix, 0)+`: SET DATABASE SETTING "log.level" TO "INFO"`,
+				podAddress(dataSuffix, 1)+`: SET DATABASE SETTING "log.level" TO "INFO"`,
+			), "exactly the run-time flag that differs, once per instance; the startup-only one is never SET")
+			Expect(restartHash(dataSuffix)).To(Equal(hashBefore), "a run-time flag is not part of the pod template")
+			Expect(condition(memgraphcomv1alpha1.ConditionConverged).Status).To(Equal(metav1.ConditionTrue))
+			Expect(condition(memgraphcomv1alpha1.ConditionUpdated).Status).To(Equal(metav1.ConditionTrue))
+
+			By("issuing nothing on the next pass, because every instance is in line")
+			reconcileCluster(resourceName)
+			Expect(setCommands()).To(HaveLen(2))
+
+			By("following a further change to the same flag without touching the template")
+			setFlags(memgraphcomv1alpha1.FlagsSpec{Data: map[string]memgraphcomv1alpha1.FlagValue{
+				logLevelFlag: "DEBUG", snapshotOnExitFlag: flagOff,
+			}})
+			reconcileCluster(resourceName)
+			Expect(fake.settingsOf(podAddress(dataSuffix, 1))).To(HaveKeyWithValue("log.level", "DEBUG"))
+			Expect(restartHash(dataSuffix)).To(Equal(hashBefore))
+		})
+
+		It("should change the pod template, and so roll, for a startup-only flag", func() {
+			hashBefore := restartHash(dataSuffix)
+			coordinatorsBefore := restartHash(coordinatorSuffix)
+
+			setFlags(memgraphcomv1alpha1.FlagsSpec{Data: map[string]memgraphcomv1alpha1.FlagValue{
+				logLevelFlag: infoLevel, snapshotOnExitFlag: flagOn,
+			}})
+			reconcileCluster(resourceName)
+
+			Expect(restartHash(dataSuffix)).NotTo(Equal(hashBefore), "a startup-only flag change must change the template")
+			Expect(restartHash(coordinatorSuffix)).To(Equal(coordinatorsBefore), "the coordinators' flags did not change")
+			Expect(setCommands()).NotTo(ContainElement(ContainSubstring("snapshot")),
+				"a startup-only flag is never SET")
+		})
+
+		It("should skip a pod that is not ready and report a ready pod that does not answer", func() {
+			putPod(dataSuffix, "data", 1, false)
+			fake.setUnreachable(podAddress(coordinatorSuffix, 2), true)
+			setFlags(memgraphcomv1alpha1.FlagsSpec{
+				Coordinators: map[string]memgraphcomv1alpha1.FlagValue{logLevelFlag: "WARNING"},
+				Data:         map[string]memgraphcomv1alpha1.FlagValue{logLevelFlag: infoLevel, snapshotOnExitFlag: flagOff},
+			})
+
+			result := reconcileCluster(resourceName)
+
+			Expect(fake.settingsOf(podAddress(dataSuffix, 0))).To(HaveKeyWithValue("log.level", string(infoLevel)))
+			Expect(fake.settingsOf(podAddress(dataSuffix, 1))).To(HaveKeyWithValue("log.level", "TRACE"),
+				"an unready pod is not dialed")
+			Expect(fake.settingsOf(podAddress(coordinatorSuffix, 0))).To(HaveKeyWithValue("log.level", "WARNING"))
+			converged := condition(memgraphcomv1alpha1.ConditionConverged)
+			Expect(converged.Status).To(Equal(metav1.ConditionFalse))
+			Expect(converged.Reason).To(Equal(memgraphcomv1alpha1.ReasonSettingsPending))
+			Expect(converged.Message).To(ContainSubstring(resourceName + coordinatorSuffix + "-2"))
+			Expect(converged.Message).NotTo(ContainSubstring(resourceName+dataSuffix+"-1"),
+				"an unready pod is the roll's or the kubelet's business, not a setting owed")
+			Expect(result.RequeueAfter).To(Equal(requeueWhilePending))
+
+			By("catching the pod up once it answers")
+			fake.setUnreachable(podAddress(coordinatorSuffix, 2), false)
+			reconcileCluster(resourceName)
+			Expect(fake.settingsOf(podAddress(coordinatorSuffix, 2))).To(HaveKeyWithValue("log.level", "WARNING"))
+			Expect(condition(memgraphcomv1alpha1.ConditionConverged).Status).To(Equal(metav1.ConditionTrue))
+		})
+
+		It("should report a SET the instance rejects with Memgraph's error and keep retrying it", func() {
+			setFlags(memgraphcomv1alpha1.FlagsSpec{Data: map[string]memgraphcomv1alpha1.FlagValue{
+				logLevelFlag: infoLevel, "also-log-to-stderr": "1",
+			}})
+
+			result := reconcileCluster(resourceName)
+
+			converged := condition(memgraphcomv1alpha1.ConditionConverged)
+			Expect(converged.Status).To(Equal(metav1.ConditionFalse))
+			Expect(converged.Reason).To(Equal(memgraphcomv1alpha1.ReasonSettingsRejected))
+			Expect(converged.Message).To(ContainSubstring(resourceName + dataSuffix + "-0"))
+			Expect(converged.Message).To(ContainSubstring(`SET DATABASE SETTING "log.to_stderr" TO "1"`))
+			Expect(converged.Message).To(ContainSubstring("Boolean value supports only"))
+			Expect(result.RequeueAfter).To(Equal(requeueWhilePending))
+			Expect(condition(memgraphcomv1alpha1.ConditionReady).Status).To(Equal(metav1.ConditionTrue),
+				"a refused setting does not make the cluster unready")
+
+			By("clearing once the flag is fixed")
+			setFlags(memgraphcomv1alpha1.FlagsSpec{Data: map[string]memgraphcomv1alpha1.FlagValue{
+				logLevelFlag: infoLevel, "also-log-to-stderr": "false",
+			}})
+			reconcileCluster(resourceName)
+			Expect(fake.settingsOf(podAddress(dataSuffix, 0))).To(HaveKeyWithValue("log.to_stderr", "false"))
+			Expect(condition(memgraphcomv1alpha1.ConditionConverged).Status).To(Equal(metav1.ConditionTrue))
+		})
+
+		It("should leave a setting alone once its flag is removed, unless the operator has a default for it", func() {
+			setFlags(memgraphcomv1alpha1.FlagsSpec{Data: map[string]memgraphcomv1alpha1.FlagValue{
+				logLevelFlag: infoLevel, "query-execution-timeout-sec": "10",
+			}})
+			reconcileCluster(resourceName)
+			Expect(fake.settingsOf(podAddress(dataSuffix, 0))).To(HaveKeyWithValue("query.timeout", "10"))
+
+			setFlags(memgraphcomv1alpha1.FlagsSpec{})
+			reconcileCluster(resourceName)
+
+			settings := fake.settingsOf(podAddress(dataSuffix, 0))
+			Expect(settings).To(HaveKeyWithValue("query.timeout", "10"),
+				"a removed flag issues no SET: the setting reverts when the instance next restarts without it")
+			Expect(settings).To(HaveKeyWithValue("log.level", "TRACE"),
+				"a removed flag the operator has a default for goes back to the default, which the flag file now says")
+			Expect(condition(memgraphcomv1alpha1.ConditionConverged).Status).To(Equal(metav1.ConditionTrue))
 		})
 	})
 

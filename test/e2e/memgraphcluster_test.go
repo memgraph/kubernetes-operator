@@ -769,6 +769,101 @@ var _ = Describe("MemgraphCluster", Ordered, func() {
 		Expect(err).NotTo(HaveOccurred(), "the MemgraphCluster never reported Updated")
 	})
 
+	It("applies a run-time flag to every pod without a restart, and rolls for a startup-only one", func() {
+		By("confirming the cluster is converged and up to date before touching the flags")
+		Eventually(quickstartCluster.verifyRegistered, 10*time.Minute, 10*time.Second).Should(Succeed())
+		quickstartCluster.awaitConverged(2 * time.Minute)
+		before, err := quickstartCluster.podUIDs()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(before).To(HaveLen(int(quickstartCluster.coordinators + quickstartCluster.dataInstances)))
+
+		By("setting a run-time flag on both roles")
+		patchFlags := func(flags string) {
+			GinkgoHelper()
+			cmd := exec.Command("kubectl", "patch", "memgraphcluster", quickstartCluster.name,
+				"-n", quickstartCluster.namespace, "--type=merge", "-p",
+				`{"spec":{"flags":{"coordinators":`+flags+`,"data":`+flags+`}}}`)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "the operator must accept the flags block")
+		}
+		patchFlags(`{"query-execution-timeout-sec":"123"}`)
+
+		By("watching the new value reach every pod's run-time settings")
+		Eventually(func(g Gomega) {
+			for _, pod := range quickstartCluster.workloadPodNames() {
+				value, err := quickstartCluster.settingOnPod(pod, "query.timeout")
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(value).To(Equal("123"), "pod %s", pod)
+			}
+		}, 3*time.Minute, 5*time.Second).Should(Succeed())
+
+		By("confirming no pod was restarted for it and the resource stayed converged and up to date")
+		after, err := quickstartCluster.podUIDs()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(after).To(Equal(before), "a run-time flag must not replace any pod")
+		quickstartCluster.awaitConverged(2 * time.Minute)
+		cmd := exec.Command("kubectl", "wait", "--for=condition=Updated",
+			"memgraphcluster/"+quickstartCluster.name, "-n", quickstartCluster.namespace, "--timeout=2m")
+		_, err = utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred(), "the MemgraphCluster must stay Updated: nothing about the pod template changed")
+
+		By("confirming the flag file carries the value for the next start")
+		for _, role := range []string{"coordinator", "data"} {
+			file, err := quickstartCluster.flagFile(role)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(file).To(ContainSubstring("--query_execution_timeout_sec=123\n"), "%s flag file", role)
+		}
+
+		By("changing a startup-only flag and the run-time one in a single edit")
+		view, err := quickstartCluster.leaderView()
+		Expect(err).NotTo(HaveOccurred())
+		mainOrdinal, err := resources.DataInstanceOrdinal(mainOf(view))
+		Expect(err).NotTo(HaveOccurred())
+		mainPod := quickstartCluster.dataPod(mainOrdinal)
+		patchFlags(`{"query-execution-timeout-sec":"456","log-retention-days":"36"}`)
+
+		By("watching the run-time value land on the pods while the roll is still ahead of them")
+		Eventually(func(g Gomega) {
+			for _, pod := range quickstartCluster.workloadPodNames() {
+				value, err := quickstartCluster.settingOnPod(pod, "query.timeout")
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(value).To(Equal("456"), "pod %s", pod)
+			}
+		}, 5*time.Minute, 5*time.Second).Should(Succeed())
+
+		By("watching the operator roll every pod for the startup-only flag, data instances first and MAIN last of them")
+		order, maxDown := quickstartCluster.watchRoll(before, 25*time.Minute)
+		Expect(order).To(HaveLen(len(before)), "every pod must be replaced exactly once")
+		Expect(maxDown).To(BeNumerically("<=", 1), "at most one pod may be unready at a time; observed %d", maxDown)
+		var dataOrder []string
+		for _, pod := range order {
+			if strings.Contains(pod, "-data-") {
+				dataOrder = append(dataOrder, pod)
+				continue
+			}
+			Expect(dataOrder).To(HaveLen(int(quickstartCluster.dataInstances)),
+				"a coordinator pod (%s) was restarted before the data plane finished: %v", pod, order)
+		}
+		Expect(dataOrder[len(dataOrder)-1]).To(Equal(mainPod), "the MAIN's pod goes last of its role, order was %v", dataOrder)
+
+		By("confirming every restarted pod reads both values from the flag file")
+		Eventually(quickstartCluster.verifyRegistered, 10*time.Minute, 10*time.Second).Should(Succeed())
+		cmd = exec.Command("kubectl", "wait", "--for=condition=Updated",
+			"memgraphcluster/"+quickstartCluster.name, "-n", quickstartCluster.namespace, "--timeout=5m")
+		_, err = utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred(), "the MemgraphCluster never reported Updated after the roll")
+		for _, pod := range quickstartCluster.workloadPodNames() {
+			value, err := quickstartCluster.settingOnPod(pod, "query.timeout")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(value).To(Equal("456"), "pod %s after its restart", pod)
+		}
+		for _, role := range []string{"coordinator", "data"} {
+			file, err := quickstartCluster.flagFile(role)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(file).To(ContainSubstring("--log_retention_days=36\n"), "%s flag file", role)
+		}
+	})
+
 	It("leaves the PVCs behind when the default-retention CR is deleted", func() {
 		By("confirming the cluster is converged before deleting it")
 		Eventually(quickstartCluster.verifyRegistered, 10*time.Minute, 10*time.Second).Should(Succeed())
@@ -1435,6 +1530,41 @@ func (c clusterUnderTest) watchRoll(before map[string]string, timeout time.Durat
 	}, timeout, 2*time.Second).Should(Succeed())
 
 	return order, maxDown
+}
+
+// workloadPodNames is every declared pod of both roles, coordinators first.
+func (c clusterUnderTest) workloadPodNames() []string {
+	pods := make([]string, 0, c.coordinators+c.dataInstances)
+	for ordinal := range c.coordinators {
+		pods = append(pods, c.coordinatorPod(ordinal))
+	}
+	for ordinal := range c.dataInstances {
+		pods = append(pods, c.dataPod(ordinal))
+	}
+	return pods
+}
+
+// settingOnPod reads one run-time setting off the instance in the given pod,
+// which is the only place it can be read: a setting is local to its instance.
+func (c clusterUnderTest) settingOnPod(pod, name string) (string, error) {
+	cmd := exec.Command("kubectl", "exec", pod, "-n", c.namespace, "-c", "memgraph", "--",
+		"bash", "-c", c.mgconsole(fmt.Sprintf(`SHOW DATABASE SETTING "%s";`, name), "--output-format=csv"))
+	output, err := utils.Run(cmd)
+	if err != nil {
+		return "", err
+	}
+	lines := utils.GetNonEmptyLines(output)
+	if len(lines) < 2 {
+		return "", fmt.Errorf("no setting_value row in mgconsole output: %q", output)
+	}
+	return unquoteCell(lines[len(lines)-1]), nil
+}
+
+// flagFile is the flag file the operator rendered for the given role.
+func (c clusterUnderTest) flagFile(role string) (string, error) {
+	cmd := exec.Command("kubectl", "get", "configmap", fmt.Sprintf("%s-%s-flags", c.name, role),
+		"-n", c.namespace, "-o", "jsonpath={.data.memgraph\\.flags}")
+	return utils.Run(cmd)
 }
 
 // dataPod is the name of the data pod on the given ordinal.

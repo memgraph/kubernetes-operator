@@ -234,6 +234,23 @@ const (
 	// all — no cloud controller or no address pool answers the Service.
 	ReasonExternalAddressPending = "ExternalAddressPending"
 
+	// ReasonSettingsPending is set while a run-time flag could not yet be
+	// applied to every instance because a ready pod did not answer SHOW
+	// DATABASE SETTINGS: the Bolt endpoint lagging readiness, or a pod the
+	// roll is replacing. The message names the pods. The pass retries on a
+	// delay; the flag file already carries the value for the pod's next start.
+	ReasonSettingsPending = "SettingsPending"
+
+	// ReasonSettingsRejected is set when an instance refused a SET DATABASE
+	// SETTING the flags block asks for: a value its validator does not accept,
+	// or a setting the running Memgraph version does not know at run time. The
+	// message names the pod, the setting and Memgraph's error verbatim, for the
+	// reason RegistrationFailed does: the command is retried forever, and only
+	// a changed flag clears it. The operator never escalates to a restart on
+	// its own — a value an instance rejects at run time it would reject at
+	// startup too, and crash-loop on.
+	ReasonSettingsRejected = "SettingsRejected"
+
 	// ReasonRetirementInProgress is set while a lowered count of either role is
 	// being carried out: the members beyond the declared count are still part of
 	// the cluster, or their pods are still being shed. The message names them, so
@@ -795,7 +812,7 @@ type ReadinessProbeSpec struct {
 }
 
 // ResourcesSpec sets the compute resources of the Memgraph container per role.
-// When setting Memgraph's own --memory-limit through extraArgs, keep it below
+// When setting Memgraph's own --memory-limit through flags, keep it below
 // the pod's memory limit: Memgraph must hit its own limit and raise a query
 // exception before the kubelet evicts the pod.
 type ResourcesSpec struct {
@@ -1177,31 +1194,56 @@ type InitContainersSpec struct {
 	Data []corev1.Container `json:"data,omitempty"`
 }
 
-// ExtraArgsSpec passes additional Memgraph flags to a role, so any flag is
-// usable without waiting for a typed field. The flags are appended after the
-// ones the operator derives, and Memgraph takes the last occurrence of a
-// repeated flag, so a flag set here overrides the operator's value.
+// FlagsSpec passes Memgraph flags to a role as a map from flag name to value,
+// so any flag is usable without waiting for a typed field. Keys are flag names
+// without their leading dashes, in either spelling gflags accepts (log-level
+// or log_level); values are strings, so a boolean is written "true" or
+// "false", which is also the only form Memgraph accepts for one at run time.
 //
-// The ports and the coordinator identity are excluded from that override: they
-// must stay consistent with the fixed advertised addresses the operator
-// registers with the cluster.
-type ExtraArgsSpec struct {
-	// coordinators are appended to every coordinator pod's Memgraph flags.
-	// +kubebuilder:validation:MaxItems=64
-	// +kubebuilder:validation:items:MinLength=1
-	// +kubebuilder:validation:items:MaxLength=4096
-	// +kubebuilder:validation:XValidation:rule="self.all(a, !a.replace('-', '_').matches('^_{1,2}(bolt_port|management_port|replication_port|coordinator_id|coordinator_hostname|coordinator_port)($|[= ])'))",message="extraArgs must not set a fixed port or the coordinator identity the operator derives (bolt-port, management-port, replication-port, coordinator-id, coordinator-hostname, coordinator-port), in any spelling gflags accepts"
+// The flags do not travel on the command line. The operator writes them into
+// a per-role ConfigMap as a gflags flag file, which the Memgraph container
+// loads with --flag-file ahead of the few flags the operator pins on the
+// command line, so a pinned flag wins any repeat. A flag Memgraph can change
+// on a running instance (log-level, query-execution-timeout-sec,
+// storage-snapshot-interval and the other run-time settings) is applied to
+// every instance with SET DATABASE SETTING the moment it changes and restarts
+// nothing: the flag file carries it for the next start, whenever that is.
+// Every other flag is read at startup only, so a change to one rolls both
+// roles' pods in the usual order. Removing a flag issues no SET: a run-time
+// setting keeps its value until the instance next restarts without the flag,
+// and the few Memgraph persists across restarts keep it even then.
+//
+// The ports, the addresses the pods listen on, the coordinator identity, the
+// data directory, the log file, the TLS files and the metrics format are
+// excluded: they must stay consistent with the addresses the operator
+// registers, the ports it declares and the files it mounts. So are the two
+// AWS credential flags, because the CR carries no secret material; set those
+// with SET DATABASE SETTING by hand.
+type FlagsSpec struct {
+	// coordinators are the flags every coordinator pod starts with.
+	// +kubebuilder:validation:MaxProperties=64
+	// +kubebuilder:validation:XValidation:rule="self.all(k, k.matches('^[A-Za-z][A-Za-z0-9_-]*$'))",message="flags keys are flag names without leading dashes, such as log-level"
+	// +kubebuilder:validation:XValidation:rule="self.all(k, !k.replace('-', '_').matches('^(bolt_port|management_port|coordinator_port|coordinator_id|coordinator_hostname|data_directory|log_file|bolt_cert_file|bolt_key_file|cluster_cert_file|cluster_key_file|cluster_ca_file|metrics_format|metrics_port|monitoring_port|bolt_address|monitoring_address|aws_access_key|aws_secret_key)$'))",message="flags must not set a port, a listen address, the coordinator identity, the data directory, the log file, a TLS file, the metrics format or an AWS credential: the operator derives the former, and the latter is secret material to set with SET DATABASE SETTING"
+	// +kubebuilder:validation:XValidation:rule="self.all(k, self.all(j, k == j || k.replace('-', '_') != j.replace('-', '_')))",message="two keys spell the same flag"
 	// +optional
-	Coordinators []string `json:"coordinators,omitempty"`
+	Coordinators map[string]FlagValue `json:"coordinators,omitempty"`
 
-	// data are appended to every data instance pod's Memgraph flags.
-	// +kubebuilder:validation:MaxItems=64
-	// +kubebuilder:validation:items:MinLength=1
-	// +kubebuilder:validation:items:MaxLength=4096
-	// +kubebuilder:validation:XValidation:rule="self.all(a, !a.replace('-', '_').matches('^_{1,2}(bolt_port|management_port|replication_port|coordinator_id|coordinator_hostname|coordinator_port)($|[= ])'))",message="extraArgs must not set a fixed port or the coordinator identity the operator derives (bolt-port, management-port, replication-port, coordinator-id, coordinator-hostname, coordinator-port), in any spelling gflags accepts"
+	// data are the flags every data instance pod starts with.
+	// +kubebuilder:validation:MaxProperties=64
+	// +kubebuilder:validation:XValidation:rule="self.all(k, k.matches('^[A-Za-z][A-Za-z0-9_-]*$'))",message="flags keys are flag names without leading dashes, such as log-level"
+	// +kubebuilder:validation:XValidation:rule="self.all(k, !k.replace('-', '_').matches('^(bolt_port|management_port|coordinator_port|coordinator_id|coordinator_hostname|data_directory|log_file|bolt_cert_file|bolt_key_file|cluster_cert_file|cluster_key_file|cluster_ca_file|metrics_format|metrics_port|monitoring_port|bolt_address|monitoring_address|aws_access_key|aws_secret_key)$'))",message="flags must not set a port, a listen address, the coordinator identity, the data directory, the log file, a TLS file, the metrics format or an AWS credential: the operator derives the former, and the latter is secret material to set with SET DATABASE SETTING"
+	// +kubebuilder:validation:XValidation:rule="self.all(k, self.all(j, k == j || k.replace('-', '_') != j.replace('-', '_')))",message="two keys spell the same flag"
 	// +optional
-	Data []string `json:"data,omitempty"`
+	Data map[string]FlagValue `json:"data,omitempty"`
 }
+
+// FlagValue is one flag's value, verbatim: one line of the flag file, so it
+// may not contain a line break, which would otherwise start a second flag
+// nobody declared. Memgraph reads every flag as text, so a number or a
+// boolean is written as the string "120" or "true".
+// +kubebuilder:validation:MaxLength=4096
+// +kubebuilder:validation:Pattern=`^[^\n\r]*$`
+type FlagValue string
 
 // ExternalAccessType is how the cluster is reached from outside Kubernetes.
 // +kubebuilder:validation:Enum=LoadBalancer;Gateway
@@ -1871,9 +1913,11 @@ type MemgraphClusterSpec struct {
 	// +optional
 	ExtraEnv ExtraEnvSpec `json:"extraEnv,omitzero"`
 
-	// extraArgs passes additional Memgraph flags to both roles.
+	// flags passes Memgraph flags to both roles, by name. A flag Memgraph can
+	// change at run time is applied to every instance without a restart; any
+	// other flag change rolls the pods.
 	// +optional
-	ExtraArgs ExtraArgsSpec `json:"extraArgs,omitzero"`
+	Flags FlagsSpec `json:"flags,omitzero"`
 
 	// extraVolumes adds pod volumes to both roles beyond the ones the operator
 	// provisions.

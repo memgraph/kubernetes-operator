@@ -298,15 +298,22 @@ spec:
       # - name: MEMGRAPH_LOG_LEVEL
       #   value: TRACE
     data: []
-  # Any Memgraph flag, without waiting for a typed field. These are appended
-  # after the flags the operator derives, and Memgraph takes the last
-  # occurrence of a repeated flag — except for the ports and the coordinator
-  # identity, which admission rejects here because they must stay consistent
-  # with the registered addresses.
-  extraArgs:
-    coordinators: []
+  # Any Memgraph flag by name, without waiting for a typed field: keys are
+  # flag names without the dashes, values are strings ("true"/"false" for a
+  # boolean). The flags reach the pods through a per-role ConfigMap holding a
+  # gflags flag file, not the command line. A flag Memgraph can change on a
+  # running instance (log-level, query-execution-timeout-sec,
+  # storage-snapshot-interval, ...) is applied to every instance with
+  # SET DATABASE SETTING the moment it changes and restarts nothing; any other
+  # flag change rolls the pods in the usual order. The operator's own logging
+  # defaults (log-level TRACE, also-log-to-stderr, log-retention-days 35) may
+  # be overridden here. The ports, listen addresses, coordinator identity,
+  # data directory, log file, TLS files, metrics format and the two AWS
+  # credential flags may not: admission rejects them. See docs/flags.md.
+  flags:
+    coordinators: {}
     data:
-      - --storage-snapshot-on-exit=false
+      storage-snapshot-on-exit: "false"
   # Any pod volume the operator does not provision itself, plus where to mount
   # it in the Memgraph container. Entries are plain core/v1 volumes and volume
   # mounts, appended after the operator's own — the usual reason to reach for

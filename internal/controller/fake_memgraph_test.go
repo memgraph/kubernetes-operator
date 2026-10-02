@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"maps"
 	"slices"
 	"strconv"
 	"strings"
@@ -55,6 +56,16 @@ type fakeMemgraph struct {
 	// connectErr, when set, makes every Connect fail — the operator's view of a
 	// cluster whose coordinators do not yet answer Bolt.
 	connectErr error
+	// unreachable are the Bolt addresses whose Connect fails on their own: a
+	// pod that is ready but whose Bolt endpoint is not answering yet.
+	unreachable map[string]bool
+	// settings is every instance's run-time settings, keyed by the pod Bolt
+	// address the operator dials it at. An address not yet in the map answers
+	// with baselineSettings, which is what an instance started on the
+	// operator's default flag file reports — so a cluster without spec.flags
+	// has nothing to SET, and a test that wants an instance out of line puts
+	// it there.
+	settings map[string]map[string]string
 	// rejected are commands the cluster refuses whatever its state, keyed by
 	// command prefix. It stands in for the rejections the operator cannot reason
 	// about — a coordinator refusing a registration a healthy one would accept —
@@ -79,7 +90,51 @@ func (f *fakeMemgraph) Connect(_ context.Context, address string, tls bool) (mem
 	if f.connectErr != nil {
 		return nil, f.connectErr
 	}
+	if f.unreachable[address] {
+		return nil, fmt.Errorf("fake memgraph: %s refused the connection", address)
+	}
 	return &fakeClient{cluster: f, address: address}, nil
+}
+
+// setUnreachable makes every Connect to the given Bolt address fail, or
+// succeed again.
+func (f *fakeMemgraph) setUnreachable(address string, unreachable bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.unreachable == nil {
+		f.unreachable = map[string]bool{}
+	}
+	f.unreachable[address] = unreachable
+}
+
+// baselineSettings is the SHOW DATABASE SETTINGS view of an instance started
+// on the operator's default flag file and nothing else.
+func baselineSettings() map[string]string {
+	return map[string]string{
+		"log.level":                 "TRACE",
+		"log.to_stderr":             "true",
+		"query.timeout":             "600",
+		"storage.snapshot.interval": "300",
+	}
+}
+
+// settingsOf is the run-time settings the instance at the given address
+// reports, which a spec reads back to see what landed.
+func (f *fakeMemgraph) settingsOf(address string) map[string]string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return maps.Clone(f.settingsLocked(address))
+}
+
+// settingsLocked must be called with the cluster lock held.
+func (f *fakeMemgraph) settingsLocked(address string) map[string]string {
+	if f.settings == nil {
+		f.settings = map[string]map[string]string{}
+	}
+	if _, ok := f.settings[address]; !ok {
+		f.settings[address] = baselineSettings()
+	}
+	return f.settings[address]
 }
 
 func (f *fakeMemgraph) setConnectErr(err error) {
@@ -417,6 +472,36 @@ func (c *fakeClient) YieldLeadership(context.Context) error {
 			}
 		}
 		c.cluster.instances[successor].Role = memgraph.RoleLeader
+		return nil
+	})
+}
+
+// ShowSettings answers for the connected instance alone, as the real thing
+// does: a run-time setting is local to the instance that holds it.
+func (c *fakeClient) ShowSettings(context.Context) (map[string]string, error) {
+	c.cluster.mu.Lock()
+	defer c.cluster.mu.Unlock()
+	if c.closed {
+		return nil, fmt.Errorf("fake memgraph: connection to %s already closed", c.address)
+	}
+	return maps.Clone(c.cluster.settingsLocked(c.address)), nil
+}
+
+// SetSetting changes one setting on the connected instance. Like Memgraph it
+// refuses a name it does not know — the baseline is the whole of what it
+// knows — and a boolean setting's value that is not true or false.
+func (c *fakeClient) SetSetting(_ context.Context, name, value string) error {
+	command := fmt.Sprintf("SET DATABASE SETTING %q TO %q", name, value)
+	return c.execute(command, func() error {
+		settings := c.cluster.settingsLocked(c.address)
+		if _, ok := settings[name]; !ok {
+			return fmt.Errorf("fake memgraph: Unknown setting name '%s'", name)
+		}
+		if name == "log.to_stderr" && value != "true" && value != "false" {
+			return fmt.Errorf("fake memgraph: Cannot update setting '%s': "+
+				"Boolean value supports only 'false' or 'true' as the input.", name)
+		}
+		settings[name] = value
 		return nil
 	})
 }

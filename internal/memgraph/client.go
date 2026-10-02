@@ -16,12 +16,12 @@ limitations under the License.
 
 // Package memgraph provides the narrow client surface the operator uses to
 // drive a Memgraph high-availability cluster over Bolt: show instances, show
-// replication lag, add coordinator, register instance, set main, and — for the
-// members a lowered replica count is retiring — demote and unregister a data
-// instance, yield coordinator leadership and remove a coordinator. All higher
-// layers depend on the Client and Connector interfaces, never on the Bolt driver
-// — this package is the mock seam for testing and the only place the driver is
-// referenced.
+// replication lag, add coordinator, register instance, set main, for the
+// members a lowered replica count is retiring demote and unregister a data
+// instance, yield coordinator leadership and remove a coordinator, and on any
+// one instance show and set its run-time settings. All higher layers depend on
+// the Client and Connector interfaces, never on the Bolt driver — this package
+// is the mock seam for testing and the only place the driver is referenced.
 package memgraph
 
 import (
@@ -204,6 +204,19 @@ type Client interface {
 	// a successor — NuRaft's election picks one — so its outcome is not
 	// predictable and the caller must re-observe the cluster afterwards.
 	YieldLeadership(ctx context.Context) error
+
+	// ShowSettings reports the run-time settings of the instance this client is
+	// connected to, setting name to value, as SHOW DATABASE SETTINGS lists
+	// them. Unlike the queries above it is local: every instance, coordinator
+	// or data, answers for itself alone, so the caller dials each one.
+	ShowSettings(ctx context.Context) (map[string]string, error)
+
+	// SetSetting changes one run-time setting on the instance this client is
+	// connected to, which takes effect at once and on this instance only.
+	// Memgraph rejects a name it does not know and a value the setting's
+	// validator refuses, and the error says which; both are the caller's to
+	// report, because retrying changes neither.
+	SetSetting(ctx context.Context, name, value string) error
 
 	Close(ctx context.Context) error
 }

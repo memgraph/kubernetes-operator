@@ -508,42 +508,6 @@ spec:
                     it
                   rule: '!has(self.gateway) || !has(self.gateway.dataPortBase) ||
                     self.gateway.dataPortBase > 7687'
-              extraArgs:
-                description: extraArgs passes additional Memgraph flags to both roles.
-                properties:
-                  coordinators:
-                    description: coordinators are appended to every coordinator pod's
-                      Memgraph flags.
-                    items:
-                      maxLength: 4096
-                      minLength: 1
-                      type: string
-                    maxItems: 64
-                    type: array
-                    x-kubernetes-validations:
-                    - message: extraArgs must not set a fixed port or the coordinator
-                        identity the operator derives (bolt-port, management-port,
-                        replication-port, coordinator-id, coordinator-hostname, coordinator-port),
-                        in any spelling gflags accepts
-                      rule: self.all(a, !a.replace('-', '_').matches('^_{1,2}(bolt_port|management_port|replication_port|coordinator_id|coordinator_hostname|coordinator_port)($|[=
-                        ])'))
-                  data:
-                    description: data are appended to every data instance pod's Memgraph
-                      flags.
-                    items:
-                      maxLength: 4096
-                      minLength: 1
-                      type: string
-                    maxItems: 64
-                    type: array
-                    x-kubernetes-validations:
-                    - message: extraArgs must not set a fixed port or the coordinator
-                        identity the operator derives (bolt-port, management-port,
-                        replication-port, coordinator-id, coordinator-hostname, coordinator-port),
-                        in any spelling gflags accepts
-                      rule: self.all(a, !a.replace('-', '_').matches('^_{1,2}(bolt_port|management_port|replication_port|coordinator_id|coordinator_hostname|coordinator_port)($|[=
-                        ])'))
-                type: object
               extraEnv:
                 description: |-
                   extraEnv passes additional non-secret environment variables to both
@@ -792,6 +756,67 @@ spec:
                   memgraph user from a root init container before Memgraph starts, as the
                   memgraph-high-availability Helm chart does, for storage drivers that do
                   not honor the pod's fsGroup. Absent, no such container runs.
+                type: object
+              flags:
+                description: |-
+                  flags passes Memgraph flags to both roles, by name. A flag Memgraph can
+                  change at run time is applied to every instance without a restart; any
+                  other flag change rolls the pods.
+                properties:
+                  coordinators:
+                    additionalProperties:
+                      description: |-
+                        FlagValue is one flag's value, verbatim: one line of the flag file, so it
+                        may not contain a line break, which would otherwise start a second flag
+                        nobody declared. Memgraph reads every flag as text, so a number or a
+                        boolean is written as the string "120" or "true".
+                      maxLength: 4096
+                      pattern: ^[^\n\r]*$
+                      type: string
+                    description: coordinators are the flags every coordinator pod
+                      starts with.
+                    maxProperties: 64
+                    type: object
+                    x-kubernetes-validations:
+                    - message: flags keys are flag names without leading dashes, such
+                        as log-level
+                      rule: self.all(k, k.matches('^[A-Za-z][A-Za-z0-9_-]*$'))
+                    - message: 'flags must not set a port, a listen address, the coordinator
+                        identity, the data directory, the log file, a TLS file, the
+                        metrics format or an AWS credential: the operator derives
+                        the former, and the latter is secret material to set with
+                        SET DATABASE SETTING'
+                      rule: self.all(k, !k.replace('-', '_').matches('^(bolt_port|management_port|coordinator_port|coordinator_id|coordinator_hostname|data_directory|log_file|bolt_cert_file|bolt_key_file|cluster_cert_file|cluster_key_file|cluster_ca_file|metrics_format|metrics_port|monitoring_port|bolt_address|monitoring_address|aws_access_key|aws_secret_key)$'))
+                    - message: two keys spell the same flag
+                      rule: self.all(k, self.all(j, k == j || k.replace('-', '_')
+                        != j.replace('-', '_')))
+                  data:
+                    additionalProperties:
+                      description: |-
+                        FlagValue is one flag's value, verbatim: one line of the flag file, so it
+                        may not contain a line break, which would otherwise start a second flag
+                        nobody declared. Memgraph reads every flag as text, so a number or a
+                        boolean is written as the string "120" or "true".
+                      maxLength: 4096
+                      pattern: ^[^\n\r]*$
+                      type: string
+                    description: data are the flags every data instance pod starts
+                      with.
+                    maxProperties: 64
+                    type: object
+                    x-kubernetes-validations:
+                    - message: flags keys are flag names without leading dashes, such
+                        as log-level
+                      rule: self.all(k, k.matches('^[A-Za-z][A-Za-z0-9_-]*$'))
+                    - message: 'flags must not set a port, a listen address, the coordinator
+                        identity, the data directory, the log file, a TLS file, the
+                        metrics format or an AWS credential: the operator derives
+                        the former, and the latter is secret material to set with
+                        SET DATABASE SETTING'
+                      rule: self.all(k, !k.replace('-', '_').matches('^(bolt_port|management_port|coordinator_port|coordinator_id|coordinator_hostname|data_directory|log_file|bolt_cert_file|bolt_key_file|cluster_cert_file|cluster_key_file|cluster_ca_file|metrics_format|metrics_port|monitoring_port|bolt_address|monitoring_address|aws_access_key|aws_secret_key)$'))
+                    - message: two keys spell the same flag
+                      rule: self.all(k, self.all(j, k == j || k.replace('-', '_')
+                        != j.replace('-', '_')))
                 type: object
               image:
                 default: {}
