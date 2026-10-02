@@ -30,7 +30,7 @@ kubectl patch mgc memgraph --type=merge -p '{"spec":{"flags":{"data":{"storage-g
 kubectl get mgc memgraph -w   # Updated=False while the roll runs, True once every pod is on the new template
 ```
 
-A merge patch replaces the whole `data` map, so carry the flags you keep; `kubectl edit` is the safer tool for a map with several entries. `kubectl get mgc memgraph -o jsonpath='{.status.conditions}'` shows whether the operator is still owed a setting (`Converged=False`, reasons below), and the rendered flag file is readable at any time:
+A merge patch merges the map key by key: a key it names is set, a key it leaves out is kept, and a key set to `null` is removed, as in `{"spec":{"flags":{"data":{"storage-gc-cycle-sec":null}}}}`. `kubectl get mgc memgraph -o jsonpath='{.status.conditions}'` shows whether the operator is still owed a setting (`Converged=False`, reasons below), and the rendered flag file is readable at any time:
 
 ```sh
 kubectl get configmap memgraph-data-flags -o jsonpath='{.data.memgraph\.flags}'

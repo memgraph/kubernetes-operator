@@ -841,9 +841,11 @@ var _ = Describe("MemgraphCluster", Ordered, func() {
 			g.Expect(err).NotTo(HaveOccurred())
 			g.Expect(now).To(Equal(before), "a flag that does not exist must not replace any pod")
 		}, time.Minute, 5*time.Second).Should(Succeed())
+		// A JSON merge patch merges maps key by key, so leaving the typo out
+		// would keep it: only null deletes a key.
 		cmd = exec.Command("kubectl", "patch", "memgraphcluster", quickstartCluster.name,
 			"-n", quickstartCluster.namespace, "--type=merge", "-p",
-			`{"spec":{"flags":{"coordinators":{"query-execution-timeout-sec":"123","instance-down-timeout-sec":"7"}}}}`)
+			`{"spec":{"flags":{"coordinators":{"enabled-reads-on-mai":null}}}}`)
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred())
 		quickstartCluster.awaitConverged(3 * time.Minute)
