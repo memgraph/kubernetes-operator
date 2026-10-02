@@ -14,7 +14,7 @@ spec:
       memory-limit: "4096"
 ```
 
-Keys are flag names without their leading dashes, in either spelling gflags accepts: `log-level` and `log_level` reach the same flag, and admission rejects a map that spells one flag both ways. Values are strings, so a number or a boolean is quoted; a boolean is `"true"` or `"false"` and nothing else, because that is the only form Memgraph accepts for one at run time. An empty value is a value: `storage-snapshot-interval: ""` turns periodic snapshots off, the way `--storage-snapshot-interval=` does.
+Keys are flag names without their leading dashes, in either spelling gflags accepts: `log-level` and `log_level` reach the same flag, and admission rejects a map that spells one flag both ways. Values are checked for shape only, one line of at most 4096 characters, with one exception: `log-level` must be one of `TRACE`, `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`, upper case, because it is the flag everyone touches first and Memgraph would otherwise refuse the value only once the instance sees it. Values are strings, so a number or a boolean is quoted; a boolean is `"true"` or `"false"` and nothing else, because that is the only form Memgraph accepts for one at run time. An empty value is a value: `storage-snapshot-interval: ""` turns periodic snapshots off, the way `--storage-snapshot-interval=` does.
 
 ## Changing a flag
 

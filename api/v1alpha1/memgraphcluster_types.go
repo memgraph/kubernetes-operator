@@ -1219,12 +1219,18 @@ type InitContainersSpec struct {
 // registers, the ports it declares and the files it mounts. So are the two
 // AWS credential flags, because the CR carries no secret material; set those
 // with SET DATABASE SETTING by hand.
+//
+// Values are checked for shape only — one line, at most 4096 characters —
+// with one exception: log-level is checked against Memgraph's levels, because
+// it is the flag everyone touches first and a bad level is otherwise found
+// only when an instance refuses it.
 type FlagsSpec struct {
 	// coordinators are the flags every coordinator pod starts with.
 	// +kubebuilder:validation:MaxProperties=64
 	// +kubebuilder:validation:XValidation:rule="self.all(k, k.matches('^[A-Za-z][A-Za-z0-9_-]*$'))",message="flags keys are flag names without leading dashes, such as log-level"
 	// +kubebuilder:validation:XValidation:rule="self.all(k, !k.replace('-', '_').matches('^(bolt_port|management_port|coordinator_port|coordinator_id|coordinator_hostname|data_directory|log_file|bolt_cert_file|bolt_key_file|cluster_cert_file|cluster_key_file|cluster_ca_file|metrics_format|metrics_port|monitoring_port|bolt_address|monitoring_address|aws_access_key|aws_secret_key)$'))",message="flags must not set a port, a listen address, the coordinator identity, the data directory, the log file, a TLS file, the metrics format or an AWS credential: the operator derives the former, and the latter is secret material to set with SET DATABASE SETTING"
 	// +kubebuilder:validation:XValidation:rule="self.all(k, self.all(j, k == j || k.replace('-', '_') != j.replace('-', '_')))",message="two keys spell the same flag"
+	// +kubebuilder:validation:XValidation:rule="self.all(k, k.replace('-', '_') != 'log_level' || self[k] in ['TRACE', 'DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'])",message="log-level must be one of TRACE, DEBUG, INFO, WARNING, ERROR, CRITICAL"
 	// +optional
 	Coordinators map[string]FlagValue `json:"coordinators,omitempty"`
 
@@ -1233,6 +1239,7 @@ type FlagsSpec struct {
 	// +kubebuilder:validation:XValidation:rule="self.all(k, k.matches('^[A-Za-z][A-Za-z0-9_-]*$'))",message="flags keys are flag names without leading dashes, such as log-level"
 	// +kubebuilder:validation:XValidation:rule="self.all(k, !k.replace('-', '_').matches('^(bolt_port|management_port|coordinator_port|coordinator_id|coordinator_hostname|data_directory|log_file|bolt_cert_file|bolt_key_file|cluster_cert_file|cluster_key_file|cluster_ca_file|metrics_format|metrics_port|monitoring_port|bolt_address|monitoring_address|aws_access_key|aws_secret_key)$'))",message="flags must not set a port, a listen address, the coordinator identity, the data directory, the log file, a TLS file, the metrics format or an AWS credential: the operator derives the former, and the latter is secret material to set with SET DATABASE SETTING"
 	// +kubebuilder:validation:XValidation:rule="self.all(k, self.all(j, k == j || k.replace('-', '_') != j.replace('-', '_')))",message="two keys spell the same flag"
+	// +kubebuilder:validation:XValidation:rule="self.all(k, k.replace('-', '_') != 'log_level' || self[k] in ['TRACE', 'DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'])",message="log-level must be one of TRACE, DEBUG, INFO, WARNING, ERROR, CRITICAL"
 	// +optional
 	Data map[string]FlagValue `json:"data,omitempty"`
 }

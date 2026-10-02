@@ -801,6 +801,18 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 					Flags: memgraphcomv1alpha1.FlagsSpec{Data: map[string]memgraphcomv1alpha1.FlagValue{logLevelFlag: "INFO\n--bolt-port=7777"}},
 				},
 				"should match"),
+			// Memgraph accepts exactly its six levels, upper case; anything else
+			// is refused by the instance, so it is refused at admission instead.
+			Entry("a log level Memgraph does not have", "invalid-flags-log-level",
+				memgraphcomv1alpha1.MemgraphClusterSpec{
+					Flags: memgraphcomv1alpha1.FlagsSpec{Data: map[string]memgraphcomv1alpha1.FlagValue{logLevelFlag: "VERBOSE"}},
+				},
+				"log-level must be one of"),
+			Entry("a log level in lower case", "invalid-flags-log-level-case",
+				memgraphcomv1alpha1.MemgraphClusterSpec{
+					Flags: memgraphcomv1alpha1.FlagsSpec{Coordinators: map[string]memgraphcomv1alpha1.FlagValue{logLevelUnderscore: "info"}},
+				},
+				"log-level must be one of"),
 			// Two spellings of one flag would be two lines for one flag, with
 			// gflags silently taking whichever came last.
 			Entry("two keys spelling the same flag", "invalid-flags-duplicate",

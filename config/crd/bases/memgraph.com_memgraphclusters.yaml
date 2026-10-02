@@ -788,6 +788,10 @@ spec:
                     - message: two keys spell the same flag
                       rule: self.all(k, self.all(j, k == j || k.replace('-', '_')
                         != j.replace('-', '_')))
+                    - message: log-level must be one of TRACE, DEBUG, INFO, WARNING,
+                        ERROR, CRITICAL
+                      rule: self.all(k, k.replace('-', '_') != 'log_level' || self[k]
+                        in ['TRACE', 'DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'])
                   data:
                     additionalProperties:
                       description: |-
@@ -815,6 +819,10 @@ spec:
                     - message: two keys spell the same flag
                       rule: self.all(k, self.all(j, k == j || k.replace('-', '_')
                         != j.replace('-', '_')))
+                    - message: log-level must be one of TRACE, DEBUG, INFO, WARNING,
+                        ERROR, CRITICAL
+                      rule: self.all(k, k.replace('-', '_') != 'log_level' || self[k]
+                        in ['TRACE', 'DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'])
                 type: object
               image:
                 default: {}
