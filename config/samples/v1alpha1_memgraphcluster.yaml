@@ -326,10 +326,7 @@ spec:
       log-level: INFO
     data:
       log-level: INFO
-      # Run-time: a query running longer than this is aborted. Edit it and the
-      # new timeout applies to the next query on every data instance.
-      query-execution-timeout-sec: "600"
-      # Startup-only: changing it rolls the data pods, then the coordinators.
+      # Startup-only: changing it rolls the data pods,
       storage-snapshot-on-exit: "false"
   # Any pod volume the operator does not provision itself, plus where to mount
   # it in the Memgraph container. Entries are plain core/v1 volumes and volume
