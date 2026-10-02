@@ -16,6 +16,26 @@ spec:
 
 Keys are flag names without their leading dashes, in either spelling gflags accepts: `log-level` and `log_level` reach the same flag, and admission rejects a map that spells one flag both ways. Values are strings, so a number or a boolean is quoted; a boolean is `"true"` or `"false"` and nothing else, because that is the only form Memgraph accepts for one at run time. An empty value is a value: `storage-snapshot-interval: ""` turns periodic snapshots off, the way `--storage-snapshot-interval=` does.
 
+## Changing a flag
+
+Edit the map like any other part of the spec, `kubectl edit mgc memgraph` or a patch:
+
+```sh
+# A run-time flag: lands on every instance within a reconcile pass, no restart.
+kubectl patch mgc memgraph --type=merge -p '{"spec":{"flags":{"data":{"query-execution-timeout-sec":"300"}}}}'
+kubectl exec memgraph-data-0 -c memgraph -- bash -c 'echo "SHOW DATABASE SETTING \"query.timeout\";" | mgconsole'
+
+# A startup-only flag: the operator rolls the pods, data instances first, MAIN last of them.
+kubectl patch mgc memgraph --type=merge -p '{"spec":{"flags":{"data":{"storage-gc-cycle-sec":"60"}}}}'
+kubectl get mgc memgraph -w   # Updated=False while the roll runs, True once every pod is on the new template
+```
+
+A merge patch replaces the whole `data` map, so carry the flags you keep; `kubectl edit` is the safer tool for a map with several entries. `kubectl get mgc memgraph -o jsonpath='{.status.conditions}'` shows whether the operator is still owed a setting (`Converged=False`, reasons below), and the rendered flag file is readable at any time:
+
+```sh
+kubectl get configmap memgraph-data-flags -o jsonpath='{.data.memgraph\.flags}'
+```
+
 ## Where the flags go
 
 The flags do not travel on the command line. Every argument of a container is part of its pod template, so a change to one bumps the StatefulSet revision and the operator would then roll every pod — the opposite of what a run-time flag should do. Instead the operator writes each role's flags into a ConfigMap, `<cluster>-coordinator-flags` and `<cluster>-data-flags`, as a gflags flag file:

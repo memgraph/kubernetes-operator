@@ -85,18 +85,18 @@ spec:
   # forbids adding or removing in place, so adding or removing a role's block on
   # a live cluster is rejected. To change it, delete the MemgraphCluster (the
   # default retention policy keeps every claim) and recreate it.
-  coreDumps:
+  # coreDumps:
     # Per role, because only these two answers differ between them: whether the
     # role collects dumps at all — the block being present — and how much room
     # one needs; a dump is about as large as the crashing process' memory, and a
     # data instance holds the graph while a coordinator holds Raft state.
-    coordinators:
-      size: 10Gi
-    data:
-      size: 10Gi
+    # coordinators:
+    # size: 10Gi
+    # data:
+    # size: 10Gi
     # The rest is one decision for the cluster, so it is stated once.
     # storageClassName: standard
-    configureCorePattern: true
+    # configureCorePattern: true
     # An optional sidecar that ships the dumps somewhere durable, joining the
     # pods of every role that collects them. The operator mounts the dumps into
     # it read-only, passes the directory as CORE_DUMPS_DIR, mounts a writable
@@ -298,21 +298,38 @@ spec:
       # - name: MEMGRAPH_LOG_LEVEL
       #   value: TRACE
     data: []
-  # Any Memgraph flag by name, without waiting for a typed field: keys are
-  # flag names without the dashes, values are strings ("true"/"false" for a
-  # boolean). The flags reach the pods through a per-role ConfigMap holding a
-  # gflags flag file, not the command line. A flag Memgraph can change on a
-  # running instance (log-level, query-execution-timeout-sec,
-  # storage-snapshot-interval, ...) is applied to every instance with
-  # SET DATABASE SETTING the moment it changes and restarts nothing; any other
-  # flag change rolls the pods in the usual order. The operator's own logging
-  # defaults (log-level TRACE, also-log-to-stderr, log-retention-days 35) may
-  # be overridden here. The ports, listen addresses, coordinator identity,
-  # data directory, log file, TLS files, metrics format and the two AWS
-  # credential flags may not: admission rejects them. See docs/flags.md.
+  # Any Memgraph flag by name, without waiting for a typed field. Keys are
+  # flag names without the leading dashes (log-level or log_level, both reach
+  # the same flag); values are strings, so numbers and booleans are quoted and
+  # a boolean is "true" or "false". The flags reach the pods through a per-role
+  # ConfigMap holding a gflags flag file, not the command line, and what
+  # happens when you edit one depends on the flag:
+  #
+  # - A flag Memgraph can change on a running instance (log-level,
+  #   query-execution-timeout-sec, storage-snapshot-interval, timezone, ...;
+  #   the table is in docs/flags.md) is applied to every instance with
+  #   SET DATABASE SETTING the moment you change it. No pod restarts.
+  # - Any other flag is read at startup only, so changing it rolls both
+  #   roles' pods in the usual order: data instances first, MAIN last of them,
+  #   then the coordinators with the Raft leader last.
+  # - Removing a flag issues no SET: a run-time setting keeps its value until
+  #   the instance next restarts without the flag.
+  #
+  # The operator's own logging defaults (log-level TRACE, also-log-to-stderr
+  # true, log-retention-days 35) may be overridden here. The ports, listen
+  # addresses, coordinator identity, data directory, log file, TLS files,
+  # metrics format and the two AWS credential flags may not: admission rejects
+  # them.
   flags:
-    coordinators: {}
+    coordinators:
+      # Run-time: edit it and every coordinator logs at the new level at once.
+      log-level: INFO
     data:
+      log-level: INFO
+      # Run-time: a query running longer than this is aborted. Edit it and the
+      # new timeout applies to the next query on every data instance.
+      query-execution-timeout-sec: "600"
+      # Startup-only: changing it rolls the data pods, then the coordinators.
       storage-snapshot-on-exit: "false"
   # Any pod volume the operator does not provision itself, plus where to mount
   # it in the Memgraph container. Entries are plain core/v1 volumes and volume
