@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"maps"
 	"slices"
 	"strconv"
 	"strings"
@@ -55,6 +56,31 @@ type fakeMemgraph struct {
 	// connectErr, when set, makes every Connect fail — the operator's view of a
 	// cluster whose coordinators do not yet answer Bolt.
 	connectErr error
+	// unreachable are the Bolt addresses whose Connect fails on their own: a
+	// pod that is ready but whose Bolt endpoint is not answering yet.
+	unreachable map[string]bool
+	// settings is every instance's run-time settings, keyed by the pod Bolt
+	// address the operator dials it at. An address not yet in the map answers
+	// with baselineSettings, which is what an instance started on the
+	// operator's default flag file reports — so a cluster without spec.flags
+	// has nothing to SET, and a test that wants an instance out of line puts
+	// it there.
+	settings map[string]map[string]string
+	// coordinatorSettings is the cluster-wide view every coordinator relays
+	// from the leader, starting from the core's defaults. A test that wants
+	// the leader unreachable for them sets coordinatorSettingsUnknown, which
+	// makes SHOW answer with no rows the way a real coordinator does.
+	coordinatorSettings        map[string]string
+	coordinatorSettingsUnknown bool
+	// knownFlags is the SHOW CONFIG view every instance answers with: the
+	// flags the suites use, each at some current value. configUnknown makes
+	// the query fail, the way a Memgraph without the view would.
+	knownFlags    map[string]string
+	configUnknown bool
+	// configByAddress overrides the SHOW CONFIG view for single Bolt
+	// addresses: an instance on a different Memgraph version, whose binary
+	// has other flags.
+	configByAddress map[string]map[string]string
 	// rejected are commands the cluster refuses whatever its state, keyed by
 	// command prefix. It stands in for the rejections the operator cannot reason
 	// about — a coordinator refusing a registration a healthy one would accept —
@@ -79,7 +105,129 @@ func (f *fakeMemgraph) Connect(_ context.Context, address string, tls bool) (mem
 	if f.connectErr != nil {
 		return nil, f.connectErr
 	}
+	if f.unreachable[address] {
+		return nil, fmt.Errorf("fake memgraph: %s refused the connection", address)
+	}
 	return &fakeClient{cluster: f, address: address}, nil
+}
+
+// setUnreachable makes every Connect to the given Bolt address fail, or
+// succeed again.
+func (f *fakeMemgraph) setUnreachable(address string, unreachable bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.unreachable == nil {
+		f.unreachable = map[string]bool{}
+	}
+	f.unreachable[address] = unreachable
+}
+
+// baselineConfig is the SHOW CONFIG view of the fake's Memgraph: every flag a
+// spec in this suite names, hidden ones excluded as the real view excludes
+// them. A key not in it is a flag the fake's Memgraph does not have.
+func baselineConfig() map[string]string {
+	return map[string]string{
+		"log_level":                   "TRACE",
+		"log_retention_days":          "35",
+		"log_file":                    "/var/log/memgraph/memgraph.log",
+		"query_execution_timeout_sec": "600",
+		"storage_snapshot_interval":   "300",
+		"storage_snapshot_on_exit":    "true",
+		"memory_limit":                "0",
+		"bolt_num_workers":            "0",
+		"query_modules_directory":     "/usr/lib/memgraph/query_modules",
+		"experimental_enabled":        "",
+		"bolt_port":                   "7687",
+	}
+}
+
+// setConfigFor makes the instance at the given address answer SHOW CONFIG
+// with the baseline plus the given flags, as a newer version would.
+func (f *fakeMemgraph) setConfigFor(address string, extra map[string]string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.configByAddress == nil {
+		f.configByAddress = map[string]map[string]string{}
+	}
+	config := baselineConfig()
+	maps.Copy(config, extra)
+	f.configByAddress[address] = config
+}
+
+// setConfigUnknown makes every SHOW CONFIG fail, or answer again.
+func (f *fakeMemgraph) setConfigUnknown(unknown bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.configUnknown = unknown
+}
+
+// baselineCoordinatorSettings is the SHOW COORDINATOR SETTINGS view of a
+// cluster nobody has changed a setting on: Memgraph 3.13.0's defaults.
+func baselineCoordinatorSettings() map[string]string {
+	return map[string]string{
+		readsOnMainSetting:                    string(settingOff),
+		"sync_failover_only":                  string(settingOn),
+		"max_failover_replica_lag":            "10",
+		"max_replica_read_lag":                "10",
+		"deltas_batch_progress_size":          "1000",
+		downTimeoutSetting:                    "5",
+		"instance_health_check_frequency_sec": "1",
+		globalReadOnly:                        string(settingOff),
+	}
+}
+
+// coordinatorSettingsView is the cluster-wide coordinator settings as the
+// coordinators currently hold them.
+func (f *fakeMemgraph) coordinatorSettingsView() map[string]string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return maps.Clone(f.coordinatorSettingsLocked())
+}
+
+// setCoordinatorSettingsUnknown makes every coordinator answer SHOW
+// COORDINATOR SETTINGS with no rows, as one does without a ready leader.
+func (f *fakeMemgraph) setCoordinatorSettingsUnknown(unknown bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.coordinatorSettingsUnknown = unknown
+}
+
+// coordinatorSettingsLocked must be called with the cluster lock held.
+func (f *fakeMemgraph) coordinatorSettingsLocked() map[string]string {
+	if f.coordinatorSettings == nil {
+		f.coordinatorSettings = baselineCoordinatorSettings()
+	}
+	return f.coordinatorSettings
+}
+
+// baselineSettings is the SHOW DATABASE SETTINGS view of an instance started
+// on the operator's default flag file and nothing else.
+func baselineSettings() map[string]string {
+	return map[string]string{
+		"log.level":                 "TRACE",
+		"log.to_stderr":             "true",
+		"query.timeout":             "600",
+		"storage.snapshot.interval": "300",
+	}
+}
+
+// settingsOf is the run-time settings the instance at the given address
+// reports, which a spec reads back to see what landed.
+func (f *fakeMemgraph) settingsOf(address string) map[string]string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return maps.Clone(f.settingsLocked(address))
+}
+
+// settingsLocked must be called with the cluster lock held.
+func (f *fakeMemgraph) settingsLocked(address string) map[string]string {
+	if f.settings == nil {
+		f.settings = map[string]map[string]string{}
+	}
+	if _, ok := f.settings[address]; !ok {
+		f.settings[address] = baselineSettings()
+	}
+	return f.settings[address]
 }
 
 func (f *fakeMemgraph) setConnectErr(err error) {
@@ -417,6 +565,88 @@ func (c *fakeClient) YieldLeadership(context.Context) error {
 			}
 		}
 		c.cluster.instances[successor].Role = memgraph.RoleLeader
+		return nil
+	})
+}
+
+// ShowSettings answers for the connected instance alone, as the real thing
+// does: a run-time setting is local to the instance that holds it.
+func (c *fakeClient) ShowSettings(context.Context) (map[string]string, error) {
+	c.cluster.mu.Lock()
+	defer c.cluster.mu.Unlock()
+	if c.closed {
+		return nil, fmt.Errorf("fake memgraph: connection to %s already closed", c.address)
+	}
+	return maps.Clone(c.cluster.settingsLocked(c.address)), nil
+}
+
+// SetSetting changes one setting on the connected instance. Like Memgraph it
+// refuses a name it does not know — the baseline is the whole of what it
+// knows — and a boolean setting's value that is not true or false.
+func (c *fakeClient) SetSetting(_ context.Context, name, value string) error {
+	command := fmt.Sprintf("SET DATABASE SETTING %q TO %q", name, value)
+	return c.execute(command, func() error {
+		settings := c.cluster.settingsLocked(c.address)
+		if _, ok := settings[name]; !ok {
+			return fmt.Errorf("fake memgraph: Unknown setting name '%s'", name)
+		}
+		if name == "log.to_stderr" && value != string(flagOn) && value != string(flagOff) {
+			return fmt.Errorf("fake memgraph: Cannot update setting '%s': "+
+				"Boolean value supports only 'false' or 'true' as the input.", name)
+		}
+		settings[name] = value
+		return nil
+	})
+}
+
+// ShowConfig answers with the flags the fake's Memgraph has, the same on
+// every instance.
+func (c *fakeClient) ShowConfig(context.Context) (map[string]string, error) {
+	c.cluster.mu.Lock()
+	defer c.cluster.mu.Unlock()
+	if c.closed {
+		return nil, fmt.Errorf("fake memgraph: connection to %s already closed", c.address)
+	}
+	if c.cluster.configUnknown {
+		return nil, fmt.Errorf("fake memgraph: %s does not answer SHOW CONFIG", c.address)
+	}
+	if config, ok := c.cluster.configByAddress[c.address]; ok {
+		return maps.Clone(config), nil
+	}
+	if c.cluster.knownFlags == nil {
+		c.cluster.knownFlags = baselineConfig()
+	}
+	return maps.Clone(c.cluster.knownFlags), nil
+}
+
+// ShowCoordinatorSettings relays the cluster-wide view, or nothing when the
+// leader is unreachable, as the real thing does.
+func (c *fakeClient) ShowCoordinatorSettings(context.Context) (map[string]string, error) {
+	c.cluster.mu.Lock()
+	defer c.cluster.mu.Unlock()
+	if c.closed {
+		return nil, fmt.Errorf("fake memgraph: connection to %s already closed", c.address)
+	}
+	if c.cluster.coordinatorSettingsUnknown {
+		return map[string]string{}, nil
+	}
+	return maps.Clone(c.cluster.coordinatorSettingsLocked()), nil
+}
+
+// SetCoordinatorSetting writes one cluster-wide setting, on whichever
+// coordinator it arrives at. Like Memgraph it refuses a setting it does not
+// have and a boolean that is not true or false.
+func (c *fakeClient) SetCoordinatorSetting(_ context.Context, name, value string) error {
+	command := fmt.Sprintf("SET COORDINATOR SETTING %q TO %q", name, value)
+	return c.execute(command, func() error {
+		settings := c.cluster.coordinatorSettingsLocked()
+		if _, ok := settings[name]; !ok {
+			return fmt.Errorf("fake memgraph: Setting %s doesn't exist on coordinators.", name)
+		}
+		if name == globalReadOnly && value != string(settingOn) && value != string(settingOff) {
+			return fmt.Errorf("fake memgraph: Invalid argument detected while trying to update setting %s", name)
+		}
+		settings[name] = value
 		return nil
 	})
 }

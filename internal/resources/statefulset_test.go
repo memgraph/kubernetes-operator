@@ -58,6 +58,18 @@ const (
 
 	tmpVolume = "tmp"
 
+	// The flag file every pod mounts from its role's ConfigMap, and where.
+	flagsVolume = "flags"
+	flagsPath   = "/etc/memgraph-flags"
+	flagFile    = flagsPath + "/memgraph.flags"
+
+	// defaultFlagsAnnotation is the flags annotation of a role without
+	// spec.flags: the one startup-only default, log_retention_days, with the
+	// digest of its value (the first sixteen hex characters of sha256("35")).
+	// The two run-time defaults, log_level and also_log_to_stderr, are not
+	// part of it.
+	defaultFlagsAnnotation = "log_retention_days=9f14025af0065b30\n"
+
 	// The Bolt TLS Secret a fixture names, and the volume the builder mounts
 	// it as.
 	boltTLSSecretName = "bolt-tls"
@@ -186,9 +198,9 @@ func tunedCluster() *memgraphcomv1alpha1.MemgraphCluster {
 			{Name: "DATA_LABEL_TWO", Value: "two"},
 		},
 	}
-	cluster.Spec.ExtraArgs = memgraphcomv1alpha1.ExtraArgsSpec{
-		Coordinators: []string{"--log-level=WARNING"},
-		Data:         []string{"--storage-snapshot-on-exit=true", "--memory-limit=2048"},
+	cluster.Spec.Flags = memgraphcomv1alpha1.FlagsSpec{
+		Coordinators: map[string]memgraphcomv1alpha1.FlagValue{logLevelFlag: "WARNING"},
+		Data:         map[string]memgraphcomv1alpha1.FlagValue{snapshotOnExit: flagOn, memoryLimitFlag: "2048"},
 	}
 	return cluster
 }
@@ -335,6 +347,7 @@ func sysctlCluster() *memgraphcomv1alpha1.MemgraphCluster {
 func expectedVolumeMounts() []corev1.VolumeMount {
 	return []corev1.VolumeMount{
 		{Name: libVolume, MountPath: libPath},
+		{Name: flagsVolume, MountPath: flagsPath, ReadOnly: true},
 		{Name: logVolume, MountPath: logPath},
 		{Name: tmpVolume, MountPath: "/tmp"},
 	}
@@ -353,21 +366,24 @@ func expectedCommand(script string) []string {
 	return []string{shell, "-ec", script}
 }
 
-// expectedArgs are the flags a role is started with: the shared ones in the
-// order the builder emits them, then the fixture's extra args. The ports are
-// the fixed internal ones; a role that opted out of log storage gets an empty
-// --log-file, so that is a parameter.
+// expectedArgs is the command line a role is started with: the flag file
+// first, then exactly the flags the operator pins — the ones spec.flags may
+// not set — in the order the builder emits them. Nothing from spec.flags and
+// none of the operator's own logging defaults are here: they are in the flag
+// file. A role that opted out of log storage gets an empty --log-file, so
+// that is a parameter; the TLS modes append their file flags.
 func expectedArgs(logDestination string, extra ...string) []string {
 	return append([]string{
+		"--flag-file=" + flagFile,
 		fmt.Sprintf("--bolt-port=%d", memgraphcomv1alpha1.BoltPort),
+		"--bolt-address=0.0.0.0",
 		fmt.Sprintf("--management-port=%d", memgraphcomv1alpha1.ManagementPort),
 		fmt.Sprintf("--metrics-port=%d", memgraphcomv1alpha1.MetricsPort),
 		"--metrics-format=OpenMetrics",
+		"--monitoring-address=0.0.0.0",
+		fmt.Sprintf("--monitoring-port=%d", memgraphcomv1alpha1.MonitoringPort),
 		"--data-directory=" + dataPath,
-		"--log-level=TRACE",
-		"--also-log-to-stderr",
 		"--log-file=" + logDestination,
-		"--log-retention-days=35",
 	}, extra...)
 }
 
@@ -378,11 +394,28 @@ func expectedCoordinatorArgs(logDestination string, extra ...string) []string {
 	return append([]string{memgraphName}, expectedArgs(logDestination, extra...)...)
 }
 
-// expectedVolumes covers only the ephemeral scratch volume: lib and log
-// storage are provisioned through volumeClaimTemplates.
-func expectedVolumes() []corev1.Volume {
+// expectedVolumes covers the role's flag file and the ephemeral scratch
+// volume: lib and log storage are provisioned through volumeClaimTemplates.
+func expectedVolumes(component string) []corev1.Volume {
 	return []corev1.Volume{
+		{
+			Name: flagsVolume,
+			VolumeSource: corev1.VolumeSource{
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: corev1.LocalObjectReference{Name: clusterName + "-" + component + "-flags"},
+				},
+			},
+		},
 		{Name: tmpVolume, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+	}
+}
+
+// expectedTemplateMeta is the pod template metadata of a role without
+// spec.flags: its labels, and the flags annotation of the default flag file.
+func expectedTemplateMeta(component string) metav1.ObjectMeta {
+	return metav1.ObjectMeta{
+		Labels:      expectedLabels(component),
+		Annotations: map[string]string{"memgraph.com/flags": defaultFlagsAnnotation},
 	}
 }
 
@@ -476,7 +509,7 @@ func TestCoordinatorStatefulSetDefaults(t *testing.T) {
 				appsv1.RetainPersistentVolumeClaimRetentionPolicyType),
 			VolumeClaimTemplates: expectedClaimTemplates(),
 			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{Labels: expectedLabels(coordinatorComponent)},
+				ObjectMeta: expectedTemplateMeta(coordinatorComponent),
 				Spec: corev1.PodSpec{
 					// Kubernetes' 30-second default is too short for a database that is
 					// now restarted on every pod-template change: an instance killed
@@ -506,11 +539,15 @@ func TestCoordinatorStatefulSetDefaults(t *testing.T) {
 						SecurityContext: expectedContainerSecurityContext(),
 					}},
 					SecurityContext: expectedPodSecurityContext(),
-					Volumes:         expectedVolumes(),
+					Volumes:         expectedVolumes(coordinatorComponent),
 				},
 			},
 		},
 	}
+
+	// The template hash is stamped over the finished template, so the
+	// expectation derives it from the template it expects.
+	want.Spec.Template.Annotations[resources.TemplateHashAnnotation] = resources.PodTemplateHash(want.Spec.Template)
 
 	got := coordinatorStatefulSet(minimalCluster())
 	if diff := cmp.Diff(want, got); diff != "" {
@@ -538,7 +575,7 @@ func TestDataStatefulSetDefaults(t *testing.T) {
 				appsv1.RetainPersistentVolumeClaimRetentionPolicyType),
 			VolumeClaimTemplates: expectedClaimTemplates(),
 			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{Labels: expectedLabels(dataComponent)},
+				ObjectMeta: expectedTemplateMeta(dataComponent),
 				Spec: corev1.PodSpec{
 					// Kubernetes' 30-second default is too short for a database that is
 					// now restarted on every pod-template change: an instance killed
@@ -562,11 +599,15 @@ func TestDataStatefulSetDefaults(t *testing.T) {
 						SecurityContext: expectedContainerSecurityContext(),
 					}},
 					SecurityContext: expectedPodSecurityContext(),
-					Volumes:         expectedVolumes(),
+					Volumes:         expectedVolumes(dataComponent),
 				},
 			},
 		},
 	}
+
+	// The template hash is stamped over the finished template, so the
+	// expectation derives it from the template it expects.
+	want.Spec.Template.Annotations[resources.TemplateHashAnnotation] = resources.PodTemplateHash(want.Spec.Template)
 
 	got := dataStatefulSet(minimalCluster())
 	if diff := cmp.Diff(want, got); diff != "" {
@@ -1171,7 +1212,7 @@ func TestStatefulSetExtraVolumes(t *testing.T) {
 	t.Run(dataComponent, func(t *testing.T) {
 		podSpec := dataStatefulSet(cluster).Spec.Template.Spec
 
-		wantVolumes := append(expectedVolumes(), certVolume)
+		wantVolumes := append(expectedVolumes(dataComponent), certVolume)
 		if diff := cmp.Diff(wantVolumes, podSpec.Volumes); diff != "" {
 			t.Errorf("volumes mismatch (-want +got):\n%s", diff)
 		}
@@ -1184,7 +1225,7 @@ func TestStatefulSetExtraVolumes(t *testing.T) {
 	t.Run(coordinatorComponent, func(t *testing.T) {
 		podSpec := coordinatorStatefulSet(cluster).Spec.Template.Spec
 
-		if diff := cmp.Diff(expectedVolumes(), podSpec.Volumes); diff != "" {
+		if diff := cmp.Diff(expectedVolumes(coordinatorComponent), podSpec.Volumes); diff != "" {
 			t.Errorf("volumes mismatch (-want +got):\n%s", diff)
 		}
 		if diff := cmp.Diff(expectedVolumeMounts(), podSpec.Containers[0].VolumeMounts); diff != "" {
@@ -1204,8 +1245,8 @@ func TestStatefulSetExtraVolumeWithoutMount(t *testing.T) {
 	}}
 
 	podSpec := coordinatorStatefulSet(cluster).Spec.Template.Spec
-	if len(podSpec.Volumes) != 2 {
-		t.Errorf("volumes = %v, want the scratch volume alongside tmp", podSpec.Volumes)
+	if len(podSpec.Volumes) != 3 {
+		t.Errorf("volumes = %v, want the scratch volume alongside flags and tmp", podSpec.Volumes)
 	}
 	if diff := cmp.Diff(expectedVolumeMounts(), podSpec.Containers[0].VolumeMounts); diff != "" {
 		t.Errorf("volume mounts mismatch (-want +got):\n%s", diff)
@@ -1391,14 +1432,6 @@ exec /usr/lib/memgraph/memgraph \
   --coordinator-port=%d \
   "$@"`, memgraphcomv1alpha1.CoordinatorPort)
 
-// The remaining flags reach the wrapper as
-// container arguments, which is what keeps a value with whitespace or shell
-// metacharacters from being re-parsed by the shell. spec.extraArgs.coordinators
-// comes last so it wins.
-func expectedTunedCoordinatorArgs() []string {
-	return expectedCoordinatorArgs(logFilePath, "--log-level=WARNING")
-}
-
 // TestStatefulSetFixedPortsAndClusterDomain pins the fixed ports and configured
 // cluster domain everywhere they surface: container ports, Memgraph flags,
 // probes, and the coordinator's advertised hostname.
@@ -1421,7 +1454,9 @@ func TestStatefulSetFixedPortsAndClusterDomain(t *testing.T) {
 		if diff := cmp.Diff(wantCommand, container.Command); diff != "" {
 			t.Errorf("start script mismatch (-want +got):\n%s", diff)
 		}
-		if diff := cmp.Diff(expectedTunedCoordinatorArgs(), container.Args); diff != "" {
+		// spec.flags.coordinators is not here: it is in the flag file, and the
+		// command line carries only the pinned flags.
+		if diff := cmp.Diff(expectedCoordinatorArgs(logFilePath), container.Args); diff != "" {
 			t.Errorf("args mismatch (-want +got):\n%s", diff)
 		}
 		if got := container.ReadinessProbe.TCPSocket.Port; got != intstr.FromInt32(memgraphcomv1alpha1.CoordinatorPort) {
@@ -1442,9 +1477,7 @@ func TestStatefulSetFixedPortsAndClusterDomain(t *testing.T) {
 		if diff := cmp.Diff(wantPorts, container.Ports); diff != "" {
 			t.Errorf("container ports mismatch (-want +got):\n%s", diff)
 		}
-		wantArgs := expectedArgs(logFilePath,
-			"--storage-snapshot-on-exit=true", "--memory-limit=2048")
-		if diff := cmp.Diff(wantArgs, container.Args); diff != "" {
+		if diff := cmp.Diff(expectedArgs(logFilePath), container.Args); diff != "" {
 			t.Errorf("args mismatch (-want +got):\n%s", diff)
 		}
 		if got := container.ReadinessProbe.TCPSocket.Port; got != intstr.FromInt32(memgraphcomv1alpha1.BoltPort) {
@@ -1454,36 +1487,46 @@ func TestStatefulSetFixedPortsAndClusterDomain(t *testing.T) {
 	})
 }
 
-// TestStatefulSetExtraArgsAreNotShellParsed asserts an extra argument survives
-// verbatim on both roles, whitespace and shell metacharacters included. The
-// coordinators are the interesting half: they start through a /bin/sh wrapper,
-// so an argument interpolated into that script would be word-split by the shell
-// (or worse, run as a command) instead of reaching Memgraph as one flag.
-func TestStatefulSetExtraArgsAreNotShellParsed(t *testing.T) {
-	hostile := []string{
-		"--query-modules-directory=/var/lib/memgraph/my modules",
-		"--log-level=$(id)`id`;id",
-		"--experimental-enabled=text-search,'vector-search'",
+// TestStatefulSetFlagsNeverReachTheCommandLine asserts that spec.flags lands
+// in the role's flag file verbatim, whitespace and shell metacharacters
+// included, and nowhere on the command line of either role. The coordinators
+// are the interesting half: they start through a /bin/sh wrapper, so a value
+// interpolated into that script would be word-split by the shell (or worse,
+// run as a command). A flag file is read by gflags alone, line by line.
+func TestStatefulSetFlagsNeverReachTheCommandLine(t *testing.T) {
+	hostile := map[string]memgraphcomv1alpha1.FlagValue{
+		"query-modules-directory": "/var/lib/memgraph/my modules",
+		logLevelFlag:              "$(id)`id`;id",
+		"experimental-enabled":    "text-search,'vector-search'",
 	}
 	cluster := minimalCluster()
-	cluster.Spec.ExtraArgs = memgraphcomv1alpha1.ExtraArgsSpec{Coordinators: hostile, Data: hostile}
+	cluster.Spec.Flags = memgraphcomv1alpha1.FlagsSpec{Coordinators: hostile, Data: hostile}
 
 	for _, tc := range []struct {
-		name string
-		sts  *appsv1.StatefulSet
+		name      string
+		sts       *appsv1.StatefulSet
+		configMap *corev1.ConfigMap
 	}{
-		{coordinatorComponent, coordinatorStatefulSet(cluster)},
-		{dataComponent, dataStatefulSet(cluster)},
+		{coordinatorComponent, coordinatorStatefulSet(cluster), resources.CoordinatorFlagsConfigMap(cluster)},
+		{dataComponent, dataStatefulSet(cluster), resources.DataFlagsConfigMap(cluster)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			container := tc.sts.Spec.Template.Spec.Containers[0]
-			if got := container.Args[len(container.Args)-len(hostile):]; !slices.Equal(got, hostile) {
-				t.Errorf("trailing args = %q, want the extra args unmodified %q", got, hostile)
+			commandLine := strings.Join(append(slices.Clone(container.Command), container.Args...), "\x00")
+			for _, value := range hostile {
+				if strings.Contains(commandLine, string(value)) {
+					t.Errorf("command line %q carries the flag value %q, which the shell would then parse",
+						commandLine, value)
+				}
 			}
-			for _, arg := range hostile {
-				if strings.Contains(strings.Join(container.Command, "\x00"), arg) {
-					t.Errorf("command %q embeds the extra arg %q, which the shell would then parse",
-						container.Command, arg)
+			file := tc.configMap.Data[resources.FlagFileKey]
+			for _, line := range []string{
+				"--experimental_enabled=text-search,'vector-search'\n",
+				"--log_level=$(id)`id`;id\n",
+				"--query_modules_directory=/var/lib/memgraph/my modules\n",
+			} {
+				if !strings.Contains(file, line) {
+					t.Errorf("flag file %q lacks the line %q", file, line)
 				}
 			}
 		})
@@ -1723,18 +1766,20 @@ func TestStatefulSetBoltTLS(t *testing.T) {
 		Bolt: &memgraphcomv1alpha1.BoltTLSSpec{SecretName: boltTLSSecretName},
 	}
 
-	wantVolumes := append(expectedVolumes(), corev1.Volume{
-		Name: boltTLSVolume,
-		VolumeSource: corev1.VolumeSource{
-			Secret: &corev1.SecretVolumeSource{
-				SecretName: boltTLSSecretName,
-				Items: []corev1.KeyToPath{
-					{Key: tlsCertKey, Path: tlsCertKey},
-					{Key: tlsKeyKey, Path: tlsKeyKey},
+	wantVolumes := func(component string) []corev1.Volume {
+		return append(expectedVolumes(component), corev1.Volume{
+			Name: boltTLSVolume,
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: boltTLSSecretName,
+					Items: []corev1.KeyToPath{
+						{Key: tlsCertKey, Path: tlsCertKey},
+						{Key: tlsKeyKey, Path: tlsKeyKey},
+					},
 				},
 			},
-		},
-	})
+		})
+	}
 	wantMounts := append(expectedVolumeMounts(),
 		corev1.VolumeMount{Name: boltTLSVolume, MountPath: boltTLSMount, ReadOnly: true})
 	tlsFlags := []string{
@@ -1744,7 +1789,7 @@ func TestStatefulSetBoltTLS(t *testing.T) {
 
 	t.Run(dataComponent, func(t *testing.T) {
 		podSpec := dataStatefulSet(cluster).Spec.Template.Spec
-		if diff := cmp.Diff(wantVolumes, podSpec.Volumes); diff != "" {
+		if diff := cmp.Diff(wantVolumes(dataComponent), podSpec.Volumes); diff != "" {
 			t.Errorf("volumes mismatch (-want +got):\n%s", diff)
 		}
 		if diff := cmp.Diff(wantMounts, podSpec.Containers[0].VolumeMounts); diff != "" {
@@ -1758,7 +1803,7 @@ func TestStatefulSetBoltTLS(t *testing.T) {
 
 	t.Run(coordinatorComponent, func(t *testing.T) {
 		podSpec := coordinatorStatefulSet(cluster).Spec.Template.Spec
-		if diff := cmp.Diff(wantVolumes, podSpec.Volumes); diff != "" {
+		if diff := cmp.Diff(wantVolumes(coordinatorComponent), podSpec.Volumes); diff != "" {
 			t.Errorf("volumes mismatch (-want +got):\n%s", diff)
 		}
 		if diff := cmp.Diff(wantMounts, podSpec.Containers[0].VolumeMounts); diff != "" {
@@ -1771,24 +1816,34 @@ func TestStatefulSetBoltTLS(t *testing.T) {
 	})
 }
 
-// TestStatefulSetBoltTLSAfterExtras pins the order the TLS flags and mount
-// land in relative to a role's extras: the flags come before the role's extra
-// args, so a user-supplied --bolt-cert-file still wins as the last occurrence,
-// and the mount comes before the role's extra mounts.
-func TestStatefulSetBoltTLSAfterExtras(t *testing.T) {
+// TestStatefulSetFlagFileComesFirst pins the one ordering the pinned flags
+// depend on: the flag file is the first flag on both roles' command lines and
+// every pinned flag follows it. gflags processes --flag-file where it stands
+// and takes the last occurrence of a repeated flag, so a pinned flag always
+// beats whatever the file says — the TLS file flags included, which is why
+// the Bolt certificate flags come after it like everything else.
+func TestStatefulSetFlagFileComesFirst(t *testing.T) {
 	cluster := minimalCluster()
 	cluster.Spec.TLS = &memgraphcomv1alpha1.TLSSpec{
 		Bolt: &memgraphcomv1alpha1.BoltTLSSpec{SecretName: boltTLSSecretName},
 	}
-	cluster.Spec.ExtraArgs.Data = []string{"--bolt-cert-file=/elsewhere/cert.pem"}
 
-	args := dataStatefulSet(cluster).Spec.Template.Spec.Containers[0].Args
-	certFlags := slices.DeleteFunc(slices.Clone(args), func(arg string) bool {
-		return !strings.HasPrefix(arg, "--bolt-cert-file=")
-	})
-	want := []string{"--bolt-cert-file=" + boltTLSMount + "/" + tlsCertKey, "--bolt-cert-file=/elsewhere/cert.pem"}
-	if diff := cmp.Diff(want, certFlags); diff != "" {
-		t.Errorf("--bolt-cert-file order mismatch (-want +got):\n%s", diff)
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		// The coordinator's first argument is the shell wrapper's $0.
+		{coordinatorComponent, coordinatorStatefulSet(cluster).Spec.Template.Spec.Containers[0].Args[1:]},
+		{dataComponent, dataStatefulSet(cluster).Spec.Template.Spec.Containers[0].Args},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.args[0]; got != "--flag-file="+flagFile {
+				t.Errorf("first flag = %q, want the flag file", got)
+			}
+			if !slices.Contains(tc.args[1:], "--bolt-cert-file="+boltTLSMount+"/"+tlsCertKey) {
+				t.Errorf("args %q lack the Bolt certificate flag after the flag file", tc.args)
+			}
+		})
 	}
 }
 
@@ -1803,19 +1858,21 @@ func TestStatefulSetIntraClusterTLS(t *testing.T) {
 		IntraCluster: &memgraphcomv1alpha1.IntraClusterTLSSpec{SecretName: intraTLSSecretName},
 	}
 
-	wantVolumes := append(expectedVolumes(), corev1.Volume{
-		Name: intraTLSVolume,
-		VolumeSource: corev1.VolumeSource{
-			Secret: &corev1.SecretVolumeSource{
-				SecretName: intraTLSSecretName,
-				Items: []corev1.KeyToPath{
-					{Key: tlsCertKey, Path: tlsCertKey},
-					{Key: tlsKeyKey, Path: tlsKeyKey},
-					{Key: tlsCAKey, Path: tlsCAKey},
+	wantVolumes := func(component string) []corev1.Volume {
+		return append(expectedVolumes(component), corev1.Volume{
+			Name: intraTLSVolume,
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: intraTLSSecretName,
+					Items: []corev1.KeyToPath{
+						{Key: tlsCertKey, Path: tlsCertKey},
+						{Key: tlsKeyKey, Path: tlsKeyKey},
+						{Key: tlsCAKey, Path: tlsCAKey},
+					},
 				},
 			},
-		},
-	})
+		})
+	}
 	wantMounts := append(expectedVolumeMounts(),
 		corev1.VolumeMount{Name: intraTLSVolume, MountPath: intraTLSMount, ReadOnly: true})
 	tlsFlags := []string{
@@ -1826,7 +1883,7 @@ func TestStatefulSetIntraClusterTLS(t *testing.T) {
 
 	t.Run(dataComponent, func(t *testing.T) {
 		podSpec := dataStatefulSet(cluster).Spec.Template.Spec
-		if diff := cmp.Diff(wantVolumes, podSpec.Volumes); diff != "" {
+		if diff := cmp.Diff(wantVolumes(dataComponent), podSpec.Volumes); diff != "" {
 			t.Errorf("volumes mismatch (-want +got):\n%s", diff)
 		}
 		if diff := cmp.Diff(wantMounts, podSpec.Containers[0].VolumeMounts); diff != "" {
@@ -1839,7 +1896,7 @@ func TestStatefulSetIntraClusterTLS(t *testing.T) {
 
 	t.Run(coordinatorComponent, func(t *testing.T) {
 		podSpec := coordinatorStatefulSet(cluster).Spec.Template.Spec
-		if diff := cmp.Diff(wantVolumes, podSpec.Volumes); diff != "" {
+		if diff := cmp.Diff(wantVolumes(coordinatorComponent), podSpec.Volumes); diff != "" {
 			t.Errorf("volumes mismatch (-want +got):\n%s", diff)
 		}
 		if diff := cmp.Diff(wantMounts, podSpec.Containers[0].VolumeMounts); diff != "" {
@@ -1867,7 +1924,7 @@ func TestStatefulSetBothTLSModes(t *testing.T) {
 	for _, volume := range podSpec.Volumes {
 		volumes = append(volumes, volume.Name)
 	}
-	if diff := cmp.Diff([]string{tmpVolume, boltTLSVolume, intraTLSVolume}, volumes); diff != "" {
+	if diff := cmp.Diff([]string{flagsVolume, tmpVolume, boltTLSVolume, intraTLSVolume}, volumes); diff != "" {
 		t.Errorf("volume order mismatch (-want +got):\n%s", diff)
 	}
 

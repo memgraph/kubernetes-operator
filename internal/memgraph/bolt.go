@@ -151,6 +151,62 @@ func (c *boltClient) YieldLeadership(ctx context.Context) error {
 	return err
 }
 
+func (c *boltClient) ShowSettings(ctx context.Context) (map[string]string, error) {
+	records, err := c.run(ctx, showSettingsQuery)
+	if err != nil {
+		return nil, err
+	}
+	return settingsFromRecords(records)
+}
+
+func (c *boltClient) ShowConfig(ctx context.Context) (map[string]string, error) {
+	records, err := c.run(ctx, showConfigQuery)
+	if err != nil {
+		return nil, err
+	}
+	return namedValuesFromRecords(records, "name", "current_value")
+}
+
+func (c *boltClient) ShowCoordinatorSettings(ctx context.Context) (map[string]string, error) {
+	records, err := c.run(ctx, showCoordinatorSettingsQuery)
+	if err != nil {
+		return nil, err
+	}
+	return settingsFromRecords(records)
+}
+
+func (c *boltClient) SetCoordinatorSetting(ctx context.Context, name, value string) error {
+	_, err := c.run(ctx, setCoordinatorSettingQuery(name, value))
+	return err
+}
+
+// settingsFromRecords maps the SHOW DATABASE SETTINGS or SHOW COORDINATOR
+// SETTINGS rows, which share their shape, to setting name and value.
+func settingsFromRecords(records []*db.Record) (map[string]string, error) {
+	return namedValuesFromRecords(records, "setting_name", "setting_value")
+}
+
+// namedValuesFromRecords maps two-column name/value rows to a map. A row
+// without a name is refused: filed under the empty string it would never
+// match a key, and a settings diff would then re-issue a SET the instance
+// already holds on every pass.
+func namedValuesFromRecords(records []*db.Record, nameColumn, valueColumn string) (map[string]string, error) {
+	values := make(map[string]string, len(records))
+	for _, record := range records {
+		name := stringColumn(record, nameColumn)
+		if name == "" {
+			return nil, fmt.Errorf("row carries no %s", nameColumn)
+		}
+		values[name] = stringColumn(record, valueColumn)
+	}
+	return values, nil
+}
+
+func (c *boltClient) SetSetting(ctx context.Context, name, value string) error {
+	_, err := c.run(ctx, setSettingQuery(name, value))
+	return err
+}
+
 func (c *boltClient) Close(ctx context.Context) error {
 	return c.driver.Close(ctx)
 }

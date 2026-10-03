@@ -43,6 +43,11 @@ const (
 	// so a knob would only create ways for the two to disagree.
 	coreDumpsMountPath = "/var/core/memgraph"
 
+	// listenAddress is where every instance's Bolt server and monitoring
+	// websocket listen: every interface, so the pod IP the probes, the cluster
+	// and the Services reach it at is among them.
+	listenAddress = "0.0.0.0"
+
 	// Volume names double as the StatefulSet volumeClaimTemplate names, so the
 	// provisioned claims are <volume>-<pod>, e.g. lib-storage-example-data-0.
 	libVolumeName       = "lib-storage"
@@ -121,11 +126,10 @@ func CoordinatorStatefulSet(
 	// name so all replicas share one template.
 	container.Command = shellCommand(coordinatorStartScript(cluster, spec))
 	// The flags are handed to the wrapper as arguments rather than interpolated
-	// into the script, so `exec ... "$@"` passes each one to Memgraph verbatim —
-	// a value carrying whitespace or shell metacharacters is never re-parsed by
-	// the shell. `sh -c` assigns the first operand to $0, so it is a placeholder
-	// name and not a flag.
-	container.Args = append([]string{containerName}, append(commonArgs(spec, role), role.extraArgs...)...)
+	// into the script, so `exec ... "$@"` passes each one to Memgraph verbatim.
+	// `sh -c` assigns the first operand to $0, so it is a placeholder name and
+	// not a flag.
+	container.Args = append([]string{containerName}, commonArgs(spec, role)...)
 	container.Env = append([]corev1.EnvVar{{
 		Name: memgraphcomv1alpha1.EnvPodName,
 		ValueFrom: &corev1.EnvVarSource{
@@ -153,7 +157,7 @@ func DataStatefulSet(cluster *memgraphcomv1alpha1.MemgraphCluster, replicas int3
 	role := spec.dataRole
 
 	container := memgraphContainer(spec, role)
-	container.Args = append(commonArgs(spec, role), role.extraArgs...)
+	container.Args = commonArgs(spec, role)
 	container.Ports = []corev1.ContainerPort{
 		{Name: boltPortName, ContainerPort: memgraphcomv1alpha1.BoltPort},
 		{Name: managementPortName, ContainerPort: memgraphcomv1alpha1.ManagementPort},
@@ -168,8 +172,8 @@ func DataStatefulSet(cluster *memgraphcomv1alpha1.MemgraphCluster, replicas int3
 // coordinatorStartScript derives the coordinator's identity from its pod
 // ordinal (the numeric suffix of the pod name): ordinal N becomes coordinator
 // ID N and is advertised at the pod's stable DNS name within the headless
-// Service. Every other flag arrives as a container argument and is forwarded
-// by "$@" — only the derived ones are written into the script.
+// Service. Every other argument is forwarded by "$@" — only the derived ones
+// are written into the script.
 func coordinatorStartScript(
 	cluster *memgraphcomv1alpha1.MemgraphCluster,
 	spec normalizedSpec,
@@ -183,18 +187,27 @@ exec %s \
   "$@"`, memgraphBinary, fqdnSuffix, memgraphcomv1alpha1.CoordinatorPort)
 }
 
-// commonArgs are the Memgraph flags shared by both roles, mirroring the HA
-// chart's auto-appended and default logging arguments. A role's extra args are
-// appended after these, and Memgraph takes the last occurrence of a repeated
-// flag, so a user-supplied flag wins.
+// commonArgs are the command-line arguments both roles' Memgraph containers
+// start with: the role's flag file, then the flags the operator pins. The
+// command line carries exactly the flags spec.flags may not set, and nothing
+// else; every other flag, the operator's own logging defaults included, lives
+// in the flag file (see flags.go). gflags processes --flag-file where it
+// stands in the argument list and takes the last occurrence of a repeated
+// flag, so a pinned flag after the file wins even if a spelling of it slipped
+// past admission.
+//
+// The pinned set is what the rest of the cluster depends on: the ports and
+// listen addresses the Services, probes, registrations, the metrics scrapers
+// and the Vector sidecar reach the instance at, the metrics format, the data
+// directory on the lib claim, and the log file.
 //
 // A role that opted out of log storage gets --log-file with an empty value,
 // which is what turns file logging off. Leaving the flag out would not: the
 // image ships /etc/memgraph/memgraph.conf with log_file set to the path below,
 // Memgraph parses that file before the command line, and failing to open the
 // resulting path is fatal — so an unmounted log directory on a read-only root
-// filesystem would crash-loop the pod. --also-log-to-stderr keeps the logs in
-// `kubectl logs` either way.
+// filesystem would crash-loop the pod. also_log_to_stderr in the flag file
+// keeps the logs in `kubectl logs` either way.
 //
 // A cluster with Bolt TLS gets the certificate and key flags last. Memgraph
 // serves the metrics endpoint from the same server context, so the two flags
@@ -207,7 +220,9 @@ func commonArgs(spec normalizedSpec, role normalizedRole) []string {
 		logDestination = ""
 	}
 	args := []string{
+		"--flag-file=" + flagFilePath,
 		fmt.Sprintf("--bolt-port=%d", memgraphcomv1alpha1.BoltPort),
+		"--bolt-address=" + listenAddress,
 		fmt.Sprintf("--management-port=%d", memgraphcomv1alpha1.ManagementPort),
 		// The metrics endpoint is served either way; the port is pinned so it
 		// agrees with the declared container and Service ports, and the format
@@ -215,11 +230,12 @@ func commonArgs(spec normalizedSpec, role normalizedRole) []string {
 		// default happens to be (JSON before 3.13, deprecated since).
 		fmt.Sprintf("--metrics-port=%d", memgraphcomv1alpha1.MetricsPort),
 		"--metrics-format=OpenMetrics",
+		// The monitoring websocket is what the Vector sidecar dials on the
+		// loopback address, so where it listens is pinned like the ports.
+		"--monitoring-address=" + listenAddress,
+		fmt.Sprintf("--monitoring-port=%d", memgraphcomv1alpha1.MonitoringPort),
 		"--data-directory=" + dataDirectory,
-		"--log-level=TRACE",
-		"--also-log-to-stderr",
 		"--log-file=" + logDestination,
-		"--log-retention-days=35",
 	}
 	if spec.boltTLSSecret != "" {
 		args = append(args,
@@ -453,13 +469,16 @@ func uploaderSidecar(coreDumps normalizedCoreDumps) corev1.Container {
 	}
 }
 
-// volumeMounts are the Memgraph container's mounts: lib storage, the scratch
-// directory the read-only root filesystem needs, log storage unless the role
-// opted out of it, the core dumps directory when the role collects dumps, the
-// Bolt and intra-cluster certificates when the cluster has those modes, and
-// last the role's own extra mounts.
+// volumeMounts are the Memgraph container's mounts: lib storage, the role's
+// flag file, the scratch directory the read-only root filesystem needs, log
+// storage unless the role opted out of it, the core dumps directory when the
+// role collects dumps, the Bolt and intra-cluster certificates when the
+// cluster has those modes, and last the role's own extra mounts.
 func volumeMounts(spec normalizedSpec, role normalizedRole) []corev1.VolumeMount {
-	mounts := []corev1.VolumeMount{{Name: libVolumeName, MountPath: libMountPath}}
+	mounts := []corev1.VolumeMount{
+		{Name: libVolumeName, MountPath: libMountPath},
+		{Name: flagsVolumeName, MountPath: flagsMountPath, ReadOnly: true},
+	}
 	if role.storage.createLogClaim {
 		mounts = append(mounts, corev1.VolumeMount{Name: logVolumeName, MountPath: logMountPath})
 	}
@@ -479,9 +498,10 @@ func volumeMounts(spec normalizedSpec, role normalizedRole) []corev1.VolumeMount
 	return append(mounts, role.extraMounts...)
 }
 
-// podVolumes is the scratch directory the read-only root filesystem needs, the
-// certificate Secrets of the TLS modes the cluster has, plus the role's extra
-// volumes. Everything persistent comes from volumeClaimTemplates instead.
+// podVolumes is the role's flag file, the scratch directory the read-only root
+// filesystem needs, the certificate Secrets of the TLS modes the cluster has,
+// plus the role's extra volumes. Everything persistent comes from
+// volumeClaimTemplates instead.
 //
 // The certificate Secrets are projected by key name: tls.crt and tls.key, the
 // shape of a kubernetes.io/tls Secret, plus ca.crt for the intra-cluster one.
@@ -491,9 +511,10 @@ func podVolumes(
 	cluster *memgraphcomv1alpha1.MemgraphCluster,
 	spec normalizedSpec,
 	role normalizedRole,
+	flagsConfigMap string,
 ) []corev1.Volume {
-	volumes := make([]corev1.Volume, 0, 3+len(role.extraVolumes))
-	volumes = append(volumes, corev1.Volume{
+	volumes := make([]corev1.Volume, 0, 4+len(role.extraVolumes))
+	volumes = append(volumes, flagsVolume(flagsConfigMap), corev1.Volume{
 		Name: tmpVolumeName, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
 	})
 	if spec.boltTLSSecret != "" {
@@ -626,7 +647,7 @@ func statefulSet(
 	replicas int32,
 	container corev1.Container,
 ) *appsv1.StatefulSet {
-	return &appsv1.StatefulSet{
+	sts := &appsv1.StatefulSet{
 		// TypeMeta is set explicitly because the controller server-side
 		// applies builder output, and apply patches must carry the GVK.
 		TypeMeta: metav1.TypeMeta{APIVersion: "apps/v1", Kind: "StatefulSet"},
@@ -668,6 +689,14 @@ func statefulSet(
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: labels(cluster, component, role.podLabels),
+					// The startup-only flags are part of the template through
+					// their digests, so a change to one is a new revision and
+					// the controller can see which keys a pod lacks; the
+					// run-time flags are deliberately not, so a change to one
+					// changes nothing here.
+					Annotations: map[string]string{
+						FlagsAnnotation: flagsDigests(roleFlags(role)),
+					},
 				},
 				Spec: corev1.PodSpec{
 					TerminationGracePeriodSeconds: ptr.To(terminationGracePeriod),
@@ -683,7 +712,7 @@ func statefulSet(
 						RunAsNonRoot:   ptr.To(true),
 						SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
 					},
-					Volumes:                   podVolumes(cluster, spec, role),
+					Volumes:                   podVolumes(cluster, spec, role, name+"-"+flagsComponent),
 					NodeSelector:              role.scheduling.NodeSelector,
 					Tolerations:               role.scheduling.Tolerations,
 					TopologySpreadConstraints: spreadConstraints(cluster, component, role),
@@ -693,6 +722,10 @@ func statefulSet(
 			},
 		},
 	}
+	// The hash of everything else is stamped last, over the finished template,
+	// so nothing added after it can escape it.
+	sts.Spec.Template.Annotations[TemplateHashAnnotation] = PodTemplateHash(sts.Spec.Template)
+	return sts
 }
 
 // podAffinity is the pod anti-affinity of one role: the operator's own rule

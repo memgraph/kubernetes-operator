@@ -118,15 +118,18 @@ func DeclaredTopology(
 	return topology
 }
 
-// CoordinatorEndpoint is where the operator itself reaches one coordinator over
-// Bolt: always the pod's own address, never the announced one. The announced
-// address may be an external LoadBalancer, which the operator has no business
-// going through — it may not be reachable from inside the cluster, and the
+// Endpoint is where the operator itself reaches one member over Bolt: always
+// the pod's own address, never the announced one. The announced address may
+// be an external LoadBalancer, which the operator has no business going
+// through — it may not be reachable from inside the cluster, and the
 // coordinators' shared one lands on whichever member the balancer picks, when
 // the operator needs to speak to a particular one.
-type CoordinatorEndpoint struct {
-	// Name is the coordinator's SHOW INSTANCES name.
+type Endpoint struct {
+	// Name is the member's SHOW INSTANCES name.
 	Name string
+	// Pod is the name of the pod the member runs in, which is what a condition
+	// about the member names.
+	Pod string
 	// Address is its pod's bolt "host:port".
 	Address string
 	// TLS is whether the spec has the coordinator serving Bolt over TLS, and
@@ -141,13 +144,31 @@ type CoordinatorEndpoint struct {
 // carried out, the retiring ones too, since a retiring coordinator can hold
 // Raft leadership until it yields it. `running` is the replica count the
 // operator's own apply left on the coordinator StatefulSet.
-func CoordinatorEndpoints(cluster *memgraphcomv1alpha1.MemgraphCluster, running int32) []CoordinatorEndpoint {
+func CoordinatorEndpoints(cluster *memgraphcomv1alpha1.MemgraphCluster, running int32) []Endpoint {
+	return endpoints(cluster, CoordinatorName(cluster), running, CoordinatorInstanceName)
+}
+
+// DataEndpoints is every data instance pod the operator currently runs, in
+// ordinal order, retiring ones included for the reason CoordinatorEndpoints
+// gives: a retiring instance keeps serving until its pod is shed, and its
+// run-time settings are kept in line until then like everyone else's.
+func DataEndpoints(cluster *memgraphcomv1alpha1.MemgraphCluster, running int32) []Endpoint {
+	return endpoints(cluster, DataName(cluster), running, DataInstanceName)
+}
+
+func endpoints(
+	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	statefulSet string,
+	running int32,
+	instanceName func(ordinal int32) string,
+) []Endpoint {
 	spec := normalize(cluster.Spec)
-	endpoints := make([]CoordinatorEndpoint, 0, running)
+	endpoints := make([]Endpoint, 0, running)
 	for ordinal := range running {
-		endpoints = append(endpoints, CoordinatorEndpoint{
-			Name:    CoordinatorInstanceName(ordinal),
-			Address: hostPort(podFQDN(cluster, CoordinatorName(cluster), spec, ordinal), memgraphcomv1alpha1.BoltPort),
+		endpoints = append(endpoints, Endpoint{
+			Name:    instanceName(ordinal),
+			Pod:     fmt.Sprintf("%s-%d", statefulSet, ordinal),
+			Address: hostPort(podFQDN(cluster, statefulSet, spec, ordinal), memgraphcomv1alpha1.BoltPort),
 			TLS:     spec.boltTLSSecret != "",
 		})
 	}

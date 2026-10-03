@@ -389,10 +389,11 @@ func TestCoordinatorEndpoints(t *testing.T) {
 		Type: memgraphcomv1alpha1.ExternalAccessLoadBalancer,
 	}
 
-	want := make([]resources.CoordinatorEndpoint, 0, 5)
+	want := make([]resources.Endpoint, 0, 5)
 	for ordinal := range 5 {
-		want = append(want, resources.CoordinatorEndpoint{
+		want = append(want, resources.Endpoint{
 			Name: fmt.Sprintf("coordinator_%d", ordinal),
+			Pod:  fmt.Sprintf("%s-%d", coordinatorName, ordinal),
 			Address: endpoint(fmt.Sprintf("%s-%d.%s.%s.svc.cluster.local",
 				coordinatorName, ordinal, coordinatorName, testNamespace), memgraphcomv1alpha1.BoltPort),
 		})
@@ -401,5 +402,29 @@ func TestCoordinatorEndpoints(t *testing.T) {
 	// reachable too, since one of them may hold Raft leadership.
 	if diff := cmp.Diff(want, resources.CoordinatorEndpoints(cluster, 5)); diff != "" {
 		t.Errorf("CoordinatorEndpoints() mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestDataEndpoints is the same for the data instances, which the operator
+// dials for their run-time settings: pod addresses, retiring ordinals
+// included, and the TLS intent following spec.tls.bolt.
+func TestDataEndpoints(t *testing.T) {
+	cluster := minimalCluster()
+	cluster.Spec.TLS = &memgraphcomv1alpha1.TLSSpec{
+		Bolt: &memgraphcomv1alpha1.BoltTLSSpec{SecretName: boltTLSSecretName},
+	}
+
+	want := make([]resources.Endpoint, 0, 3)
+	for ordinal := range 3 {
+		want = append(want, resources.Endpoint{
+			Name: fmt.Sprintf("instance_%d", ordinal),
+			Pod:  fmt.Sprintf("%s-%d", dataName, ordinal),
+			Address: endpoint(fmt.Sprintf("%s-%d.%s.%s.svc.cluster.local",
+				dataName, ordinal, dataName, testNamespace), memgraphcomv1alpha1.BoltPort),
+			TLS: true,
+		})
+	}
+	if diff := cmp.Diff(want, resources.DataEndpoints(cluster, 3)); diff != "" {
+		t.Errorf("DataEndpoints() mismatch (-want +got):\n%s", diff)
 	}
 }

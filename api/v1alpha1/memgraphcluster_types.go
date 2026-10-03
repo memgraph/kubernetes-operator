@@ -234,6 +234,39 @@ const (
 	// all — no cloud controller or no address pool answers the Service.
 	ReasonExternalAddressPending = "ExternalAddressPending"
 
+	// ReasonSettingsPending is set while a run-time flag could not yet be
+	// applied to every instance because a ready pod did not answer SHOW
+	// DATABASE SETTINGS: the Bolt endpoint lagging readiness, or a pod the
+	// roll is replacing. The message names the pods. The pass retries on a
+	// delay; the flag file already carries the value for the pod's next start.
+	ReasonSettingsPending = "SettingsPending"
+
+	// ReasonSettingsRejected is set when an instance refused a SET DATABASE
+	// SETTING the flags block asks for: a value its validator does not accept,
+	// or a setting the running Memgraph version does not know at run time. The
+	// message names the pod, the setting and Memgraph's error verbatim, for the
+	// reason RegistrationFailed does: the command is retried forever, and only
+	// a changed flag clears it. The operator never escalates to a restart on
+	// its own — a value an instance rejects at run time it would reject at
+	// startup too, and crash-loop on.
+	ReasonSettingsRejected = "SettingsRejected"
+
+	// ReasonUnknownFlags is set when spec.flags names something the running
+	// Memgraph does not have: not a flag SHOW CONFIG lists, not a coordinator
+	// setting SHOW COORDINATOR SETTINGS lists. gflags ignores such a line in a
+	// flag file, so nothing is restarted for it and nothing applies it; the
+	// message names the keys per role so a typo is found here rather than by
+	// its absence of effect. It clears when the key is removed or corrected.
+	ReasonUnknownFlags = "UnknownFlags"
+
+	// ReasonFlagsUnclassified is set on Updated while pods differ from the pod
+	// template in flags the operator cannot yet classify, because no ready
+	// coordinator leader answered SHOW CONFIG or SHOW COORDINATOR SETTINGS. A
+	// changed startup flag would need a restart and a changed coordinator
+	// setting or a typo would not, and the operator restarts nothing on a
+	// guess; it asks again next pass.
+	ReasonFlagsUnclassified = "FlagsUnclassified"
+
 	// ReasonRetirementInProgress is set while a lowered count of either role is
 	// being carried out: the members beyond the declared count are still part of
 	// the cluster, or their pods are still being shed. The message names them, so
@@ -795,7 +828,7 @@ type ReadinessProbeSpec struct {
 }
 
 // ResourcesSpec sets the compute resources of the Memgraph container per role.
-// When setting Memgraph's own --memory-limit through extraArgs, keep it below
+// When setting Memgraph's own --memory-limit through flags, keep it below
 // the pod's memory limit: Memgraph must hit its own limit and raise a query
 // exception before the kubelet evicts the pod.
 type ResourcesSpec struct {
@@ -1177,31 +1210,82 @@ type InitContainersSpec struct {
 	Data []corev1.Container `json:"data,omitempty"`
 }
 
-// ExtraArgsSpec passes additional Memgraph flags to a role, so any flag is
-// usable without waiting for a typed field. The flags are appended after the
-// ones the operator derives, and Memgraph takes the last occurrence of a
-// repeated flag, so a flag set here overrides the operator's value.
+// FlagsSpec passes Memgraph flags to a role as a map from flag name to value,
+// so any flag is usable without waiting for a typed field. Keys are flag names
+// without their leading dashes, in either spelling gflags accepts (log-level
+// or log_level); values are strings, so a boolean is written "true" or
+// "false", which is also the only form Memgraph accepts for one at run time.
 //
-// The ports and the coordinator identity are excluded from that override: they
-// must stay consistent with the fixed advertised addresses the operator
-// registers with the cluster.
-type ExtraArgsSpec struct {
-	// coordinators are appended to every coordinator pod's Memgraph flags.
-	// +kubebuilder:validation:MaxItems=64
-	// +kubebuilder:validation:items:MinLength=1
-	// +kubebuilder:validation:items:MaxLength=4096
-	// +kubebuilder:validation:XValidation:rule="self.all(a, !a.replace('-', '_').matches('^_{1,2}(bolt_port|management_port|replication_port|coordinator_id|coordinator_hostname|coordinator_port)($|[= ])'))",message="extraArgs must not set a fixed port or the coordinator identity the operator derives (bolt-port, management-port, replication-port, coordinator-id, coordinator-hostname, coordinator-port), in any spelling gflags accepts"
+// The flags do not travel on the command line. The operator writes them into
+// a per-role ConfigMap as a gflags flag file, which the Memgraph container
+// loads with --flag-file ahead of the few flags the operator pins on the
+// command line, so a pinned flag wins any repeat. What a changed key does
+// depends on what Memgraph says it is, and the operator asks Memgraph rather
+// than keeping a list:
+//
+//   - A flag Memgraph can change on a running instance (log-level,
+//     query-execution-timeout-sec, storage-snapshot-interval and the other
+//     run-time settings) is applied to every instance with SET DATABASE
+//     SETTING the moment it changes and restarts nothing; the flag file
+//     carries it for the next start, whenever that is.
+//   - A cluster-wide coordinator setting (enabled_reads_on_main,
+//     sync_failover_only, instance_down_timeout_sec and the others SHOW
+//     COORDINATOR SETTINGS lists), under coordinators, is written to the Raft
+//     log once with SET COORDINATOR SETTING on any coordinator and restarts
+//     nothing: every coordinator reads it from there.
+//   - Any other flag Memgraph has is read at startup only, so a change rolls
+//     the role's pods in the usual order.
+//   - A name Memgraph does not have restarts nothing and is reported on the
+//     Converged condition until it is removed or corrected.
+//
+// Removing a key issues no SET: a run-time or coordinator setting keeps its
+// value until the instance next restarts without the flag, and the ones
+// Memgraph persists keep it even then.
+//
+// The ports, the addresses the pods listen on, the coordinator identity, the
+// data directory, the log file, the TLS files and the metrics format are
+// excluded: they must stay consistent with the addresses the operator
+// registers, the ports it declares and the files it mounts. So are the four
+// credential flags (aws-access-key, aws-secret-key, license-key,
+// organization-name), because the CR carries no secret material; the license
+// comes from the secrets block, and the AWS keys are set with SET DATABASE
+// SETTING by hand.
+//
+// Values are checked for shape only — one line, at most 4096 characters —
+// with exceptions for the keys everyone touches first: log-level is checked
+// against Memgraph's levels, and the coordinator settings the operator knows
+// by name are checked for a boolean or a non-negative integer.
+type FlagsSpec struct {
+	// coordinators are the flags every coordinator pod starts with, and the
+	// cluster-wide coordinator settings.
+	// +kubebuilder:validation:MaxProperties=64
+	// +kubebuilder:validation:XValidation:rule="self.all(k, !(k.replace('-', '_') in ['enabled_reads_on_main', 'sync_failover_only', 'global_read_only']) || self[k] in ['true', 'false'])",message="enabled_reads_on_main, sync_failover_only and global_read_only take \"true\" or \"false\""
+	// +kubebuilder:validation:XValidation:rule="self.all(k, !(k.replace('-', '_') in ['instance_down_timeout_sec', 'instance_health_check_frequency_sec', 'max_failover_replica_lag', 'max_replica_read_lag', 'deltas_batch_progress_size']) || self[k].matches('^[0-9]+$'))",message="instance_down_timeout_sec, instance_health_check_frequency_sec, max_failover_replica_lag, max_replica_read_lag and deltas_batch_progress_size take a non-negative integer"
+	// +kubebuilder:validation:XValidation:rule="self.all(k, k.matches('^[A-Za-z][A-Za-z0-9_-]*$'))",message="flags keys are flag names without leading dashes, such as log-level"
+	// +kubebuilder:validation:XValidation:rule="self.all(k, !k.replace('-', '_').matches('^(bolt_port|management_port|coordinator_port|coordinator_id|coordinator_hostname|data_directory|log_file|bolt_cert_file|bolt_key_file|cluster_cert_file|cluster_key_file|cluster_ca_file|metrics_format|metrics_port|monitoring_port|bolt_address|monitoring_address|aws_access_key|aws_secret_key|license_key|organization_name)$'))",message="flags must not set a port, a listen address, the coordinator identity, the data directory, the log file, a TLS file, the metrics format or a credential (aws-access-key, aws-secret-key, license-key, organization-name): the operator derives the former, and the latter is secret material that comes from the secrets block or SET DATABASE SETTING"
+	// +kubebuilder:validation:XValidation:rule="self.all(k, self.all(j, k == j || k.replace('-', '_') != j.replace('-', '_')))",message="two keys spell the same flag"
+	// +kubebuilder:validation:XValidation:rule="self.all(k, k.replace('-', '_') != 'log_level' || self[k] in ['TRACE', 'DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'])",message="log-level must be one of TRACE, DEBUG, INFO, WARNING, ERROR, CRITICAL"
 	// +optional
-	Coordinators []string `json:"coordinators,omitempty"`
+	Coordinators map[string]FlagValue `json:"coordinators,omitempty"`
 
-	// data are appended to every data instance pod's Memgraph flags.
-	// +kubebuilder:validation:MaxItems=64
-	// +kubebuilder:validation:items:MinLength=1
-	// +kubebuilder:validation:items:MaxLength=4096
-	// +kubebuilder:validation:XValidation:rule="self.all(a, !a.replace('-', '_').matches('^_{1,2}(bolt_port|management_port|replication_port|coordinator_id|coordinator_hostname|coordinator_port)($|[= ])'))",message="extraArgs must not set a fixed port or the coordinator identity the operator derives (bolt-port, management-port, replication-port, coordinator-id, coordinator-hostname, coordinator-port), in any spelling gflags accepts"
+	// data are the flags every data instance pod starts with.
+	// +kubebuilder:validation:MaxProperties=64
+	// +kubebuilder:validation:XValidation:rule="self.all(k, !(k.replace('-', '_') in ['enabled_reads_on_main', 'sync_failover_only', 'global_read_only', 'instance_down_timeout_sec', 'instance_health_check_frequency_sec', 'max_failover_replica_lag', 'max_replica_read_lag', 'deltas_batch_progress_size']))",message="a coordinator setting is set under flags.coordinators, not flags.data"
+	// +kubebuilder:validation:XValidation:rule="self.all(k, k.matches('^[A-Za-z][A-Za-z0-9_-]*$'))",message="flags keys are flag names without leading dashes, such as log-level"
+	// +kubebuilder:validation:XValidation:rule="self.all(k, !k.replace('-', '_').matches('^(bolt_port|management_port|coordinator_port|coordinator_id|coordinator_hostname|data_directory|log_file|bolt_cert_file|bolt_key_file|cluster_cert_file|cluster_key_file|cluster_ca_file|metrics_format|metrics_port|monitoring_port|bolt_address|monitoring_address|aws_access_key|aws_secret_key|license_key|organization_name)$'))",message="flags must not set a port, a listen address, the coordinator identity, the data directory, the log file, a TLS file, the metrics format or a credential (aws-access-key, aws-secret-key, license-key, organization-name): the operator derives the former, and the latter is secret material that comes from the secrets block or SET DATABASE SETTING"
+	// +kubebuilder:validation:XValidation:rule="self.all(k, self.all(j, k == j || k.replace('-', '_') != j.replace('-', '_')))",message="two keys spell the same flag"
+	// +kubebuilder:validation:XValidation:rule="self.all(k, k.replace('-', '_') != 'log_level' || self[k] in ['TRACE', 'DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'])",message="log-level must be one of TRACE, DEBUG, INFO, WARNING, ERROR, CRITICAL"
 	// +optional
-	Data []string `json:"data,omitempty"`
+	Data map[string]FlagValue `json:"data,omitempty"`
 }
+
+// FlagValue is one flag's value, verbatim: one line of the flag file, so it
+// may not contain a line break, which would otherwise start a second flag
+// nobody declared. Memgraph reads every flag as text, so a number or a
+// boolean is written as the string "120" or "true".
+// +kubebuilder:validation:MaxLength=4096
+// +kubebuilder:validation:Pattern=`^[^\n\r]*$`
+type FlagValue string
 
 // ExternalAccessType is how the cluster is reached from outside Kubernetes.
 // +kubebuilder:validation:Enum=LoadBalancer;Gateway
@@ -1871,9 +1955,11 @@ type MemgraphClusterSpec struct {
 	// +optional
 	ExtraEnv ExtraEnvSpec `json:"extraEnv,omitzero"`
 
-	// extraArgs passes additional Memgraph flags to both roles.
+	// flags passes Memgraph flags to both roles, by name. A flag Memgraph can
+	// change at run time is applied to every instance without a restart; any
+	// other flag change rolls the pods.
 	// +optional
-	ExtraArgs ExtraArgsSpec `json:"extraArgs,omitzero"`
+	Flags FlagsSpec `json:"flags,omitzero"`
 
 	// extraVolumes adds pod volumes to both roles beyond the ones the operator
 	// provisions.

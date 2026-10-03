@@ -268,7 +268,7 @@ type normalizedRole struct {
 	statefulSetLabels map[string]string
 	serviceLabels     map[string]string
 	env               []corev1.EnvVar
-	extraArgs         []string
+	flags             map[string]string
 	extraVolumes      []corev1.Volume
 	extraMounts       []corev1.VolumeMount
 	userContainers    []corev1.Container
@@ -333,7 +333,7 @@ func normalize(spec memgraphcomv1alpha1.MemgraphClusterSpec) normalizedSpec {
 			resources:      spec.Resources.Coordinators,
 			labels:         spec.Labels.Coordinators,
 			env:            spec.ExtraEnv.Coordinators,
-			extraArgs:      spec.ExtraArgs.Coordinators,
+			flags:          spec.Flags.Coordinators,
 			extraVolumes:   spec.ExtraVolumes.Coordinators,
 			extraMounts:    spec.ExtraVolumeMounts.Coordinators,
 			userContainers: spec.UserContainers.Coordinators,
@@ -346,7 +346,7 @@ func normalize(spec memgraphcomv1alpha1.MemgraphClusterSpec) normalizedSpec {
 			resources:      spec.Resources.Data,
 			labels:         spec.Labels.Data,
 			env:            spec.ExtraEnv.Data,
-			extraArgs:      spec.ExtraArgs.Data,
+			flags:          spec.Flags.Data,
 			extraVolumes:   spec.ExtraVolumes.Data,
 			extraMounts:    spec.ExtraVolumeMounts.Data,
 			userContainers: spec.UserContainers.Data,
@@ -451,7 +451,7 @@ func normalize(spec memgraphcomv1alpha1.MemgraphClusterSpec) normalizedSpec {
 }
 
 // roleSpec gathers the per-role pieces the spec's concern-first blocks
-// (storage, resources, labels, extraEnv, extraArgs) scatter across the
+// (storage, resources, labels, extraEnv, flags) scatter across the
 // CR, so normalization is written once and both roles resolve their defaults
 // the same way.
 type roleSpec struct {
@@ -463,7 +463,7 @@ type roleSpec struct {
 	resources      corev1.ResourceRequirements
 	labels         memgraphcomv1alpha1.RoleLabelsSpec
 	env            []memgraphcomv1alpha1.EnvVar
-	extraArgs      []string
+	flags          map[string]memgraphcomv1alpha1.FlagValue
 	extraVolumes   []corev1.Volume
 	extraMounts    []corev1.VolumeMount
 	userContainers []corev1.Container
@@ -480,7 +480,7 @@ func normalizeRole(role roleSpec) normalizedRole {
 		statefulSetLabels: role.labels.StatefulSetLabels,
 		serviceLabels:     role.labels.ServiceLabels,
 		env:               normalizeEnv(role.env),
-		extraArgs:         role.extraArgs,
+		flags:             normalizeFlags(role.flags),
 		extraVolumes:      role.extraVolumes,
 		extraMounts:       role.extraMounts,
 		userContainers:    role.userContainers,
@@ -504,6 +504,20 @@ func normalizeProbe(spec memgraphcomv1alpha1.ReadinessProbeSpec) normalizedProbe
 		timeoutSeconds:   intOrDefault(spec.TimeoutSeconds, memgraphcomv1alpha1.DefaultProbeTimeoutSeconds),
 		periodSeconds:    intOrDefault(spec.PeriodSeconds, memgraphcomv1alpha1.DefaultProbePeriodSeconds),
 	}
+}
+
+// normalizeFlags converts the spec's flag values to plain strings. Nothing is
+// defaulted here: the operator's own defaults are merged in by the flag file
+// builder, where the two can be told apart.
+func normalizeFlags(spec map[string]memgraphcomv1alpha1.FlagValue) map[string]string {
+	if len(spec) == 0 {
+		return nil
+	}
+	flags := make(map[string]string, len(spec))
+	for key, value := range spec {
+		flags[key] = string(value)
+	}
+	return flags
 }
 
 // normalizeEnv converts the spec's non-secret name/value pairs into container

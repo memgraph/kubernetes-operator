@@ -16,7 +16,10 @@ limitations under the License.
 
 package memgraph
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // The HA management query grammar, mirroring what the memgraph-high-availability
 // Helm chart's registration job issues. Config values are rendered inline
@@ -81,3 +84,37 @@ func removeCoordinatorQuery(id int32) string {
 // successor to name, so the coordinator it runs on hands leadership to whichever
 // member NuRaft's election picks.
 const yieldLeadershipQuery = "YIELD LEADERSHIP"
+
+// showSettingsQuery lists every run-time setting of the instance it runs on
+// as setting_name, setting_value rows. Every instance answers for itself.
+const showSettingsQuery = "SHOW DATABASE SETTINGS"
+
+// setSettingQuery changes one run-time setting on the instance it runs on.
+// The grammar takes string literals only — Memgraph refuses a Bolt parameter
+// in either position — and the value is user text from spec.flags, so both
+// are rendered as Cypher string literals rather than through %q: Go's quoting
+// would turn a non-ASCII value into \u escapes Cypher does not read the same
+// way, while a Cypher literal needs exactly the backslash and the double quote
+// escaped. Admission keeps newlines out of the value.
+func setSettingQuery(name, value string) string {
+	return fmt.Sprintf("SET DATABASE SETTING %s TO %s", cypherString(name), cypherString(value))
+}
+
+// cypherString renders s as a double-quoted Cypher string literal.
+func cypherString(s string) string {
+	return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(s) + `"`
+}
+
+// showCoordinatorSettingsQuery lists the cluster-wide coordinator settings as
+// setting_name, setting_value rows, relayed from the Raft leader.
+const showCoordinatorSettingsQuery = "SHOW COORDINATOR SETTINGS"
+
+// setCoordinatorSettingQuery changes one cluster-wide coordinator setting.
+// String literals only, like setSettingQuery, and for the same reason.
+func setCoordinatorSettingQuery(name, value string) string {
+	return fmt.Sprintf("SET COORDINATOR SETTING %s TO %s", cypherString(name), cypherString(value))
+}
+
+// showConfigQuery lists every non-hidden flag of the instance it runs on as
+// name, default_value, current_value, description rows.
+const showConfigQuery = "SHOW CONFIG"

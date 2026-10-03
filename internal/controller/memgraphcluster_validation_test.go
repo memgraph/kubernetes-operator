@@ -226,11 +226,23 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 				ExtraEnv: memgraphcomv1alpha1.ExtraEnvSpec{
 					Data: []memgraphcomv1alpha1.EnvVar{{Name: "DATA_LABEL_ONE", Value: "one"}},
 				},
-				ExtraArgs: memgraphcomv1alpha1.ExtraArgsSpec{
-					// The second one shares a prefix with the reserved --bolt-port
+				Flags: memgraphcomv1alpha1.FlagsSpec{
+					// Coordinator settings live beside the coordinators' flags, and
+					// a name the operator does not know passes through for the
+					// coordinators to judge.
+					Coordinators: map[string]memgraphcomv1alpha1.FlagValue{
+						downTimeoutSetting: "7", globalReadOnly: settingOff, futureSetting: "x",
+					},
+					// The second one shares a prefix with the reserved bolt-port
 					// without being it: the guard matches whole flag names, so a
-					// legitimate neighbour is not caught by it.
-					Data: []string{"--storage-snapshot-on-exit=true", "--bolt-num-workers=8"},
+					// legitimate neighbour is not caught by it. The third is a
+					// run-time flag in the underscore spelling, which is as
+					// legitimate as the dashed one.
+					Data: map[string]memgraphcomv1alpha1.FlagValue{
+						snapshotOnExitFlag: flagOn,
+						"bolt-num-workers": "8",
+						logLevelUnderscore: infoLevel,
+					},
 				},
 			})
 
@@ -239,8 +251,14 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 			Expect(stored.Spec.ReadinessProbe.PeriodSeconds).To(BeNil(),
 				"an unset timing stays unset; its default is resolved by the builders, not the schema")
 			Expect(stored.Spec.ExtraEnv.Data).To(HaveLen(1))
-			Expect(stored.Spec.ExtraArgs.Data).To(ConsistOf(
-				"--storage-snapshot-on-exit=true", "--bolt-num-workers=8"))
+			Expect(stored.Spec.Flags.Coordinators).To(Equal(map[string]memgraphcomv1alpha1.FlagValue{
+				downTimeoutSetting: "7", globalReadOnly: settingOff, futureSetting: "x",
+			}))
+			Expect(stored.Spec.Flags.Data).To(Equal(map[string]memgraphcomv1alpha1.FlagValue{
+				snapshotOnExitFlag: flagOn,
+				"bolt-num-workers": "8",
+				logLevelUnderscore: infoLevel,
+			}))
 		})
 
 		It("should accept a scheduling block and default the rule it leaves out", func() {
@@ -739,50 +757,104 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 					},
 				},
 				"it carries the pod's own identity"),
-			// A port set through extraArgs would leave the pods listening
-			// somewhere the registered addresses do not point.
-			Entry("an extra arg overriding a port", "invalid-args-port",
+			// A port set through flags would leave the pods listening somewhere
+			// the registered addresses do not point.
+			Entry("a flag overriding a port", "invalid-flags-port",
 				memgraphcomv1alpha1.MemgraphClusterSpec{
-					ExtraArgs: memgraphcomv1alpha1.ExtraArgsSpec{Data: []string{"--bolt-port=7777"}},
+					Flags: memgraphcomv1alpha1.FlagsSpec{Data: map[string]memgraphcomv1alpha1.FlagValue{"bolt-port": "7777"}},
 				},
-				"must not set a fixed port"),
-			Entry("an extra arg overriding the replication port", "invalid-args-replication-port",
+				"flags must not set a port"),
+			Entry("a flag overriding the coordinator identity", "invalid-flags-coordinator-id",
 				memgraphcomv1alpha1.MemgraphClusterSpec{
-					ExtraArgs: memgraphcomv1alpha1.ExtraArgsSpec{Data: []string{"--replication-port=20001"}},
+					Flags: memgraphcomv1alpha1.FlagsSpec{Coordinators: map[string]memgraphcomv1alpha1.FlagValue{"coordinator-id": "9"}},
 				},
-				"must not set a fixed port"),
-			Entry("an extra arg overriding the coordinator identity", "invalid-args-coordinator-id",
+				"flags must not set a port"),
+			// Memgraph's flags are gflags, which treats a hyphen as an underscore —
+			// the flags are declared bolt_port, coordinator_id and so on, and the
+			// operator's own --bolt-port only works because of that. Both spellings
+			// reach the same flag, so the guard has to reject both or it rejects
+			// neither.
+			Entry("a reserved flag spelled with underscores", "invalid-flags-underscores",
 				memgraphcomv1alpha1.MemgraphClusterSpec{
-					ExtraArgs: memgraphcomv1alpha1.ExtraArgsSpec{Coordinators: []string{"--coordinator-id=9"}},
+					Flags: memgraphcomv1alpha1.FlagsSpec{Data: map[string]memgraphcomv1alpha1.FlagValue{"bolt_port": "7777"}},
 				},
-				"the coordinator identity the operator derives"),
-			// Memgraph's flags are gflags, which treats one dash as two and a hyphen as
-			// an underscore — the flags are declared bolt_port, coordinator_id and so
-			// on, and the operator's own --bolt-port only works because of that. Every
-			// spelling reaches the same flag, so the guard has to reject all of them or
-			// it rejects none.
-			Entry("a reserved flag spelled with one dash", "invalid-args-single-dash",
+				"flags must not set a port"),
+			Entry("a flag overriding the log file", "invalid-flags-log-file",
 				memgraphcomv1alpha1.MemgraphClusterSpec{
-					ExtraArgs: memgraphcomv1alpha1.ExtraArgsSpec{Data: []string{"-bolt-port=7777"}},
+					Flags: memgraphcomv1alpha1.FlagsSpec{Data: map[string]memgraphcomv1alpha1.FlagValue{"log-file": "/elsewhere/memgraph.log"}},
 				},
-				"must not set a fixed port"),
-			Entry("a reserved flag spelled with underscores", "invalid-args-underscores",
+				"flags must not set a port"),
+			Entry("a flag overriding the monitoring websocket port the Vector sidecar dials", "invalid-flags-monitoring-port",
 				memgraphcomv1alpha1.MemgraphClusterSpec{
-					ExtraArgs: memgraphcomv1alpha1.ExtraArgsSpec{Data: []string{"--bolt_port=7777"}},
+					Flags: memgraphcomv1alpha1.FlagsSpec{Coordinators: map[string]memgraphcomv1alpha1.FlagValue{"monitoring-port": "7445"}},
 				},
-				"must not set a fixed port"),
-			Entry("a reserved flag spelled with one dash and underscores", "invalid-args-single-underscore",
+				"flags must not set a port"),
+			// The CR carries no secret material, and the two AWS credential flags
+			// are the only secret-shaped ones in Memgraph's flag surface.
+			Entry("a flag carrying an AWS credential", "invalid-flags-aws-secret",
 				memgraphcomv1alpha1.MemgraphClusterSpec{
-					ExtraArgs: memgraphcomv1alpha1.ExtraArgsSpec{Coordinators: []string{"-coordinator_id=9"}},
+					Flags: memgraphcomv1alpha1.FlagsSpec{Data: map[string]memgraphcomv1alpha1.FlagValue{"aws-secret-key": "hunter2"}},
 				},
-				"the coordinator identity the operator derives"),
-			// gflags takes a non-boolean flag's value as the next argument too, so the
-			// flag can arrive as an element of its own.
-			Entry("a reserved flag with its value in the next element", "invalid-args-separate-value",
+				"secret material"),
+			// Keys are flag names, not command-line arguments: the dashes belong
+			// to the flag file the operator writes.
+			Entry("a flag key with leading dashes", "invalid-flags-leading-dashes",
 				memgraphcomv1alpha1.MemgraphClusterSpec{
-					ExtraArgs: memgraphcomv1alpha1.ExtraArgsSpec{Data: []string{"--bolt-port", "7777"}},
+					Flags: memgraphcomv1alpha1.FlagsSpec{Data: map[string]memgraphcomv1alpha1.FlagValue{"--log-level": infoLevel}},
 				},
-				"must not set a fixed port"),
+				"without leading dashes"),
+			// A newline in a value would start a second line in the flag file,
+			// and so a second flag nobody declared.
+			Entry("a flag value spanning lines", "invalid-flags-multiline",
+				memgraphcomv1alpha1.MemgraphClusterSpec{
+					Flags: memgraphcomv1alpha1.FlagsSpec{Data: map[string]memgraphcomv1alpha1.FlagValue{logLevelFlag: "INFO\n--bolt-port=7777"}},
+				},
+				"should match"),
+			// Memgraph accepts exactly its six levels, upper case; anything else
+			// is refused by the instance, so it is refused at admission instead.
+			Entry("a log level Memgraph does not have", "invalid-flags-log-level",
+				memgraphcomv1alpha1.MemgraphClusterSpec{
+					Flags: memgraphcomv1alpha1.FlagsSpec{Data: map[string]memgraphcomv1alpha1.FlagValue{logLevelFlag: "VERBOSE"}},
+				},
+				"log-level must be one of"),
+			Entry("a log level in lower case", "invalid-flags-log-level-case",
+				memgraphcomv1alpha1.MemgraphClusterSpec{
+					Flags: memgraphcomv1alpha1.FlagsSpec{Coordinators: map[string]memgraphcomv1alpha1.FlagValue{logLevelUnderscore: "info"}},
+				},
+				"log-level must be one of"),
+			// The coordinator settings the operator knows by name are checked for
+			// the value shape Memgraph parses, so a typo is caught here and not as
+			// a SET the coordinators refuse on every pass; and they belong to the
+			// coordinators, so the data map refuses them.
+			Entry("a boolean coordinator setting with a non-boolean value", "invalid-coordinator-setting-bool",
+				memgraphcomv1alpha1.MemgraphClusterSpec{
+					Flags: memgraphcomv1alpha1.FlagsSpec{Coordinators: map[string]memgraphcomv1alpha1.FlagValue{readsOnMainSetting: "yes"}},
+				},
+				`take "true" or "false"`),
+			Entry("a numeric coordinator setting with a non-numeric value", "invalid-coordinator-setting-number",
+				memgraphcomv1alpha1.MemgraphClusterSpec{
+					Flags: memgraphcomv1alpha1.FlagsSpec{Coordinators: map[string]memgraphcomv1alpha1.FlagValue{"instance-down-timeout-sec": "5s"}},
+				},
+				"take a non-negative integer"),
+			Entry("a coordinator setting under the data role", "invalid-coordinator-setting-on-data",
+				memgraphcomv1alpha1.MemgraphClusterSpec{
+					Flags: memgraphcomv1alpha1.FlagsSpec{Data: map[string]memgraphcomv1alpha1.FlagValue{downTimeoutSetting: "5"}},
+				},
+				"set under flags.coordinators"),
+			// The license flags are secret material like the AWS keys; the license
+			// comes from the secrets block.
+			Entry("a flag carrying the license", "invalid-flags-license",
+				memgraphcomv1alpha1.MemgraphClusterSpec{
+					Flags: memgraphcomv1alpha1.FlagsSpec{Coordinators: map[string]memgraphcomv1alpha1.FlagValue{"license-key": "hunter2"}},
+				},
+				"secret material"),
+			// Two spellings of one flag would be two lines for one flag, with
+			// gflags silently taking whichever came last.
+			Entry("two keys spelling the same flag", "invalid-flags-duplicate",
+				memgraphcomv1alpha1.MemgraphClusterSpec{
+					Flags: memgraphcomv1alpha1.FlagsSpec{Data: map[string]memgraphcomv1alpha1.FlagValue{logLevelFlag: infoLevel, logLevelUnderscore: "DEBUG"}},
+				},
+				"spell the same flag"),
 			Entry("a probe timing below one", "invalid-probe-period",
 				memgraphcomv1alpha1.MemgraphClusterSpec{
 					ReadinessProbe: memgraphcomv1alpha1.ReadinessProbeSpec{PeriodSeconds: ptr.To(int32(0))},
