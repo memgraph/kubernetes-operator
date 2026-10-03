@@ -71,6 +71,23 @@ func DataName(cluster *memgraphcomv1alpha1.MemgraphCluster) string {
 	return cluster.Name + "-" + dataComponent
 }
 
+// LicenseSecret is the Secret the pods read the license from, and the two keys
+// in it, as the secrets block names them or by their defaults.
+type LicenseSecret struct {
+	Name            string
+	LicenseKey      string
+	OrganizationKey string
+}
+
+// LicenseSecretOf returns the license Secret the cluster's pods are built to
+// read: the same resolution the StatefulSets' environment uses, so the
+// operator applies on a running pod exactly what the pod would read on a
+// restart.
+func LicenseSecretOf(cluster *memgraphcomv1alpha1.MemgraphCluster) LicenseSecret {
+	spec := normalize(cluster.Spec)
+	return LicenseSecret{Name: spec.secretName, LicenseKey: spec.licenseKey, OrganizationKey: spec.organizationKey}
+}
+
 // labels returns the full label set stamped on all objects of a role, with the
 // role's custom labels merged underneath: the operator's own identity labels
 // always win a key collision, so a custom label can never detach an object

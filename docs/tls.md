@@ -61,7 +61,7 @@ Three things follow from the block. None is a knob.
 
 ## Renewing the certificate
 
-The operator does not rotate certificates and never watches Secrets. What it does is mount the Secret without `subPath`, which is what makes an in-place update reach running pods: after any update to the Secret object, from cert-manager, External Secrets, Vault or `kubectl apply` alike, the kubelet swaps the mounted files on every pod within its sync period, about a minute.
+The operator does not rotate certificates and never watches the TLS Secrets. What it does is mount the Secret without `subPath`, which is what makes an in-place update reach running pods: after any update to the Secret object, from cert-manager, External Secrets, Vault or `kubectl apply` alike, the kubelet swaps the mounted files on every pod within its sync period, about a minute.
 
 Memgraph then has to pick the new files up. Today it does so on request, per instance:
 

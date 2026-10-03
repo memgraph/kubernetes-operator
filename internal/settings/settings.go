@@ -14,10 +14,11 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package settings is the pure core behind spec.flags and
-// spec.coordinatorSettings: which Memgraph flags can be changed on a running
-// instance, under which SHOW DATABASE SETTINGS name, and what SET commands
-// bring an observed settings view in line with a desired one. Nothing here
+// Package settings is the pure core behind spec.flags,
+// spec.coordinatorSettings and the license Secret: which Memgraph flags can be
+// changed on a running instance, under which SHOW DATABASE SETTINGS name, and
+// what SET commands bring an observed settings view in line with a desired
+// one. Nothing here
 // touches Kubernetes or Bolt; the controller feeds it the rendered flag file
 // or the coordinator settings block plus the observed view and issues what
 // comes back.
