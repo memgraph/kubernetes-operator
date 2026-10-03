@@ -123,7 +123,11 @@ Values are strings as for flags. Admission checks `"true"`/`"false"` for the thr
 
 ## How a changed key decides a restart
 
-The pod template carries one annotation, `memgraph.com/flags`, listing every key that is not a run-time flag with a digest of its value. A changed key therefore changes the template, and a pod keeps the annotation it was started with. When a pod is not on the current template, the operator lists the keys whose digest differs and asks Memgraph what they are. If they are all coordinator settings or names Memgraph does not have, the pod needs no restart and counts as current. If any is a flag, the pod is restarted in the usual order. While no coordinator answers `SHOW CONFIG` and `SHOW COORDINATOR SETTINGS`, the operator restarts nothing and reports `Updated=False` with reason `FlagsUnclassified`, naming the keys.
+The pod template carries two annotations. `memgraph.com/flags` lists every key that is not a run-time flag with a digest of its value, and `memgraph.com/template-hash` is a hash of everything else in the template: the image, the containers, the environment, the volumes. A pod keeps both from the template it was created from.
+
+When a pod is not on the current template, the operator first compares the template hash. If it differs, something besides the flags changed, and the pod is restarted in the usual order whatever the flags say: a coordinator setting added in the same edit as a new image tag still restarts the pods for the image. If only the flags changed, the operator lists the keys whose digest differs and asks Memgraph what they are. If they are all coordinator settings or names Memgraph does not have, the pod needs no restart and counts as current. If any is a flag, the pod is restarted.
+
+`SHOW CONFIG` is answered by the instance that receives it, not forwarded, so it describes that pod's Memgraph version. The operator asks a ready pod that was created from its role's current template, data instances first, and falls back to the coordinator leader only when no pod is on the current template yet. During an image upgrade the leader is the last pod on the old version, and asking it would make a flag only the new version has look unknown. While no answer can be had, the operator restarts nothing and reports `Updated=False` with reason `FlagsUnclassified`, naming the keys.
 
 ## What may not be set
 

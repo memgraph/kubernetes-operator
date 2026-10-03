@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -2099,8 +2100,9 @@ var _ = Describe("MemgraphCluster Controller", func() {
 		)
 
 		cluster := &memgraphcomv1alpha1.MemgraphCluster{}
-		// startedWith is each role's flags annotation as the pods were started.
-		startedWith := map[string]string{}
+		// startedWith is each role's template annotations as the pods were
+		// started: the flags and the hash of everything else.
+		startedWith := map[string]map[string]string{}
 
 		observedCoordinator := func(id int, role string) memgraph.Instance {
 			host := fmt.Sprintf("%s-coordinator-%d.%s-coordinator.%s.svc.cluster.local",
@@ -2113,16 +2115,19 @@ var _ = Describe("MemgraphCluster Controller", func() {
 				Health:            "up", Role: role,
 			}
 		}
-		templateFlags := func(suffix string) string {
+		templateAnnotations := func(suffix string) map[string]string {
 			GinkgoHelper()
 			sts := &appsv1.StatefulSet{}
 			get(resourceName+suffix, sts)
-			return sts.Spec.Template.Annotations[resources.FlagsAnnotation]
+			return map[string]string{
+				resources.FlagsAnnotation:        sts.Spec.Template.Annotations[resources.FlagsAnnotation],
+				resources.TemplateHashAnnotation: sts.Spec.Template.Annotations[resources.TemplateHashAnnotation],
+			}
 		}
 		// putPod stands in for the StatefulSet controller: one ready pod at the
 		// given revision, started with the given flags annotation, the way a
 		// pod created from that template would carry it.
-		putPod := func(suffix, component string, ordinal int, revision, flags string) {
+		putPod := func(suffix, component string, ordinal int, revision string, annotations map[string]string) {
 			GinkgoHelper()
 			name := fmt.Sprintf("%s%s-%d", resourceName, suffix, ordinal)
 			existing := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: resourceNamespace}}
@@ -2138,7 +2143,7 @@ var _ = Describe("MemgraphCluster Controller", func() {
 						managedByLabel:                  resources.ManagedByValue,
 						appsv1.StatefulSetRevisionLabel: revision,
 					},
-					Annotations: map[string]string{resources.FlagsAnnotation: flags},
+					Annotations: annotations,
 				},
 				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: memgraphDbName, Image: memgraphDbName}}},
 			}
@@ -2185,19 +2190,27 @@ var _ = Describe("MemgraphCluster Controller", func() {
 		// says why. A role whose template is back where its pods started is
 		// declared at the pods' revision again, as the StatefulSet controller
 		// reuses the old ControllerRevision.
-		changeFlags := func(flags memgraphcomv1alpha1.FlagsSpec) {
+		changeSpec := func(mutate func(*memgraphcomv1alpha1.MemgraphClusterSpec)) {
 			GinkgoHelper()
 			get(resourceName, cluster)
-			cluster.Spec.Flags = flags
+			mutate(&cluster.Spec)
 			Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
 			reconcileCluster(resourceName)
 			for _, suffix := range []string{coordinatorSuffix, dataSuffix} {
 				revision := oldRevision
-				if templateFlags(suffix) != startedWith[suffix] {
+				if !maps.Equal(templateAnnotations(suffix), startedWith[suffix]) {
 					revision = newRevision
 				}
 				declareRevision(suffix, revision)
 			}
+		}
+		changeFlags := func(flags memgraphcomv1alpha1.FlagsSpec) {
+			GinkgoHelper()
+			changeSpec(func(spec *memgraphcomv1alpha1.MemgraphClusterSpec) { spec.Flags = flags })
+		}
+		podAddress := func(suffix string, ordinal int) string {
+			return fmt.Sprintf("%s%s-%d.%s%s.%s.svc.cluster.local:%d",
+				resourceName, suffix, ordinal, resourceName, suffix, resourceNamespace, memgraphcomv1alpha1.BoltPort)
 		}
 
 		BeforeEach(func() {
@@ -2217,7 +2230,7 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			reconcileCluster(resourceName)
 			markWorkloadsReady(resourceName)
 			for _, suffix := range []string{coordinatorSuffix, dataSuffix} {
-				startedWith[suffix] = templateFlags(suffix)
+				startedWith[suffix] = templateAnnotations(suffix)
 			}
 			for ordinal := range 3 {
 				putPod(coordinatorSuffix, "coordinator", ordinal, oldRevision, startedWith[coordinatorSuffix])
@@ -2299,6 +2312,43 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			}
 			Expect(condition(memgraphcomv1alpha1.ConditionUpdated).Reason).To(
 				Equal(memgraphcomv1alpha1.ReasonRollingRestartInProgress))
+		})
+
+		It("should still restart for anything else that changed beside a coordinator setting", func() {
+			before := podUIDs()
+			changeSpec(func(spec *memgraphcomv1alpha1.MemgraphClusterSpec) {
+				spec.Flags.Coordinators = map[string]memgraphcomv1alpha1.FlagValue{readsOnMainSetting: settingOn}
+				spec.ExtraEnv.Coordinators = []memgraphcomv1alpha1.EnvVar{{Name: "E2E_ROLL", Value: "1"}}
+			})
+			reconcileCluster(resourceName)
+
+			Expect(fake.coordinatorSettingsView()).To(HaveKeyWithValue(readsOnMainSetting, string(settingOn)))
+			after := podUIDs()
+			Expect(after).To(HaveLen(len(before)-1), "the new environment variable needs the restart the setting does not")
+			for name := range before {
+				if _, ok := after[name]; !ok {
+					Expect(name).To(HavePrefix(resourceName + coordinatorSuffix))
+				}
+			}
+		})
+
+		It("should ask a pod on the current template, not the leader, what is a flag", func() {
+			// The leader, coordinator_0, runs a binary without new_flag; the
+			// data pods are on their current template and their binary has it.
+			// Asked of the leader, new_flag would be unknown and nothing would
+			// restart; it is a real flag, so the coordinators must roll.
+			const newFlag = "new_flag"
+			fake.setConfigFor(podAddress(dataSuffix, 0), map[string]string{newFlag: "0"})
+			fake.setConfigFor(podAddress(dataSuffix, 1), map[string]string{newFlag: "0"})
+			before := podUIDs()
+			changeFlags(memgraphcomv1alpha1.FlagsSpec{Coordinators: map[string]memgraphcomv1alpha1.FlagValue{
+				newFlag: "1",
+			}})
+			reconcileCluster(resourceName)
+
+			Expect(podUIDs()).To(HaveLen(len(before)-1), "a flag the template's binary has is a startup flag")
+			Expect(condition(memgraphcomv1alpha1.ConditionConverged).Reason).NotTo(
+				Equal(memgraphcomv1alpha1.ReasonUnknownFlags))
 		})
 
 		It("should wait rather than restart while the flags cannot be classified", func() {

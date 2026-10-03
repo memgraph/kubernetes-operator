@@ -739,6 +739,13 @@ type rolloutRoles struct {
 	coordinatorFlags string
 	dataFlags        string
 	podFlags         map[string]string
+	// coordinatorTemplate and dataTemplate are each role's template hash —
+	// everything but the flags — and podTemplates each pod's, by pod name. A
+	// pod may be spared a restart only when the two match, that is when the
+	// flags are the one thing about its template that changed.
+	coordinatorTemplate string
+	dataTemplate        string
+	podTemplates        map[string]string
 }
 
 // observeRollout reads both roles' pods and the revision their StatefulSet
@@ -768,15 +775,29 @@ func (r *MemgraphClusterReconciler) observeRollout(
 	roles.podFlags = map[string]string{}
 	maps.Copy(roles.podFlags, coordinators.podFlags)
 	maps.Copy(roles.podFlags, data.podFlags)
+	roles.coordinatorTemplate, roles.dataTemplate = coordinators.template, data.template
+	roles.podTemplates = map[string]string{}
+	maps.Copy(roles.podTemplates, coordinators.podTemplates)
+	maps.Copy(roles.podTemplates, data.podTemplates)
 	return roles, nil
+}
+
+// onTemplate reports whether the pod was created from its role's current
+// template apart from the flags: the same image, containers, volumes and
+// environment. A pod without the annotation, from before it existed, is not.
+func (r rolloutRoles) onTemplate(pod string, template string) bool {
+	hash := r.podTemplates[pod]
+	return hash != "" && hash == template
 }
 
 // observedRole is one role's rollout view plus the flags annotations the
 // rollout package does not look at.
 type observedRole struct {
 	rollout.Role
-	flags    string
-	podFlags map[string]string
+	flags        string
+	podFlags     map[string]string
+	template     string
+	podTemplates map[string]string
 }
 
 // observeRolloutRole reads one role's pods, in ordinal order, each tagged with
@@ -809,7 +830,11 @@ func (r *MemgraphClusterReconciler) observeRolloutRole(
 	instanceName func(ordinal int32) string,
 	appliedGeneration int64,
 ) (observedRole, error) {
-	observed := observedRole{Role: rollout.Role{Replicas: role.applied}, podFlags: map[string]string{}}
+	observed := observedRole{
+		Role:         rollout.Role{Replicas: role.applied},
+		podFlags:     map[string]string{},
+		podTemplates: map[string]string{},
+	}
 
 	var sts appsv1.StatefulSet
 	if err := r.Get(ctx, types.NamespacedName{Name: role.name, Namespace: cluster.Namespace}, &sts); err != nil {
@@ -823,6 +848,7 @@ func (r *MemgraphClusterReconciler) observeRolloutRole(
 	observed.UpdateRevision = sts.Status.UpdateRevision
 	observed.Stale = sts.Generation < appliedGeneration || sts.Status.ObservedGeneration != sts.Generation
 	observed.flags = sts.Spec.Template.Annotations[resources.FlagsAnnotation]
+	observed.template = sts.Spec.Template.Annotations[resources.TemplateHashAnnotation]
 
 	var pods corev1.PodList
 	if err := r.List(ctx, &pods,
@@ -848,6 +874,7 @@ func (r *MemgraphClusterReconciler) observeRolloutRole(
 			Ready:        pod.DeletionTimestamp == nil && podReady(pod),
 		})
 		observed.podFlags[pod.Name] = pod.Annotations[resources.FlagsAnnotation]
+		observed.podTemplates[pod.Name] = pod.Annotations[resources.TemplateHashAnnotation]
 	}
 	return observed, nil
 }
@@ -1055,7 +1082,7 @@ func (r *MemgraphClusterReconciler) reconcileRegistration(
 		// three decisions: which coordinators keys to SET COORDINATOR SETTING,
 		// which keys to report as unknown, and which pods a changed template
 		// leaves with nothing to restart for.
-		classes := r.classifyFlags(ctx, cluster, leader)
+		classes := r.classifyFlags(ctx, cluster, leader, replicas, roles)
 		applied.merge(r.reconcileCoordinatorSettings(ctx, cluster, leader, classes))
 		applied.unknown = classes.unknownMessage()
 		converged := r.convergedCondition(ctx, cluster, topology, exposure, applied)
@@ -1373,10 +1400,12 @@ func (r *MemgraphClusterReconciler) classifyFlags(
 	ctx context.Context,
 	cluster *memgraphcomv1alpha1.MemgraphCluster,
 	leader memgraph.Client,
+	replicas replicaCounts,
+	roles rolloutRoles,
 ) flagClasses {
 	log := logf.FromContext(ctx)
 	var classes flagClasses
-	config, err := leader.ShowConfig(ctx)
+	config, err := r.showConfig(ctx, cluster, leader, replicas, roles)
 	switch {
 	case err != nil:
 		log.Info("Could not read the flags the running Memgraph has", "reason", err.Error())
@@ -1427,6 +1456,68 @@ func (r *MemgraphClusterReconciler) waitForFlagClasses(
 	return ctrl.Result{RequeueAfter: requeueWhilePending}, nil
 }
 
+// showConfig reads SHOW CONFIG from the instance whose answer describes the
+// binary the template runs. SHOW CONFIG is answered locally, not forwarded to
+// the Raft leader, so it describes the Memgraph version of whichever pod
+// receives it — and during an image upgrade the leader is the last pod on the
+// old version, where a flag only the new version has would look unknown. So a
+// ready pod already created from its role's current template is asked first,
+// data instances before coordinators since they are rolled first; the leader
+// connection is the fallback when no such pod exists, which is also exactly
+// when no pod can be spared a restart, since every pod's template differs.
+func (r *MemgraphClusterReconciler) showConfig(
+	ctx context.Context,
+	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	leader memgraph.Client,
+	replicas replicaCounts,
+	roles rolloutRoles,
+) (map[string]string, error) {
+	log := logf.FromContext(ctx)
+	for _, role := range []struct {
+		pods      rollout.Role
+		template  string
+		endpoints []resources.Endpoint
+	}{
+		{roles.data, roles.dataTemplate, resources.DataEndpoints(cluster, replicas.data.applied)},
+		{roles.coordinators, roles.coordinatorTemplate, resources.CoordinatorEndpoints(cluster, replicas.coordinators.applied)},
+	} {
+		for _, pod := range role.pods.Pods {
+			if !pod.Ready || !roles.onTemplate(pod.Name, role.template) {
+				continue
+			}
+			for _, endpoint := range role.endpoints {
+				if endpoint.Pod != pod.Name {
+					continue
+				}
+				config, err := r.showConfigOn(ctx, endpoint)
+				if err == nil && len(config) > 0 {
+					return config, nil
+				}
+				log.Info("Could not read SHOW CONFIG from a pod on the current template",
+					"pod", pod.Name, "reason", fmt.Sprint(err))
+			}
+		}
+	}
+	return leader.ShowConfig(ctx)
+}
+
+// showConfigOn dials one instance for its SHOW CONFIG view.
+func (r *MemgraphClusterReconciler) showConfigOn(
+	ctx context.Context,
+	endpoint resources.Endpoint,
+) (map[string]string, error) {
+	conn, err := r.Memgraph.Connect(ctx, endpoint.Address, endpoint.TLS)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if err := conn.Close(ctx); err != nil {
+			logf.FromContext(ctx).Error(err, "Failed to close instance connection", "pod", endpoint.Pod)
+		}
+	}()
+	return conn.ShowConfig(ctx)
+}
+
 // startupKeys are the role's own keys that are not run-time flags.
 func startupKeys(flags map[string]memgraphcomv1alpha1.FlagValue) []string {
 	var keys []string
@@ -1471,8 +1562,8 @@ func (c flagClasses) unknownMessage() string {
 // role's template is in keys that need no restart: coordinator settings, which
 // Raft carries to every coordinator, and names Memgraph does not have, which
 // gflags ignores. A pod differing in any startup flag stays outdated, and so
-// does one differing in nothing the annotation covers — an environment
-// variable, an image — because the revision then changed for another reason.
+// does one whose template differs in anything besides the flags — an image, an
+// environment variable — because it needs the restart for that.
 //
 // It returns false, with the keys in question, when pods differ in keys that
 // could not be classified: restarting then might be a restart for nothing,
@@ -1481,18 +1572,24 @@ func exemptCurrentPods(roles *rolloutRoles, classes flagClasses) ([]string, bool
 	var unclassified []string
 	for _, role := range []struct {
 		pods     *rollout.Role
+		flags    string
 		template string
 	}{
-		{&roles.data, roles.dataFlags},
-		{&roles.coordinators, roles.coordinatorFlags},
+		{&roles.data, roles.dataFlags, roles.dataTemplate},
+		{&roles.coordinators, roles.coordinatorFlags, roles.coordinatorTemplate},
 	} {
-		template := role.template
 		for i := range role.pods.Pods {
 			pod := &role.pods.Pods[i]
 			if pod.RevisionHash == "" || pod.RevisionHash == role.pods.UpdateRevision {
 				continue
 			}
-			changed := resources.ChangedFlags(roles.podFlags[pod.Name], template)
+			// Anything besides the flags changed — an image, a container, an
+			// environment variable — and the pod needs the restart for that,
+			// whatever the flags are.
+			if !roles.onTemplate(pod.Name, role.template) {
+				continue
+			}
+			changed := resources.ChangedFlags(roles.podFlags[pod.Name], role.flags)
 			if len(changed) == 0 {
 				continue
 			}

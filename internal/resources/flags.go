@@ -19,6 +19,7 @@ package resources
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"maps"
 	"slices"
 	"strings"
@@ -64,6 +65,16 @@ const (
 	// the file carries them for the next start, so a change to them must not
 	// change the template.
 	FlagsAnnotation = "memgraph.com/flags"
+
+	// TemplateHashAnnotation is the pod-template annotation carrying a hash
+	// of the whole pod template except the two flag-related annotations: the
+	// image, the containers, the volumes, the environment, the labels. It is
+	// what keeps the flags shortcut honest. A pod is spared a restart only
+	// when this hash matches its role's template, that is when the flags
+	// annotation is the one thing that changed; a coordinator setting added
+	// in the same edit as a new image tag still restarts the pod for the
+	// image.
+	TemplateHashAnnotation = "memgraph.com/template-hash"
 
 	flagsComponent = "flags"
 )
@@ -188,6 +199,28 @@ func flagsDigests(flags map[string]string) string {
 		b.WriteString("\n")
 	}
 	return b.String()
+}
+
+// PodTemplateHash hashes a pod template with FlagsAnnotation and
+// TemplateHashAnnotation left out, for TemplateHashAnnotation: the first
+// sixteen hex characters of the SHA-256 of its JSON form. encoding/json
+// writes map keys sorted, so the same template always hashes the same.
+func PodTemplateHash(template corev1.PodTemplateSpec) string {
+	template = *template.DeepCopy()
+	delete(template.Annotations, FlagsAnnotation)
+	delete(template.Annotations, TemplateHashAnnotation)
+	if len(template.Annotations) == 0 {
+		template.Annotations = nil
+	}
+	encoded, err := json.Marshal(template)
+	if err != nil {
+		// A PodTemplateSpec built from Go values always marshals; a hash
+		// that matches nothing is the safe answer if it ever does not, since
+		// it only ever costs a restart.
+		return "unhashable"
+	}
+	sum := sha256.Sum256(encoded)
+	return hex.EncodeToString(sum[:8])
 }
 
 // ParseFlagsDigests reads a FlagsAnnotation value back into key to digest.

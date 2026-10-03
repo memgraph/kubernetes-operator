@@ -545,6 +545,10 @@ func TestCoordinatorStatefulSetDefaults(t *testing.T) {
 		},
 	}
 
+	// The template hash is stamped over the finished template, so the
+	// expectation derives it from the template it expects.
+	want.Spec.Template.Annotations[resources.TemplateHashAnnotation] = resources.PodTemplateHash(want.Spec.Template)
+
 	got := coordinatorStatefulSet(minimalCluster())
 	if diff := cmp.Diff(want, got); diff != "" {
 		t.Errorf("CoordinatorStatefulSet() mismatch (-want +got):\n%s", diff)
@@ -600,6 +604,10 @@ func TestDataStatefulSetDefaults(t *testing.T) {
 			},
 		},
 	}
+
+	// The template hash is stamped over the finished template, so the
+	// expectation derives it from the template it expects.
+	want.Spec.Template.Annotations[resources.TemplateHashAnnotation] = resources.PodTemplateHash(want.Spec.Template)
 
 	got := dataStatefulSet(minimalCluster())
 	if diff := cmp.Diff(want, got); diff != "" {

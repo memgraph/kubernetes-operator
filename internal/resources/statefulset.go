@@ -647,7 +647,7 @@ func statefulSet(
 	replicas int32,
 	container corev1.Container,
 ) *appsv1.StatefulSet {
-	return &appsv1.StatefulSet{
+	sts := &appsv1.StatefulSet{
 		// TypeMeta is set explicitly because the controller server-side
 		// applies builder output, and apply patches must carry the GVK.
 		TypeMeta: metav1.TypeMeta{APIVersion: "apps/v1", Kind: "StatefulSet"},
@@ -722,6 +722,10 @@ func statefulSet(
 			},
 		},
 	}
+	// The hash of everything else is stamped last, over the finished template,
+	// so nothing added after it can escape it.
+	sts.Spec.Template.Annotations[TemplateHashAnnotation] = PodTemplateHash(sts.Spec.Template)
+	return sts
 }
 
 // podAffinity is the pod anti-affinity of one role: the operator's own rule

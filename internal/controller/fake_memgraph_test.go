@@ -77,6 +77,10 @@ type fakeMemgraph struct {
 	// the query fail, the way a Memgraph without the view would.
 	knownFlags    map[string]string
 	configUnknown bool
+	// configByAddress overrides the SHOW CONFIG view for single Bolt
+	// addresses: an instance on a different Memgraph version, whose binary
+	// has other flags.
+	configByAddress map[string]map[string]string
 	// rejected are commands the cluster refuses whatever its state, keyed by
 	// command prefix. It stands in for the rejections the operator cannot reason
 	// about — a coordinator refusing a registration a healthy one would accept —
@@ -135,6 +139,19 @@ func baselineConfig() map[string]string {
 		"experimental_enabled":        "",
 		"bolt_port":                   "7687",
 	}
+}
+
+// setConfigFor makes the instance at the given address answer SHOW CONFIG
+// with the baseline plus the given flags, as a newer version would.
+func (f *fakeMemgraph) setConfigFor(address string, extra map[string]string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.configByAddress == nil {
+		f.configByAddress = map[string]map[string]string{}
+	}
+	config := baselineConfig()
+	maps.Copy(config, extra)
+	f.configByAddress[address] = config
 }
 
 // setConfigUnknown makes every SHOW CONFIG fail, or answer again.
@@ -592,6 +609,9 @@ func (c *fakeClient) ShowConfig(context.Context) (map[string]string, error) {
 	}
 	if c.cluster.configUnknown {
 		return nil, fmt.Errorf("fake memgraph: %s does not answer SHOW CONFIG", c.address)
+	}
+	if config, ok := c.cluster.configByAddress[c.address]; ok {
+		return maps.Clone(config), nil
 	}
 	if c.cluster.knownFlags == nil {
 		c.cluster.knownFlags = baselineConfig()
