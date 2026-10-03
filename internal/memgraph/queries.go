@@ -1,0 +1,120 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package memgraph
+
+import (
+	"fmt"
+	"strings"
+)
+
+// The HA management query grammar, mirroring what the memgraph-high-availability
+// Helm chart's registration job issues. Config values are rendered inline
+// because Memgraph's coordinator queries do not accept Bolt parameters; all
+// inputs are operator-derived names and "host:port" addresses, never user text.
+
+const showInstancesQuery = "SHOW INSTANCES"
+
+// showReplicationLagQuery is answered only by a coordinator, which relays the
+// counts from the MAIN. Like YIELD LEADERSHIP it takes no argument: the answer
+// covers every instance the cluster knows at once.
+const showReplicationLagQuery = "SHOW REPLICATION LAG"
+
+func addCoordinatorQuery(coordinator CoordinatorSpec) string {
+	return fmt.Sprintf(
+		`ADD COORDINATOR %d WITH CONFIG {"bolt_server": %q, "coordinator_server": %q, "management_server": %q}`,
+		coordinator.ID,
+		coordinator.BoltServer,
+		coordinator.CoordinatorServer,
+		coordinator.ManagementServer,
+	)
+}
+
+func registerInstanceQuery(instance DataInstanceSpec) string {
+	return fmt.Sprintf(
+		`REGISTER INSTANCE %s WITH CONFIG {"bolt_server": %q, "management_server": %q, "replication_server": %q}`,
+		instance.Name,
+		instance.BoltServer,
+		instance.ManagementServer,
+		instance.ReplicationServer,
+	)
+}
+
+// The UPDATE CONFIG queries take the same config map REGISTER INSTANCE and ADD
+// COORDINATOR do, but Memgraph honours only bolt_server in it: the routing
+// address is the one thing about a registered member that may change.
+func updateCoordinatorBoltServerQuery(id int32, boltServer string) string {
+	return fmt.Sprintf(`UPDATE CONFIG FOR COORDINATOR %d {"bolt_server": %q}`, id, boltServer)
+}
+
+func updateInstanceBoltServerQuery(name, boltServer string) string {
+	return fmt.Sprintf(`UPDATE CONFIG FOR INSTANCE %s {"bolt_server": %q}`, name, boltServer)
+}
+
+func setInstanceToMainQuery(name string) string {
+	return fmt.Sprintf("SET INSTANCE %s TO MAIN", name)
+}
+
+func demoteInstanceQuery(name string) string {
+	return fmt.Sprintf("DEMOTE INSTANCE %s", name)
+}
+
+func unregisterInstanceQuery(name string) string {
+	return fmt.Sprintf("UNREGISTER INSTANCE %s", name)
+}
+
+func removeCoordinatorQuery(id int32) string {
+	return fmt.Sprintf("REMOVE COORDINATOR %d", id)
+}
+
+// yieldLeadershipQuery takes no argument on purpose: Memgraph's grammar has no
+// successor to name, so the coordinator it runs on hands leadership to whichever
+// member NuRaft's election picks.
+const yieldLeadershipQuery = "YIELD LEADERSHIP"
+
+// showSettingsQuery lists every run-time setting of the instance it runs on
+// as setting_name, setting_value rows. Every instance answers for itself.
+const showSettingsQuery = "SHOW DATABASE SETTINGS"
+
+// setSettingQuery changes one run-time setting on the instance it runs on.
+// The grammar takes string literals only — Memgraph refuses a Bolt parameter
+// in either position — and the value is user text from spec.flags, so both
+// are rendered as Cypher string literals rather than through %q: Go's quoting
+// would turn a non-ASCII value into \u escapes Cypher does not read the same
+// way, while a Cypher literal needs exactly the backslash and the double quote
+// escaped. Admission keeps newlines out of the value.
+func setSettingQuery(name, value string) string {
+	return fmt.Sprintf("SET DATABASE SETTING %s TO %s", cypherString(name), cypherString(value))
+}
+
+// cypherString renders s as a double-quoted Cypher string literal.
+func cypherString(s string) string {
+	return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(s) + `"`
+}
+
+// showCoordinatorSettingsQuery lists the cluster-wide coordinator settings as
+// setting_name, setting_value rows, relayed from the Raft leader.
+const showCoordinatorSettingsQuery = "SHOW COORDINATOR SETTINGS"
+
+// setCoordinatorSettingQuery changes one cluster-wide coordinator setting.
+// String literals only, like setSettingQuery, and for the same reason.
+func setCoordinatorSettingQuery(name, value string) string {
+	return fmt.Sprintf("SET COORDINATOR SETTING %s TO %s", cypherString(name), cypherString(value))
+}
+
+// showConfigQuery lists every non-hidden flag of the instance it runs on as
+// name, default_value, current_value, description rows.
+const showConfigQuery = "SHOW CONFIG"

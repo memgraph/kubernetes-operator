@@ -1,0 +1,10 @@
+# Multi-node Kind cluster for the e2e suite. A Memgraph HA cluster is only a
+# meaningful end-to-end proof when its coordinators and data instances spread
+# across several nodes, mirroring the HA chart's multi-node CI.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane
+  - role: worker
+  - role: worker
+  - role: worker
