@@ -200,10 +200,20 @@ func (f *fakeMemgraph) coordinatorSettingsLocked() map[string]string {
 	return f.coordinatorSettings
 }
 
+// The license and organization every fake instance started with, as its
+// environment carried them from the license Secret.
+const (
+	startupLicense      = "license-the-pods-started-with"
+	startupOrganization = "Memgraph Test"
+)
+
 // baselineSettings is the SHOW DATABASE SETTINGS view of an instance started
-// on the operator's default flag file and nothing else.
+// on the operator's default flag file and the startup license, and nothing
+// else.
 func baselineSettings() map[string]string {
 	return map[string]string{
+		"enterprise.license":        startupLicense,
+		"organization.name":         startupOrganization,
 		"log.level":                 "TRACE",
 		"log.to_stderr":             "true",
 		"query.timeout":             "600",

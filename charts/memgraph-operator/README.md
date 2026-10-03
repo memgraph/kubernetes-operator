@@ -71,8 +71,10 @@ whether or not the cluster serves those groups; a cluster without them simply ne
 the rules. Leader election adds a Lease and
 Events in the operator's own namespace, and the
 metrics endpoint adds the TokenReview/SubjectAccessReview permissions it authorizes scrapes
-with. Nothing grants read access to Secrets: the license Secret is referenced from the
-`MemgraphCluster` and mounted by the kubelet into the Memgraph pods, never read by the operator.
+with. Secrets are read-only and only for the license: `list`/`watch` feed a metadata-only
+informer that notices a changed license Secret, and `get` reads that one Secret uncached, so a
+renewal reaches running pods with `SET DATABASE SETTING`. No Secret data is cached, and no
+Secret is ever written.
 
 ## Values
 

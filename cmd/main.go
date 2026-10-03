@@ -238,6 +238,7 @@ func main() {
 	if err := (&controller.MemgraphClusterReconciler{
 		Client:                   mgr.GetClient(),
 		Scheme:                   mgr.GetScheme(),
+		APIReader:                mgr.GetAPIReader(),
 		Memgraph:                 memgraph.NewBoltConnector(),
 		GatewayAPI:               gatewayAPI,
 		GatewayAPIMissing:        gatewayAPIMissing,
