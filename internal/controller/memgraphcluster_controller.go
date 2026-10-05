@@ -262,12 +262,16 @@ func (r *MemgraphClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	// so its renewal cannot wait for every pod, a Raft leader or a finished
 	// registration. Its condition is written on its own for the same reason,
 	// because every return in registration writes its own Converged reason.
-	license := r.reconcileLicense(ctx, &cluster, replicas, roles)
+	//
+	// Each pod's settings are read once for the whole pass: the license here
+	// and the run-time settings further down plan against the same read.
+	reads := podSettings{}
+	license := r.reconcileLicense(ctx, reads, &cluster, replicas, roles)
 	if err := r.writeStatus(ctx, &cluster, lastObserved(&cluster), license); err != nil {
 		return ctrl.Result{}, err
 	}
 
-	return r.reconcileRegistration(ctx, &cluster, replicas, exposure, roles)
+	return r.reconcileRegistration(ctx, reads, &cluster, replicas, exposure, roles)
 }
 
 // desiredExternal is every external object the spec asks for: the Services in
@@ -672,6 +676,11 @@ type roleReplicas struct {
 	name     string
 	declared int32
 	applied  int32
+	// statefulSet is the role's StatefulSet as the pass read it, once and
+	// before applying anything, or nil when it does not exist yet. The
+	// applied count, the rolling restart and the readiness gate all judge
+	// this one object, so no two of them can see different versions of it.
+	statefulSet *appsv1.StatefulSet
 }
 
 // replicaCounts is both roles' replica arithmetic.
@@ -739,6 +748,9 @@ func yieldedLeader(commands []planner.Command) string {
 // up before its pod is — so this rule never shrinks anything, which keeps it free
 // of any knowledge about the cluster's state.
 //
+// This is the pass's one read of each StatefulSet, kept on the result for
+// everything later in the pass that looks at it.
+//
 // A lowered count of either role is carried out at the end of the registration
 // phase instead, once the retiring members have actually left the cluster (see
 // reconcileRegistration).
@@ -755,14 +767,21 @@ func (r *MemgraphClusterReconciler) replicaCounts(
 		{resources.CoordinatorName(cluster), resources.DeclaredCoordinators(cluster), &counts.coordinators},
 		{resources.DataName(cluster), resources.DeclaredDataInstances(cluster), &counts.data},
 	} {
-		current, err := r.currentReplicas(ctx, cluster.Namespace, role.name)
+		sts, err := r.getStatefulSet(ctx, cluster.Namespace, role.name)
 		if err != nil {
 			return replicaCounts{}, err
+		}
+		// The count the operator's own previous apply left, zero before the
+		// first one.
+		var current int32
+		if sts != nil && sts.Spec.Replicas != nil {
+			current = *sts.Spec.Replicas
 		}
 		// The larger of the two, so growing applies the declared count while
 		// shrinking holds the current one.
 		*role.resolved = roleReplicas{
 			name: role.name, declared: role.declared, applied: max(role.declared, current),
+			statefulSet: sts,
 		}
 	}
 	return counts, nil
@@ -856,9 +875,9 @@ type observedRole struct {
 // running.
 //
 // The revision the pods are measured against is only as good as the StatefulSet
-// it was read from, and that object can be behind in two ways: the informer
-// cache still holds the object as it was before this pass applied it, or the
-// StatefulSet controller has not yet processed the template it carries. Both
+// it was read from, and that object can be behind in two ways: it was read
+// before this pass applied a new template to it, or the StatefulSet controller
+// has not yet processed the template it carries. Both
 // leave status.updateRevision describing the previous template, which would
 // make every pod look up to date. The role is marked stale in either case, from
 // the generation the apply returned and the one the status reports, and the
@@ -877,14 +896,11 @@ func (r *MemgraphClusterReconciler) observeRolloutRole(
 		podTemplates: map[string]string{},
 	}
 
-	var sts appsv1.StatefulSet
-	if err := r.Get(ctx, types.NamespacedName{Name: role.name, Namespace: cluster.Namespace}, &sts); err != nil {
-		if apierrors.IsNotFound(err) {
-			// Nothing has been provisioned yet, so there is no revision to measure
-			// pods against and nothing to restart.
-			return observed, nil
-		}
-		return observedRole{}, fmt.Errorf("getting StatefulSet %s: %w", role.name, err)
+	sts := role.statefulSet
+	if sts == nil {
+		// Nothing has been provisioned yet, so there is no revision to measure
+		// pods against and nothing to restart.
+		return observed, nil
 	}
 	observed.UpdateRevision = sts.Status.UpdateRevision
 	observed.Stale = sts.Generation < appliedGeneration || sts.Status.ObservedGeneration != sts.Generation
@@ -953,23 +969,20 @@ func (r *MemgraphClusterReconciler) restartPod(
 	}
 }
 
-// currentReplicas is the replica count the operator's own previous apply left on
-// a role's StatefulSet, or zero when the cluster has not been provisioned yet.
-func (r *MemgraphClusterReconciler) currentReplicas(
+// getStatefulSet reads a role's StatefulSet, or nil when the cluster has not
+// been provisioned yet.
+func (r *MemgraphClusterReconciler) getStatefulSet(
 	ctx context.Context,
 	namespace, name string,
-) (int32, error) {
+) (*appsv1.StatefulSet, error) {
 	var sts appsv1.StatefulSet
 	if err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, &sts); err != nil {
 		if apierrors.IsNotFound(err) {
-			return 0, nil
+			return nil, nil
 		}
-		return 0, fmt.Errorf("getting StatefulSet %s: %w", name, err)
+		return nil, fmt.Errorf("getting StatefulSet %s: %w", name, err)
 	}
-	if sts.Spec.Replicas == nil {
-		return 0, nil
-	}
-	return *sts.Spec.Replicas, nil
+	return &sts, nil
 }
 
 // reconcileRegistration converges cluster registration once the workloads are
@@ -992,6 +1005,7 @@ func (r *MemgraphClusterReconciler) currentReplicas(
 // instance's pod disappear, and no removed member's pod outlives its vote.
 func (r *MemgraphClusterReconciler) reconcileRegistration(
 	ctx context.Context,
+	reads podSettings,
 	cluster *memgraphcomv1alpha1.MemgraphCluster,
 	replicas replicaCounts,
 	exposure externalAccess,
@@ -999,11 +1013,7 @@ func (r *MemgraphClusterReconciler) reconcileRegistration(
 ) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
-	ready, err := r.workloadsReady(ctx, cluster, replicas, roles)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-	if !ready {
+	if !workloadsReady(replicas, roles) {
 		log.Info("Waited for workload pods to become ready before registration")
 		msg := "Waiting for all workload pods to become ready"
 		if statusErr := r.writeStatus(ctx, cluster, lastObserved(cluster).exposedAt(exposure),
@@ -1108,8 +1118,8 @@ func (r *MemgraphClusterReconciler) reconcileRegistration(
 		// down is simply not ready and is caught up on the next pass.
 		// The AWS credentials are run-time settings like those, from a Secret
 		// instead of the spec, so they go the same way and at the same time.
-		applied := r.reconcileSettings(ctx, cluster, replicas, roles)
-		applied.merge(r.reconcileAWSCredentials(ctx, cluster, replicas, roles))
+		applied := r.reconcileSettings(ctx, reads, cluster, replicas, roles)
+		applied.merge(r.reconcileAWSCredentials(ctx, reads, cluster, replicas, roles))
 
 		// What each key of spec.flags is, by the running Memgraph's own account:
 		// a flag, a coordinator setting, or nothing it has. The two views are
@@ -1364,6 +1374,7 @@ func (r *MemgraphClusterReconciler) reconcileCoordinatorSettings(
 // the flag file carries its settings for when it comes up.
 func (r *MemgraphClusterReconciler) reconcileSettings(
 	ctx context.Context,
+	reads podSettings,
 	cluster *memgraphcomv1alpha1.MemgraphCluster,
 	replicas replicaCounts,
 	roles rolloutRoles,
@@ -1395,7 +1406,9 @@ func (r *MemgraphClusterReconciler) reconcileSettings(
 			if !ready[endpoint.Pod] {
 				continue
 			}
-			changes, err := r.applySettings(ctx, endpoint, role.flags)
+			changes, err := r.applySettings(ctx, reads, endpoint, func(observed map[string]string) []settings.Change {
+				return settings.Plan(role.flags, observed)
+			}, runTimeSetting)
 			for _, change := range changes {
 				log.Info("Applied run-time setting", "pod", endpoint.Pod, "setting", change.Setting, "value", change.Value)
 			}
@@ -1525,7 +1538,9 @@ func (r *MemgraphClusterReconciler) showConfig(
 				if endpoint.Pod != pod.Name {
 					continue
 				}
-				config, err := r.showConfigOn(ctx, endpoint)
+				config, err := r.readInstance(ctx, endpoint, func(conn memgraph.Client) (map[string]string, error) {
+					return conn.ShowConfig(ctx)
+				})
 				if err == nil && len(config) > 0 {
 					return config, nil
 				}
@@ -1535,23 +1550,6 @@ func (r *MemgraphClusterReconciler) showConfig(
 		}
 	}
 	return leader.ShowConfig(ctx)
-}
-
-// showConfigOn dials one instance for its SHOW CONFIG view.
-func (r *MemgraphClusterReconciler) showConfigOn(
-	ctx context.Context,
-	endpoint resources.Endpoint,
-) (map[string]string, error) {
-	conn, err := r.Memgraph.Connect(ctx, endpoint.Address, endpoint.TLS)
-	if err != nil {
-		return nil, err
-	}
-	defer func() {
-		if err := conn.Close(ctx); err != nil {
-			logf.FromContext(ctx).Error(err, "Failed to close instance connection", "pod", endpoint.Pod)
-		}
-	}()
-	return conn.ShowConfig(ctx)
 }
 
 // startupKeys are the role's own keys that are not run-time flags.
@@ -1659,6 +1657,7 @@ func exemptCurrentPods(roles *rolloutRoles, classes flagClasses) ([]string, bool
 // are not secret, but they share the Secret and the code path with the keys.
 func (r *MemgraphClusterReconciler) reconcileAWSCredentials(
 	ctx context.Context,
+	reads podSettings,
 	cluster *memgraphcomv1alpha1.MemgraphCluster,
 	replicas replicaCounts,
 	roles rolloutRoles,
@@ -1683,9 +1682,9 @@ func (r *MemgraphClusterReconciler) reconcileAWSCredentials(
 		if !ready[endpoint.Pod] {
 			continue
 		}
-		changes, err := r.applySecretSettings(ctx, endpoint, func(observed map[string]string) []settings.Change {
+		changes, err := r.applySettings(ctx, reads, endpoint, func(observed map[string]string) []settings.Change {
 			return settings.Diff(desired, observed)
-		})
+		}, secretSetting)
 		for _, change := range changes {
 			// The value may be a credential, so only the setting is named.
 			log.Info("Applied AWS setting from Secret", "pod", endpoint.Pod, "setting", change.Setting,
@@ -1746,40 +1745,105 @@ type settingRejected struct {
 func (e *settingRejected) Error() string { return fmt.Sprintf("%s: %v", e.command, e.err) }
 func (e *settingRejected) Unwrap() error { return e.err }
 
-// applySettings reads one instance's settings and issues the SETs that bring
-// them in line with its flags, returning the changes that landed. A refused
-// SET stops the pod's remaining changes for this pass and comes back as a
-// settingRejected; any other error is a pod that could not be read.
-func (r *MemgraphClusterReconciler) applySettings(
+// podSettings is each pod's SHOW DATABASE SETTINGS as a reconcile pass read
+// it, read at most once per pass: the license, the run-time flags and the AWS
+// credentials all plan against that one read, and every SET that lands is
+// recorded on it, so a later step sees what an earlier one wrote without
+// asking the pod again. A pod that could not be read keeps that error for the
+// rest of the pass rather than being tried again.
+type podSettings map[string]*podSettingsRead
+
+type podSettingsRead struct {
+	settings map[string]string
+	err      error
+}
+
+// observedSettings is the pod's settings as the pass read them, reading them
+// on the pass's first call for the pod.
+func (r *MemgraphClusterReconciler) observedSettings(
+	ctx context.Context,
+	reads podSettings,
+	endpoint resources.Endpoint,
+) (map[string]string, error) {
+	read, ok := reads[endpoint.Pod]
+	if !ok {
+		read = &podSettingsRead{}
+		read.settings, read.err = r.readInstance(ctx, endpoint, func(conn memgraph.Client) (map[string]string, error) {
+			return conn.ShowSettings(ctx)
+		})
+		reads[endpoint.Pod] = read
+	}
+	return read.settings, read.err
+}
+
+// readInstance dials one instance for one of its views and closes the connection.
+func (r *MemgraphClusterReconciler) readInstance(
 	ctx context.Context,
 	endpoint resources.Endpoint,
-	flags map[string]string,
-) ([]settings.Change, error) {
-	log := logf.FromContext(ctx)
+	query func(conn memgraph.Client) (map[string]string, error),
+) (map[string]string, error) {
 	conn, err := r.Memgraph.Connect(ctx, endpoint.Address, endpoint.TLS)
 	if err != nil {
 		return nil, err
 	}
 	defer func() {
 		if err := conn.Close(ctx); err != nil {
-			log.Error(err, "Failed to close instance connection", "pod", endpoint.Pod)
+			logf.FromContext(ctx).Error(err, "Failed to close instance connection", "pod", endpoint.Pod)
 		}
 	}()
-	observed, err := conn.ShowSettings(ctx)
+	return query(conn)
+}
+
+// applySettings issues the SETs plan returns against one instance's settings
+// as the pass read them, returning the changes that landed. The instance is
+// dialed only when there is something to SET. A refused SET stops the pod's
+// remaining changes for this pass and comes back as a settingRejected whose
+// command is what describe says, so a caller holding secret material can
+// leave the value out; any other error is a pod that could not be reached.
+func (r *MemgraphClusterReconciler) applySettings(
+	ctx context.Context,
+	reads podSettings,
+	endpoint resources.Endpoint,
+	plan func(observed map[string]string) []settings.Change,
+	describe func(change settings.Change) string,
+) ([]settings.Change, error) {
+	observed, err := r.observedSettings(ctx, reads, endpoint)
 	if err != nil {
 		return nil, err
 	}
-	var applied []settings.Change
-	for _, change := range settings.Plan(flags, observed) {
-		if err := conn.SetSetting(ctx, change.Setting, change.Value); err != nil {
-			return applied, &settingRejected{
-				command: fmt.Sprintf("SET DATABASE SETTING %q TO %q", change.Setting, change.Value),
-				err:     err,
-			}
+	changes := plan(observed)
+	if len(changes) == 0 {
+		return nil, nil
+	}
+	conn, err := r.Memgraph.Connect(ctx, endpoint.Address, endpoint.TLS)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if err := conn.Close(ctx); err != nil {
+			logf.FromContext(ctx).Error(err, "Failed to close instance connection", "pod", endpoint.Pod)
 		}
+	}()
+	var applied []settings.Change
+	for _, change := range changes {
+		if err := conn.SetSetting(ctx, change.Setting, change.Value); err != nil {
+			return applied, &settingRejected{command: describe(change), err: err}
+		}
+		observed[change.Setting] = change.Value
 		applied = append(applied, change)
 	}
 	return applied, nil
+}
+
+// runTimeSetting and secretSetting describe a refused SET: the first with its
+// value, which comes from the spec, the second without, since it comes from a
+// Secret.
+func runTimeSetting(change settings.Change) string {
+	return fmt.Sprintf("SET DATABASE SETTING %q TO %q", change.Setting, change.Value)
+}
+
+func secretSetting(change settings.Change) string {
+	return fmt.Sprintf("SET DATABASE SETTING %q from the Secret", change.Setting)
 }
 
 // reconcileLicense brings every ready pod's license in line with the Secret
@@ -1799,6 +1863,7 @@ func (r *MemgraphClusterReconciler) applySettings(
 // never logged, put in an event or written to status.
 func (r *MemgraphClusterReconciler) reconcileLicense(
 	ctx context.Context,
+	reads podSettings,
 	cluster *memgraphcomv1alpha1.MemgraphCluster,
 	replicas replicaCounts,
 	roles rolloutRoles,
@@ -1827,9 +1892,9 @@ func (r *MemgraphClusterReconciler) reconcileLicense(
 			if !ready[endpoint.Pod] {
 				continue
 			}
-			changes, err := r.applySecretSettings(ctx, endpoint, func(observed map[string]string) []settings.Change {
+			changes, err := r.applySettings(ctx, reads, endpoint, func(observed map[string]string) []settings.Change {
 				return settings.License(license, organization, observed)
-			})
+			}, secretSetting)
 			for _, change := range changes {
 				// The value is the license itself, so only the setting is named.
 				log.Info("Applied license setting from Secret", "pod", endpoint.Pod, "setting", change.Setting,
@@ -1878,43 +1943,6 @@ func (r *MemgraphClusterReconciler) readLicense(
 		}
 	}
 	return string(secret.Data[ref.LicenseKey]), string(secret.Data[ref.OrganizationKey]), nil
-}
-
-// applySecretSettings reads one instance's settings and issues the SETs plan
-// returns to bring the settings a Secret holds in line, returning the changes
-// that landed. A refused SET comes back as a settingRejected whose command
-// names the setting and not its value, since the value is secret material;
-// any other error is a pod that could not be read.
-func (r *MemgraphClusterReconciler) applySecretSettings(
-	ctx context.Context,
-	endpoint resources.Endpoint,
-	plan func(observed map[string]string) []settings.Change,
-) ([]settings.Change, error) {
-	log := logf.FromContext(ctx)
-	conn, err := r.Memgraph.Connect(ctx, endpoint.Address, endpoint.TLS)
-	if err != nil {
-		return nil, err
-	}
-	defer func() {
-		if err := conn.Close(ctx); err != nil {
-			log.Error(err, "Failed to close instance connection", "pod", endpoint.Pod)
-		}
-	}()
-	observed, err := conn.ShowSettings(ctx)
-	if err != nil {
-		return nil, err
-	}
-	var applied []settings.Change
-	for _, change := range plan(observed) {
-		if err := conn.SetSetting(ctx, change.Setting, change.Value); err != nil {
-			return applied, &settingRejected{
-				command: fmt.Sprintf("SET DATABASE SETTING %q from the Secret", change.Setting),
-				err:     err,
-			}
-		}
-		applied = append(applied, change)
-	}
-	return applied, nil
 }
 
 // clustersForSecret maps a Secret event to the clusters in its namespace whose
@@ -2115,9 +2143,8 @@ func (r *MemgraphClusterReconciler) writeStatus(
 // address resolves to a running pod.
 //
 // The count each role must reach is the one this pass applied, never the
-// spec.replicas read back off the StatefulSet. Reads go through the informer
-// cache, which lags the apply, so the object read back a few lines after a
-// scale-up is still the pre-apply snapshot — and in that snapshot the old
+// spec.replicas on the StatefulSet. The object was read before the apply, so
+// during a scale-up it is the pre-apply snapshot — and in that snapshot the old
 // spec.replicas and the old status.readyReplicas agree, because the cluster
 // genuinely was converged at the old size. Comparing those two stale numbers
 // against each other reports a grown topology as ready and lets registration run
@@ -2125,9 +2152,8 @@ func (r *MemgraphClusterReconciler) writeStatus(
 // readyReplicas against the count this pass intends cannot fail that way: a lagging
 // status only ever reads as not-yet-ready.
 //
-// A StatefulSet the apply just created is not ready, not an error: the same lag
-// makes an absent StatefulSet the same waiting state as one whose pods have not
-// come up yet.
+// A StatefulSet the apply just created is not ready: absent from the pass's
+// read, it is the same waiting state as one whose pods have not come up yet.
 //
 // One absence is tolerated: the pod a rolling restart itself took down. Without
 // that, the first pod the restart deletes would make this gate false, the pass
@@ -2140,12 +2166,7 @@ func (r *MemgraphClusterReconciler) writeStatus(
 // stale-informer case above — during a 3-to-4 scale-up a readyReplicas of 3
 // against an applied 4 would otherwise read as "one pod down, mid-roll,
 // tolerated" and let registration run against a pod that does not exist yet.
-func (r *MemgraphClusterReconciler) workloadsReady(
-	ctx context.Context,
-	cluster *memgraphcomv1alpha1.MemgraphCluster,
-	replicas replicaCounts,
-	roles rolloutRoles,
-) (bool, error) {
+func workloadsReady(replicas replicaCounts, roles rolloutRoles) bool {
 	for _, role := range []struct {
 		replicas roleReplicas
 		rollout  rollout.Role
@@ -2153,23 +2174,19 @@ func (r *MemgraphClusterReconciler) workloadsReady(
 		{replicas.coordinators, roles.coordinators},
 		{replicas.data, roles.data},
 	} {
-		var sts appsv1.StatefulSet
-		name := role.replicas.name
-		if err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: cluster.Namespace}, &sts); err != nil {
-			if apierrors.IsNotFound(err) {
-				return false, nil
-			}
-			return false, fmt.Errorf("getting StatefulSet %s: %w", name, err)
+		sts := role.replicas.statefulSet
+		if sts == nil {
+			return false
 		}
 		required := role.replicas.applied
 		if rollout.InProgress(role.rollout) && sts.Status.Replicas == required {
 			required--
 		}
 		if sts.Status.ReadyReplicas < required {
-			return false, nil
+			return false
 		}
 	}
-	return true, nil
+	return true
 }
 
 // errNoCoordinatorLeader reports that coordinators answered SHOW INSTANCES but

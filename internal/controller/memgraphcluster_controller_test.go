@@ -1185,40 +1185,38 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			Expect(converged.Reason).To(Equal(memgraphcomv1alpha1.ReasonWorkloadsNotReady))
 		})
 
-		// The gate has to key off the count the pass applied, not the spec.replicas it
-		// can read back. Production reads through the informer cache, so a few lines
-		// after a scale-up that field is still the pre-apply value — and it agrees
+		// The gate has to key off the count the pass applied, not the spec.replicas
+		// on the StatefulSet. The pass reads each StatefulSet once, before applying,
+		// so after a scale-up that field is still the pre-apply value — and it agrees
 		// with a status.readyReplicas from the same old snapshot, because the cluster
 		// really was converged at the old size. Two stale numbers that agree report a
 		// grown topology as ready, and registration then names a pod Kubernetes has
 		// not been asked to create.
 		//
-		// The gate is called directly here: the envtest client is uncached, so the
-		// staleness itself cannot be reproduced, only the comparison it would defeat.
-		// A StatefulSet left at 2 ready out of 2 is exactly what that stale read looks
-		// like, and the pass that intends 3 must not accept it.
+		// The gate is called directly here, on the StatefulSets as they stand: one
+		// left at 2 ready out of 2 is exactly what that pre-apply read looks like,
+		// and the pass that intends 3 must not accept it.
 		It("should gate readiness on the applied count, not the StatefulSet's own spec", func() {
 			bootstrapped()
-			cluster := &memgraphcomv1alpha1.MemgraphCluster{}
-			get(resourceName, cluster)
 			Expect(replicas(dataSuffix)).To(Equal(int32(2)))
 
+			coordinators, data := &appsv1.StatefulSet{}, &appsv1.StatefulSet{}
+			get(resourceName+coordinatorSuffix, coordinators)
+			get(resourceName+dataSuffix, data)
 			held := replicaCounts{
-				coordinators: roleReplicas{name: resourceName + coordinatorSuffix, declared: 3, applied: 3},
-				data:         roleReplicas{name: resourceName + dataSuffix, declared: 2, applied: 2},
+				coordinators: roleReplicas{name: resourceName + coordinatorSuffix, declared: 3, applied: 3,
+					statefulSet: coordinators},
+				data: roleReplicas{name: resourceName + dataSuffix, declared: 2, applied: 2, statefulSet: data},
 			}
 			// A zero rolloutRoles is a cluster with no restart under way, which is what
 			// keeps this about the count comparison alone: the gate only ever tolerates
 			// an unready pod while a role actually has pods left to restart.
-			ready, err := reconciler.workloadsReady(ctx, cluster, held, rolloutRoles{})
-			Expect(err).NotTo(HaveOccurred())
-			Expect(ready).To(BeTrue(), "the cluster is ready at the size this pass applies")
+			Expect(workloadsReady(held, rolloutRoles{})).To(BeTrue(),
+				"the cluster is ready at the size this pass applies")
 
 			grown := held
 			grown.data.declared, grown.data.applied = 3, 3
-			ready, err = reconciler.workloadsReady(ctx, cluster, grown, rolloutRoles{})
-			Expect(err).NotTo(HaveOccurred())
-			Expect(ready).To(BeFalse(),
+			Expect(workloadsReady(grown, rolloutRoles{})).To(BeFalse(),
 				"a pass applying 3 must not read 2-ready-of-2 as ready, whatever spec.replicas still says")
 		})
 
@@ -2541,6 +2539,33 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			Expect(awsCommands()[6:]).To(HaveLen(4))
 			Expect(awsCommands()[6:]).To(HaveEach(Or(ContainSubstring(secretKeySET), ContainSubstring(endpointSET))))
 			Expect(podUIDs()).To(Equal(uids), "a rotation restarts no pod")
+			Expect(converged().Status).To(Equal(metav1.ConditionTrue))
+		})
+
+		// The AWS credentials and the run-time flags are both SET on a data
+		// instance in the same pass, and both plan against its settings: one
+		// read serves both, and what the first step SETs is what the second sees.
+		It("should read each pod's settings once per pass, however many steps SET on it", func() {
+			get(resourceName, cluster)
+			cluster.Spec.Flags.Data = map[string]memgraphcomv1alpha1.FlagValue{"query_execution_timeout_sec": "1200"}
+			Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
+
+			reads := func() []int {
+				counts := make([]int, 0, 2)
+				for ordinal := range 2 {
+					counts = append(counts, fake.settingsReadsOf(podAddress(dataSuffix, ordinal)))
+				}
+				return counts
+			}
+			before := reads()
+			reconcileCluster(resourceName)
+			after := reads()
+			for ordinal := range 2 {
+				Expect(after[ordinal]-before[ordinal]).To(Equal(1), "data instance %d", ordinal)
+				settings := fake.settingsOf(podAddress(dataSuffix, ordinal))
+				Expect(settings).To(HaveKeyWithValue("aws.secret_key", secretKey))
+				Expect(settings).To(HaveKeyWithValue("query.timeout", "1200"))
+			}
 			Expect(converged().Status).To(Equal(metav1.ConditionTrue))
 		})
 
