@@ -182,6 +182,17 @@ const (
 	// the declared template", and a user looking at a False condition needs to
 	// know which of the two is happening.
 	ConditionUpdated = "Updated"
+
+	// ConditionLicenseApplied is True when every ready pod of both roles runs
+	// the enterprise license and organization name the secrets block's Secret
+	// holds. A pod reads the Secret only when it starts, so a renewal written
+	// to the Secret reaches running pods through SET DATABASE SETTING, issued
+	// on every pass before anything else the pass does: an expired license is
+	// exactly what can stop the cluster from converging, so applying the new
+	// one cannot wait for convergence. It is kept apart from Converged for the
+	// same reason, because every pass that stops short of convergence writes
+	// its own Converged reason and would hide why the license is not live.
+	ConditionLicenseApplied = "LicenseApplied"
 )
 
 // Condition reasons reported on MemgraphCluster status. Reasons are CamelCase
@@ -306,6 +317,23 @@ const (
 	// ReasonAllPodsUpdated is set when every workload pod runs the pod template
 	// the spec currently describes.
 	ReasonAllPodsUpdated = "AllPodsUpdated"
+
+	// ReasonLicenseMatchesSecret is set on LicenseApplied when every ready pod
+	// runs the license and organization name the Secret holds.
+	ReasonLicenseMatchesSecret = "LicenseMatchesSecret"
+
+	// ReasonLicensePending is set on LicenseApplied while the license could not
+	// yet be checked everywhere: the Secret or one of its keys does not exist,
+	// or a ready pod did not answer SHOW DATABASE SETTINGS. The message names
+	// which. The pass retries on its own.
+	ReasonLicensePending = "LicensePending"
+
+	// ReasonLicenseRejected is set on LicenseApplied when an instance refused
+	// the license the Secret holds: a key that does not decode, or one that
+	// has already expired. The message names the pod and carries Memgraph's
+	// error verbatim, never the license itself. Only a corrected Secret
+	// clears it.
+	ReasonLicenseRejected = "LicenseRejected"
 
 	// ReasonMainElected is set when a data instance is observed as MAIN.
 	ReasonMainElected = "MainElected"

@@ -127,6 +127,7 @@ var _ = Describe("MemgraphCluster Controller", func() {
 		reconciler = &MemgraphClusterReconciler{
 			Client:            k8sClient,
 			Scheme:            k8sClient.Scheme(),
+			APIReader:         k8sClient,
 			Memgraph:          fake,
 			GatewayAPI:        true,
 			ServiceMonitorAPI: true,
@@ -2089,6 +2090,258 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			Expect(settings).To(HaveKeyWithValue("log.level", "TRACE"),
 				"a removed flag the operator has a default for goes back to the default, which the flag file now says")
 			Expect(condition(memgraphcomv1alpha1.ConditionConverged).Status).To(Equal(metav1.ConditionTrue))
+		})
+	})
+
+	Context("when the license Secret changes", func() {
+		const (
+			resourceName   = "mgc-license"
+			secretName     = resourceName + "-secret"
+			renewedLicense = "license-renewed-in-the-secret"
+			licenseSetting = `SET DATABASE SETTING "enterprise.license"`
+		)
+
+		cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+
+		podName := func(suffix string, ordinal int) string {
+			return fmt.Sprintf("%s%s-%d", resourceName, suffix, ordinal)
+		}
+		podAddress := func(suffix string, ordinal int) string {
+			return fmt.Sprintf("%s.%s%s.%s.svc.cluster.local:%d",
+				podName(suffix, ordinal), resourceName, suffix, resourceNamespace, memgraphcomv1alpha1.BoltPort)
+		}
+		// every is each pod of both roles as the license pass dials it.
+		every := func(visit func(suffix string, ordinal int)) {
+			for ordinal := range 2 {
+				visit(dataSuffix, ordinal)
+			}
+			for ordinal := range 3 {
+				visit(coordinatorSuffix, ordinal)
+			}
+		}
+
+		// putPod stands in for the StatefulSet controller and the kubelet
+		// envtest does not run. The license pass dials only ready pods.
+		putPod := func(suffix string, ordinal int, ready bool) {
+			GinkgoHelper()
+			existing := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: podName(suffix, ordinal), Namespace: resourceNamespace}}
+			Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, existing))).To(Succeed())
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      podName(suffix, ordinal),
+					Namespace: resourceNamespace,
+					Labels: map[string]string{
+						nameLabel:      memgraphDbName,
+						instanceLabel:  resourceName,
+						componentLabel: strings.TrimPrefix(suffix, "-"),
+						managedByLabel: resources.ManagedByValue,
+					},
+				},
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: memgraphDbName, Image: memgraphDbName}}},
+			}
+			Expect(k8sClient.Create(ctx, pod)).To(Succeed())
+			status := corev1.ConditionFalse
+			if ready {
+				status = corev1.ConditionTrue
+			}
+			pod.Status.Conditions = []corev1.PodCondition{{
+				Type: corev1.PodReady, Status: status, LastTransitionTime: metav1.Now(),
+			}}
+			Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
+		}
+		podUIDs := func() map[string]types.UID {
+			GinkgoHelper()
+			uids := map[string]types.UID{}
+			every(func(suffix string, ordinal int) {
+				pod := &corev1.Pod{}
+				get(podName(suffix, ordinal), pod)
+				uids[pod.Name] = pod.UID
+			})
+			return uids
+		}
+
+		putSecret := func(license, organization string) {
+			GinkgoHelper()
+			secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: resourceNamespace}}
+			data := map[string][]byte{
+				memgraphcomv1alpha1.DefaultLicenseSecretKey:      []byte(license),
+				memgraphcomv1alpha1.DefaultOrganizationSecretKey: []byte(organization),
+			}
+			if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(secret), secret); apierrors.IsNotFound(err) {
+				secret.Data = data
+				Expect(k8sClient.Create(ctx, secret)).To(Succeed())
+				return
+			}
+			secret.Data = data
+			Expect(k8sClient.Update(ctx, secret)).To(Succeed())
+		}
+		licenseCondition := func() *metav1.Condition {
+			GinkgoHelper()
+			get(resourceName, cluster)
+			condition := apimeta.FindStatusCondition(cluster.Status.Conditions, memgraphcomv1alpha1.ConditionLicenseApplied)
+			Expect(condition).NotTo(BeNil(), "every pass reports LicenseApplied")
+			return condition
+		}
+		licenseCommands := func() []string {
+			var sets []string
+			for _, command := range fake.executedCommands() {
+				if strings.Contains(command, "SET DATABASE SETTING") {
+					sets = append(sets, command)
+				}
+			}
+			return sets
+		}
+
+		BeforeEach(func() {
+			putSecret(startupLicense, startupOrganization)
+			resource := &memgraphcomv1alpha1.MemgraphCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: resourceNamespace},
+				Spec: memgraphcomv1alpha1.MemgraphClusterSpec{
+					Secrets: memgraphcomv1alpha1.SecretsSpec{Name: secretName},
+				},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+			get(resourceName, cluster)
+
+			reconcileCluster(resourceName)
+			every(func(suffix string, ordinal int) { putPod(suffix, ordinal, true) })
+		})
+
+		AfterEach(func() {
+			get(resourceName, cluster)
+			Expect(k8sClient.Delete(ctx, cluster)).To(Succeed())
+			deleteOwned(resourceName)
+			Expect(k8sClient.DeleteAllOf(ctx, &corev1.Pod{},
+				client.InNamespace(resourceNamespace),
+				client.MatchingLabels{instanceLabel: resourceName},
+				client.GracePeriodSeconds(0),
+			)).To(Succeed())
+			secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: resourceNamespace}}
+			Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, secret))).To(Succeed())
+		})
+
+		It("should SET a renewed license on every ready pod of both roles and restart none", func() {
+			reconcileCluster(resourceName)
+			Expect(licenseCommands()).To(BeEmpty(), "pods already on the Secret's license are left alone")
+			Expect(licenseCondition().Status).To(Equal(metav1.ConditionTrue))
+
+			uids := podUIDs()
+			putSecret(renewedLicense, startupOrganization)
+			reconcileCluster(resourceName)
+
+			every(func(suffix string, ordinal int) {
+				Expect(fake.settingsOf(podAddress(suffix, ordinal))).To(
+					HaveKeyWithValue("enterprise.license", renewedLicense), "%s must run the renewed license", podName(suffix, ordinal))
+			})
+			Expect(licenseCommands()).To(HaveLen(5), "one SET of the license per pod, and nothing for the unchanged organization")
+			Expect(licenseCommands()).To(HaveEach(ContainSubstring(licenseSetting)))
+			Expect(podUIDs()).To(Equal(uids), "a renewal restarts no pod")
+			condition := licenseCondition()
+			Expect(condition.Status).To(Equal(metav1.ConditionTrue))
+			Expect(condition.Reason).To(Equal(memgraphcomv1alpha1.ReasonLicenseMatchesSecret))
+
+			By("issuing nothing on the next pass, because every pod is in line")
+			reconcileCluster(resourceName)
+			Expect(licenseCommands()).To(HaveLen(5))
+		})
+
+		It("should apply the license before the cluster is ready to register", func() {
+			// The StatefulSets were never marked ready, so the pass stops at
+			// the readiness gate: before any coordinator, leader or plan.
+			putSecret(renewedLicense, startupOrganization)
+			reconcileCluster(resourceName)
+
+			every(func(suffix string, ordinal int) {
+				Expect(fake.settingsOf(podAddress(suffix, ordinal))).To(HaveKeyWithValue("enterprise.license", renewedLicense))
+			})
+			Expect(licenseCondition().Status).To(Equal(metav1.ConditionTrue))
+			get(resourceName, cluster)
+			converged := apimeta.FindStatusCondition(cluster.Status.Conditions, memgraphcomv1alpha1.ConditionConverged)
+			Expect(converged.Reason).To(Equal(memgraphcomv1alpha1.ReasonWorkloadsNotReady),
+				"the pass stopped short of registration and still applied the license")
+		})
+
+		It("should skip a pod that is not ready and report a ready pod that does not answer", func() {
+			putPod(dataSuffix, 1, false)
+			fake.setUnreachable(podAddress(coordinatorSuffix, 2), true)
+			putSecret(renewedLicense, startupOrganization)
+
+			reconcileCluster(resourceName)
+
+			Expect(fake.settingsOf(podAddress(dataSuffix, 1))).To(HaveKeyWithValue("enterprise.license", startupLicense),
+				"an unready pod is not dialed: it reads the Secret itself when it starts")
+			condition := licenseCondition()
+			Expect(condition.Status).To(Equal(metav1.ConditionFalse))
+			Expect(condition.Reason).To(Equal(memgraphcomv1alpha1.ReasonLicensePending))
+			Expect(condition.Message).To(ContainSubstring(podName(coordinatorSuffix, 2)))
+			Expect(condition.Message).NotTo(ContainSubstring(podName(dataSuffix, 1)))
+
+			By("catching the pod up once it answers")
+			fake.setUnreachable(podAddress(coordinatorSuffix, 2), false)
+			reconcileCluster(resourceName)
+			Expect(fake.settingsOf(podAddress(coordinatorSuffix, 2))).To(HaveKeyWithValue("enterprise.license", renewedLicense))
+			Expect(licenseCondition().Status).To(Equal(metav1.ConditionTrue))
+		})
+
+		It("should report a license Memgraph rejects without putting the license in status", func() {
+			fake.rejectCommand(licenseSetting, errors.New("Invalid license key: the license has already expired."))
+			putSecret(renewedLicense, startupOrganization)
+
+			reconcileCluster(resourceName)
+
+			condition := licenseCondition()
+			Expect(condition.Status).To(Equal(metav1.ConditionFalse))
+			Expect(condition.Reason).To(Equal(memgraphcomv1alpha1.ReasonLicenseRejected))
+			Expect(condition.Message).To(ContainSubstring(podName(dataSuffix, 0)))
+			Expect(condition.Message).To(ContainSubstring("the license has already expired"))
+			Expect(condition.Message).To(ContainSubstring(`"enterprise.license"`))
+			get(resourceName, cluster)
+			Expect(fmt.Sprint(cluster.Status)).NotTo(ContainSubstring(renewedLicense), "the license is secret material")
+		})
+
+		It("should SET a changed organization together with the license", func() {
+			const organization = "Another Organization"
+			putSecret(renewedLicense, organization)
+
+			reconcileCluster(resourceName)
+
+			every(func(suffix string, ordinal int) {
+				settings := fake.settingsOf(podAddress(suffix, ordinal))
+				Expect(settings).To(HaveKeyWithValue("organization.name", organization))
+				Expect(settings).To(HaveKeyWithValue("enterprise.license", renewedLicense))
+			})
+			Expect(licenseCommands()).To(HaveLen(10), "two SETs per pod, the organization and the license")
+			Expect(licenseCondition().Status).To(Equal(metav1.ConditionTrue))
+		})
+
+		It("should report a missing Secret or key as pending", func() {
+			secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: resourceNamespace}}
+			Expect(k8sClient.Delete(ctx, secret)).To(Succeed())
+			reconcileCluster(resourceName)
+			condition := licenseCondition()
+			Expect(condition.Reason).To(Equal(memgraphcomv1alpha1.ReasonLicensePending))
+			Expect(condition.Message).To(ContainSubstring(secretName + " does not exist"))
+
+			secret = &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: resourceNamespace},
+				Data:       map[string][]byte{memgraphcomv1alpha1.DefaultLicenseSecretKey: []byte(renewedLicense)},
+			}
+			Expect(k8sClient.Create(ctx, secret)).To(Succeed())
+			reconcileCluster(resourceName)
+			condition = licenseCondition()
+			Expect(condition.Reason).To(Equal(memgraphcomv1alpha1.ReasonLicensePending))
+			Expect(condition.Message).To(ContainSubstring("no key " + memgraphcomv1alpha1.DefaultOrganizationSecretKey))
+			Expect(licenseCommands()).To(BeEmpty(), "half a pair is never applied")
+		})
+
+		It("should map a changed Secret to the clusters that read their license from it", func() {
+			named := func(name string) client.Object {
+				return &metav1.PartialObjectMetadata{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: resourceNamespace}}
+			}
+			Expect(reconciler.clustersForSecret(ctx, named(secretName))).To(ConsistOf(reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: resourceName, Namespace: resourceNamespace},
+			}))
+			Expect(reconciler.clustersForSecret(ctx, named("some-other-secret"))).To(BeEmpty())
 		})
 	})
 

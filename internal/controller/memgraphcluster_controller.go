@@ -39,7 +39,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
@@ -85,6 +87,11 @@ const (
 type MemgraphClusterReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+
+	// APIReader reads straight from the API server, bypassing the informer
+	// cache. The license Secret is read through it, so the cache holds no
+	// Secret data at all: the Secret watch is metadata-only.
+	APIReader client.Reader
 
 	// Memgraph opens Bolt connections to coordinators. Tests substitute a
 	// fake; everything above the memgraph.Client interface never touches the
@@ -159,11 +166,19 @@ type MemgraphClusterReconciler struct {
 // scoped by the managed-by label in cmd/main.go, so the rule reaches every
 // ConfigMap but the cache holds only the operator's own.
 // +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch;create;patch;delete
+//
+// Secrets are read, never written, and only for the license: a pod reads the
+// license Secret when it starts, so a renewal reaches running pods only if the
+// operator reads it too and SETs it. list and watch feed a metadata-only
+// informer that maps a changed Secret to the clusters naming it, and get reads
+// that one Secret uncached; no Secret data is ever cached.
+// +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch
 
 // Reconcile drives the cluster toward the declared MemgraphCluster spec in
 // two stages. First it server-side-applies the builders' desired objects: one
 // StatefulSet per role (coordinators, data instances), each backed by a
-// headless Service, at the replica counts replicaCounts derives. Then, once
+// headless Service, at the replica counts replicaCounts derives, and brings
+// every ready pod's license in line with the license Secret. Then, once
 // every pod is ready, it reconciles cluster registration: observe SHOW
 // INSTANCES on the coordinator leader, diff against the declared topology, and
 // issue only the missing commands — which is all growing a live cluster takes,
@@ -232,7 +247,26 @@ func (r *MemgraphClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, err
 	}
 
-	return r.reconcileRegistration(ctx, &cluster, replicas, exposure, applied)
+	// Both roles' pods are read once per pass: the license and the readiness
+	// gate need each pod's readiness, the gate also whether a restart is under
+	// way to tolerate the pod it took down, and the restart itself needs the
+	// same view further down.
+	roles, err := r.observeRollout(ctx, &cluster, replicas, applied)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// The license goes before registration, which any of a dozen things can
+	// stop short: an expired license is what keeps a cluster from converging,
+	// so its renewal cannot wait for every pod, a Raft leader or a finished
+	// registration. Its condition is written on its own for the same reason,
+	// because every return in registration writes its own Converged reason.
+	license := r.reconcileLicense(ctx, &cluster, replicas, roles)
+	if err := r.writeStatus(ctx, &cluster, lastObserved(&cluster), license); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	return r.reconcileRegistration(ctx, &cluster, replicas, exposure, roles)
 }
 
 // desiredExternal is every external object the spec asks for: the Services in
@@ -960,17 +994,9 @@ func (r *MemgraphClusterReconciler) reconcileRegistration(
 	cluster *memgraphcomv1alpha1.MemgraphCluster,
 	replicas replicaCounts,
 	exposure externalAccess,
-	applied appliedGenerations,
+	roles rolloutRoles,
 ) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
-
-	// Both roles' pods are read once per pass: the readiness gate needs to know
-	// whether a restart is under way to tolerate the pod it took down, and the
-	// restart itself needs the same view further down.
-	roles, err := r.observeRollout(ctx, cluster, replicas, applied)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
 
 	ready, err := r.workloadsReady(ctx, cluster, replicas, roles)
 	if err != nil {
@@ -1660,6 +1686,156 @@ func (r *MemgraphClusterReconciler) applySettings(
 	return applied, nil
 }
 
+// reconcileLicense brings every ready pod's license in line with the Secret
+// the secrets block names and returns the LicenseApplied condition saying how
+// far that got. A pod reads the Secret into its environment only when it
+// starts, so this is what makes a renewal written to the Secret live without
+// a restart: one connection per ready pod of both roles, since a setting is
+// local to the instance that receives it, each read before it is written.
+//
+// Nothing here fails the pass, and nothing here restarts a pod. A Secret or
+// key that cannot be read and a pod that does not answer are pending and
+// retried next pass; a SET an instance refuses names the pod and Memgraph's
+// error. A pod that is not ready is skipped: it reads the Secret itself when
+// it starts.
+//
+// The license is secret material: it is sent to Memgraph and compared, and
+// never logged, put in an event or written to status.
+func (r *MemgraphClusterReconciler) reconcileLicense(
+	ctx context.Context,
+	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	replicas replicaCounts,
+	roles rolloutRoles,
+) metav1.Condition {
+	log := logf.FromContext(ctx)
+	ref := resources.LicenseSecretOf(cluster)
+	license, organization, err := r.readLicense(ctx, cluster.Namespace, ref)
+	if err != nil {
+		log.Info("Could not read the license Secret", "secret", ref.Name, "reason", err.Error())
+		return notLicenseAppliedCondition(memgraphcomv1alpha1.ReasonLicensePending, err.Error())
+	}
+
+	var pending, rejected []string
+	for _, role := range []struct {
+		endpoints []resources.Endpoint
+		pods      rollout.Role
+	}{
+		{resources.DataEndpoints(cluster, replicas.data.applied), roles.data},
+		{resources.CoordinatorEndpoints(cluster, replicas.coordinators.applied), roles.coordinators},
+	} {
+		ready := make(map[string]bool, len(role.pods.Pods))
+		for _, pod := range role.pods.Pods {
+			ready[pod.Name] = pod.Ready
+		}
+		for _, endpoint := range role.endpoints {
+			if !ready[endpoint.Pod] {
+				continue
+			}
+			changes, err := r.applyLicense(ctx, endpoint, license, organization)
+			for _, change := range changes {
+				// The value is the license itself, so only the setting is named.
+				log.Info("Applied license setting from Secret", "pod", endpoint.Pod, "setting", change.Setting,
+					"secret", ref.Name)
+			}
+			var rejection *settingRejected
+			switch {
+			case errors.As(err, &rejection):
+				rejected = append(rejected, fmt.Sprintf("%s rejected %s: %v", endpoint.Pod, rejection.command, rejection.err))
+			case err != nil:
+				log.Info("Could not read the license settings from a ready pod", "pod", endpoint.Pod, "reason", err.Error())
+				pending = append(pending, endpoint.Pod)
+			}
+		}
+	}
+
+	switch {
+	case len(rejected) > 0:
+		return notLicenseAppliedCondition(memgraphcomv1alpha1.ReasonLicenseRejected,
+			truncateMessage(strings.Join(rejected, "; ")))
+	case len(pending) > 0:
+		return notLicenseAppliedCondition(memgraphcomv1alpha1.ReasonLicensePending,
+			"Waiting to check the license on "+strings.Join(pending, ", "))
+	}
+	return trueCondition(memgraphcomv1alpha1.ConditionLicenseApplied, memgraphcomv1alpha1.ReasonLicenseMatchesSecret,
+		fmt.Sprintf("Every ready pod runs the license in Secret %s", ref.Name))
+}
+
+// readLicense reads the license and organization name from the Secret,
+// uncached: the operator's cache holds Secret metadata only.
+func (r *MemgraphClusterReconciler) readLicense(
+	ctx context.Context,
+	namespace string,
+	ref resources.LicenseSecret,
+) (license, organization string, err error) {
+	var secret corev1.Secret
+	if err := r.APIReader.Get(ctx, types.NamespacedName{Name: ref.Name, Namespace: namespace}, &secret); err != nil {
+		if apierrors.IsNotFound(err) {
+			return "", "", fmt.Errorf("the Secret %s does not exist", ref.Name)
+		}
+		return "", "", fmt.Errorf("getting Secret %s: %w", ref.Name, err)
+	}
+	for _, key := range []string{ref.LicenseKey, ref.OrganizationKey} {
+		if _, ok := secret.Data[key]; !ok {
+			return "", "", fmt.Errorf("the Secret %s has no key %s", ref.Name, key)
+		}
+	}
+	return string(secret.Data[ref.LicenseKey]), string(secret.Data[ref.OrganizationKey]), nil
+}
+
+// applyLicense reads one instance's license settings and issues the SETs that
+// bring them in line with the Secret, returning the changes that landed. A
+// refused SET comes back as a settingRejected whose command names the
+// setting and not its value; any other error is a pod that could not be read.
+func (r *MemgraphClusterReconciler) applyLicense(
+	ctx context.Context,
+	endpoint resources.Endpoint,
+	license, organization string,
+) ([]settings.Change, error) {
+	log := logf.FromContext(ctx)
+	conn, err := r.Memgraph.Connect(ctx, endpoint.Address, endpoint.TLS)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if err := conn.Close(ctx); err != nil {
+			log.Error(err, "Failed to close instance connection", "pod", endpoint.Pod)
+		}
+	}()
+	observed, err := conn.ShowSettings(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var applied []settings.Change
+	for _, change := range settings.License(license, organization, observed) {
+		if err := conn.SetSetting(ctx, change.Setting, change.Value); err != nil {
+			return applied, &settingRejected{
+				command: fmt.Sprintf("SET DATABASE SETTING %q from the Secret", change.Setting),
+				err:     err,
+			}
+		}
+		applied = append(applied, change)
+	}
+	return applied, nil
+}
+
+// clustersForSecret maps a Secret event to the clusters in its namespace whose
+// pods read their license from it. The event carries metadata only, which is
+// all the mapping needs.
+func (r *MemgraphClusterReconciler) clustersForSecret(ctx context.Context, secret client.Object) []reconcile.Request {
+	var clusters memgraphcomv1alpha1.MemgraphClusterList
+	if err := r.List(ctx, &clusters, client.InNamespace(secret.GetNamespace())); err != nil {
+		logf.FromContext(ctx).Error(err, "Failed to list MemgraphClusters for a changed Secret", "secret", secret.GetName())
+		return nil
+	}
+	var requests []reconcile.Request
+	for i := range clusters.Items {
+		if resources.LicenseSecretOf(&clusters.Items[i]).Name == secret.GetName() {
+			requests = append(requests, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&clusters.Items[i])})
+		}
+	}
+	return requests
+}
+
 // shedRetiredPods applies the shrinking roles' StatefulSets at their declared
 // replica counts — the one place the operator ever lowers a replica count. It is
 // reached only after the plan came back empty, so every pod it sheds belongs to a
@@ -1789,6 +1965,12 @@ func notReadyCondition(reason, message string) metav1.Condition {
 func notConvergedCondition(reason, message string) metav1.Condition {
 	return metav1.Condition{
 		Type: memgraphcomv1alpha1.ConditionConverged, Status: metav1.ConditionFalse, Reason: reason, Message: message,
+	}
+}
+
+func notLicenseAppliedCondition(reason, message string) metav1.Condition {
+	return metav1.Condition{
+		Type: memgraphcomv1alpha1.ConditionLicenseApplied, Status: metav1.ConditionFalse, Reason: reason, Message: message,
 	}
 }
 
@@ -2044,7 +2226,12 @@ func (r *MemgraphClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&appsv1.StatefulSet{}).
 		Owns(&appsv1.Deployment{}).
 		Owns(&corev1.Service{}).
-		Owns(&corev1.ConfigMap{})
+		Owns(&corev1.ConfigMap{}).
+		// The license Secret is not the operator's, so it is watched rather
+		// than owned, and by metadata only: the mapping needs the name, and
+		// caching Secret data from every namespace would hold material the
+		// operator has no use for.
+		WatchesMetadata(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(r.clustersForSecret))
 	if r.GatewayAPI {
 		builder = builder.Owns(&gatewayv1.Gateway{}).Owns(&gatewayv1.TCPRoute{})
 	}
