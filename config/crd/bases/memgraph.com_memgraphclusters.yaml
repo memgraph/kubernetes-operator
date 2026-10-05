@@ -154,20 +154,17 @@ spec:
                           size is the requested size of the role's core dumps claim. A dump is
                           roughly as large as the crashing process' resident memory, which is why
                           this is per role: a data instance holds the graph, a coordinator holds
-                          Raft state. Size it against the role's memory limit, not its data.
+                          Raft state. Size it against the role's memory limit, not its data. It
+                          can grow while the role collects dumps and never shrink.
                         pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                         x-kubernetes-int-or-string: true
                     type: object
                     x-kubernetes-validations:
-                    - message: 'coreDumps size cannot be changed on a live cluster
-                        while the role collects dumps: it is part of a StatefulSet
-                        volumeClaimTemplate, which Kubernetes forbids changing in
-                        place. Delete the MemgraphCluster (its claims are retained
-                        under the default retention policy) and recreate it with the
-                        new value'
+                    - message: 'coreDumps size cannot shrink while the role collects
+                        dumps: Kubernetes cannot shrink a volume. It can only grow'
                       rule: has(self.size) == has(oldSelf.size) && (!has(self.size)
                         || quantity(string(self.size)).compareTo(quantity(string(oldSelf.size)))
-                        == 0)
+                        >= 0)
                   data:
                     description: |-
                       data, when present, makes every data instance pod collect dumps onto a
@@ -183,20 +180,17 @@ spec:
                           size is the requested size of the role's core dumps claim. A dump is
                           roughly as large as the crashing process' resident memory, which is why
                           this is per role: a data instance holds the graph, a coordinator holds
-                          Raft state. Size it against the role's memory limit, not its data.
+                          Raft state. Size it against the role's memory limit, not its data. It
+                          can grow while the role collects dumps and never shrink.
                         pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                         x-kubernetes-int-or-string: true
                     type: object
                     x-kubernetes-validations:
-                    - message: 'coreDumps size cannot be changed on a live cluster
-                        while the role collects dumps: it is part of a StatefulSet
-                        volumeClaimTemplate, which Kubernetes forbids changing in
-                        place. Delete the MemgraphCluster (its claims are retained
-                        under the default retention policy) and recreate it with the
-                        new value'
+                    - message: 'coreDumps size cannot shrink while the role collects
+                        dumps: Kubernetes cannot shrink a volume. It can only grow'
                       rule: has(self.size) == has(oldSelf.size) && (!has(self.size)
                         || quantity(string(self.size)).compareTo(quantity(string(oldSelf.size)))
-                        == 0)
+                        >= 0)
                   storageClassName:
                     description: |-
                       storageClassName is the StorageClass backing every core dumps claim of
@@ -2854,7 +2848,8 @@ spec:
                         default: 1Gi
                         description: |-
                           libPVCSize is the requested size of the lib storage claim, which backs
-                          Memgraph's data directory (snapshots, WAL, and durability metadata).
+                          Memgraph's data directory (snapshots, WAL, and durability metadata). It
+                          can grow on a live cluster and never shrink.
                         pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                         x-kubernetes-int-or-string: true
                       libStorageAccessMode:
@@ -2883,7 +2878,7 @@ spec:
                         default: 1Gi
                         description: |-
                           logPVCSize is the requested size of the log storage claim, which backs
-                          Memgraph's log file.
+                          Memgraph's log file. It can grow on a live cluster and never shrink.
                         pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                         x-kubernetes-int-or-string: true
                       logStorageAccessMode:
@@ -2915,14 +2910,11 @@ spec:
                       rule: has(self.libStorageClassName) == has(oldSelf.libStorageClassName)
                         && (!has(self.libStorageClassName) || self.libStorageClassName
                         == oldSelf.libStorageClassName)
-                    - message: 'libPVCSize cannot be changed on a live cluster: it
-                        is part of a StatefulSet volumeClaimTemplate, which Kubernetes
-                        forbids changing in place. Delete the MemgraphCluster (its
-                        claims are retained under the default retention policy) and
-                        recreate it with the new value'
+                    - message: 'libPVCSize cannot shrink: Kubernetes cannot shrink
+                        a volume. It can only grow'
                       rule: has(self.libPVCSize) == has(oldSelf.libPVCSize) && (!has(self.libPVCSize)
                         || quantity(string(self.libPVCSize)).compareTo(quantity(string(oldSelf.libPVCSize)))
-                        == 0)
+                        >= 0)
                     - message: 'libStorageAccessMode cannot be changed on a live cluster:
                         it is part of a StatefulSet volumeClaimTemplate, which Kubernetes
                         forbids changing in place. Delete the MemgraphCluster (its
@@ -2948,15 +2940,12 @@ spec:
                         : true) || (has(self.logStorageClassName) == has(oldSelf.logStorageClassName)
                         && (!has(self.logStorageClassName) || self.logStorageClassName
                         == oldSelf.logStorageClassName))'
-                    - message: 'logPVCSize cannot be changed on a live cluster while
-                        the log claim exists: it is part of a StatefulSet volumeClaimTemplate,
-                        which Kubernetes forbids changing in place. Delete the MemgraphCluster
-                        (its claims are retained under the default retention policy)
-                        and recreate it with the new value'
+                    - message: 'logPVCSize cannot shrink while the log claim exists:
+                        Kubernetes cannot shrink a volume. It can only grow'
                       rule: '!(has(self.createLogStorageClaim) ? self.createLogStorageClaim
                         : true) || (has(self.logPVCSize) == has(oldSelf.logPVCSize)
                         && (!has(self.logPVCSize) || quantity(string(self.logPVCSize)).compareTo(quantity(string(oldSelf.logPVCSize)))
-                        == 0))'
+                        >= 0))'
                     - message: 'logStorageAccessMode cannot be changed on a live cluster
                         while the log claim exists: it is part of a StatefulSet volumeClaimTemplate,
                         which Kubernetes forbids changing in place. Delete the MemgraphCluster
@@ -2994,7 +2983,8 @@ spec:
                         default: 1Gi
                         description: |-
                           libPVCSize is the requested size of the lib storage claim, which backs
-                          Memgraph's data directory (snapshots, WAL, and durability metadata).
+                          Memgraph's data directory (snapshots, WAL, and durability metadata). It
+                          can grow on a live cluster and never shrink.
                         pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                         x-kubernetes-int-or-string: true
                       libStorageAccessMode:
@@ -3023,7 +3013,7 @@ spec:
                         default: 1Gi
                         description: |-
                           logPVCSize is the requested size of the log storage claim, which backs
-                          Memgraph's log file.
+                          Memgraph's log file. It can grow on a live cluster and never shrink.
                         pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                         x-kubernetes-int-or-string: true
                       logStorageAccessMode:
@@ -3055,14 +3045,11 @@ spec:
                       rule: has(self.libStorageClassName) == has(oldSelf.libStorageClassName)
                         && (!has(self.libStorageClassName) || self.libStorageClassName
                         == oldSelf.libStorageClassName)
-                    - message: 'libPVCSize cannot be changed on a live cluster: it
-                        is part of a StatefulSet volumeClaimTemplate, which Kubernetes
-                        forbids changing in place. Delete the MemgraphCluster (its
-                        claims are retained under the default retention policy) and
-                        recreate it with the new value'
+                    - message: 'libPVCSize cannot shrink: Kubernetes cannot shrink
+                        a volume. It can only grow'
                       rule: has(self.libPVCSize) == has(oldSelf.libPVCSize) && (!has(self.libPVCSize)
                         || quantity(string(self.libPVCSize)).compareTo(quantity(string(oldSelf.libPVCSize)))
-                        == 0)
+                        >= 0)
                     - message: 'libStorageAccessMode cannot be changed on a live cluster:
                         it is part of a StatefulSet volumeClaimTemplate, which Kubernetes
                         forbids changing in place. Delete the MemgraphCluster (its
@@ -3088,15 +3075,12 @@ spec:
                         : true) || (has(self.logStorageClassName) == has(oldSelf.logStorageClassName)
                         && (!has(self.logStorageClassName) || self.logStorageClassName
                         == oldSelf.logStorageClassName))'
-                    - message: 'logPVCSize cannot be changed on a live cluster while
-                        the log claim exists: it is part of a StatefulSet volumeClaimTemplate,
-                        which Kubernetes forbids changing in place. Delete the MemgraphCluster
-                        (its claims are retained under the default retention policy)
-                        and recreate it with the new value'
+                    - message: 'logPVCSize cannot shrink while the log claim exists:
+                        Kubernetes cannot shrink a volume. It can only grow'
                       rule: '!(has(self.createLogStorageClaim) ? self.createLogStorageClaim
                         : true) || (has(self.logPVCSize) == has(oldSelf.logPVCSize)
                         && (!has(self.logPVCSize) || quantity(string(self.logPVCSize)).compareTo(quantity(string(oldSelf.logPVCSize)))
-                        == 0))'
+                        >= 0))'
                     - message: 'logStorageAccessMode cannot be changed on a live cluster
                         while the log claim exists: it is part of a StatefulSet volumeClaimTemplate,
                         which Kubernetes forbids changing in place. Delete the MemgraphCluster

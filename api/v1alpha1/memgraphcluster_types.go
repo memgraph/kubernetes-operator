@@ -187,9 +187,10 @@ const (
 
 	// ConditionConverged is True when the observed cluster matches the declared
 	// topology: no registration commands are pending and both StatefulSets'
-	// replica counts equal the declared counts. `kubectl wait
-	// --for=condition=Converged` therefore means a scale is genuinely finished,
-	// not merely accepted.
+	// replica counts equal the declared counts, and every claim a pod mounts
+	// holds the storage size the spec asks for. `kubectl wait
+	// --for=condition=Converged` therefore means a scale or a resize is
+	// genuinely finished, not merely accepted.
 	ConditionConverged = "Converged"
 
 	// ConditionUpdated is True when every workload pod runs the pod template the
@@ -296,6 +297,40 @@ const (
 	// setting or a typo would not, and the operator restarts nothing on a
 	// guess; it asks again next pass.
 	ReasonFlagsUnclassified = "FlagsUnclassified"
+
+	// ReasonVolumeExpansionInProgress is set while a grown storage size is not
+	// usable yet: claims are being patched to it, the StatefulSet is being
+	// recreated around its pods with the new claim template, or a claim a pod
+	// mounts has not reached the size it asks for. The message names the
+	// claims and the pods mounting them, and the first error the storage
+	// driver reports while it retries, which is what says why a resize does
+	// not finish (an Azure VM size that cannot change an attached disk, for
+	// one). Kubernetes does the growing — the
+	// storage provider the volume, the kubelet the filesystem, under the
+	// running pod — so this clears on its own on a driver that expands online.
+	// The operator restarts nothing for it: a driver that cannot grow a volume
+	// in use waits until no pod uses the claim, which a restart does not give
+	// it, so this persisting on such a driver means the named pod has to be
+	// taken down for the length of the resize, which is the user's call. A
+	// claim nothing mounts counts as grown once its volume has: its filesystem
+	// grows when a pod next mounts it.
+	ReasonVolumeExpansionInProgress = "VolumeExpansionInProgress"
+
+	// ReasonVolumeExpansionRefused is set when the API server refused to grow a
+	// claim, almost always because its StorageClass does not set
+	// allowVolumeExpansion. The message names the claim and carries the
+	// refusal verbatim. The StatefulSet is left as it is and the patch is
+	// retried every pass, so allowing expansion on the class is all it takes;
+	// a size cannot be lowered back, because Kubernetes cannot shrink a
+	// volume.
+	ReasonVolumeExpansionRefused = "VolumeExpansionRefused"
+
+	// ReasonVolumeExpansionFailed is set when the storage provider accepted a
+	// claim's new size and then gave up on it, which the claim reports as
+	// ControllerResizeInfeasible or NodeResizeInfeasible. The message names the
+	// claim and carries its error. Retrying is the storage provider's business,
+	// not the operator's.
+	ReasonVolumeExpansionFailed = "VolumeExpansionFailed"
 
 	// ReasonRetirementInProgress is set while a lowered count of either role is
 	// being carried out: the members beyond the declared count are still part of
@@ -466,29 +501,44 @@ type AWSCredentialsSpec struct {
 // a values file is mechanical.
 //
 // The fields below become StatefulSet volumeClaimTemplates, which Kubernetes
-// treats as immutable, so every one of them is pinned by a transition rule:
-// changing it on a live MemgraphCluster is refused at admission with the
-// procedure that works, rather than accepted and then rejected by the API
-// server on every apply forever. Recreating the StatefulSet around its pods is
-// not an option the operator offers — the StatefulSet controller only readopts
-// pods in ascending ordinal order, MAIN first, which deadlocks the rolling
-// restart. The log claim's knobs are pinned only while the claim exists;
-// nothing reads them otherwise. A size given in other units is not a change:
-// quantities are compared as quantities.
+// treats as immutable. The sizes may grow on a live cluster and never shrink,
+// because Kubernetes cannot shrink a volume: the operator patches every claim
+// of the role, retained ones included, then deletes the StatefulSet with its
+// pods and claims orphaned and recreates it with the new size. That restarts
+// nothing — the StatefulSet controller adopts an orphaned pod when its volumes
+// name the claims its ordinal gets, which a size leaves as it was — and
+// neither does the resize itself: the storage driver grows each volume under
+// its running pod, and Converged waits for it. A driver that cannot grow a
+// volume in use leaves the resize waiting until the user takes the pod down.
+// The StorageClass has to allow volume expansion; when it does not, the API
+// server refuses the claim patch, the StatefulSet is left as it is and the
+// refusal is reported on Converged.
+//
+// Everything else here is pinned by a transition rule: changing it on a live
+// MemgraphCluster is refused at admission with the procedure that works,
+// rather than accepted and then rejected by the API server on every apply
+// forever. Recreating the StatefulSet is not an answer for those: a class or
+// an access mode cannot change on an existing claim, and adding or removing a
+// claim template changes the pods' volumes, which the StatefulSet controller
+// only repairs in ascending ordinal order, MAIN first, which deadlocks the
+// rolling restart. The log claim's knobs are pinned only while the claim
+// exists; nothing reads them otherwise. A size given in other units is not a
+// change: quantities are compared as quantities.
 //
 // The has() guards keep every rule evaluable against the block's empty object
 // default, which the API server checks before nested field defaults apply.
 //
 // +kubebuilder:validation:XValidation:rule="has(self.libStorageClassName) == has(oldSelf.libStorageClassName) && (!has(self.libStorageClassName) || self.libStorageClassName == oldSelf.libStorageClassName)",message="libStorageClassName cannot be changed on a live cluster: it is part of a StatefulSet volumeClaimTemplate, which Kubernetes forbids changing in place. Delete the MemgraphCluster (its claims are retained under the default retention policy) and recreate it with the new value"
-// +kubebuilder:validation:XValidation:rule="has(self.libPVCSize) == has(oldSelf.libPVCSize) && (!has(self.libPVCSize) || quantity(string(self.libPVCSize)).compareTo(quantity(string(oldSelf.libPVCSize))) == 0)",message="libPVCSize cannot be changed on a live cluster: it is part of a StatefulSet volumeClaimTemplate, which Kubernetes forbids changing in place. Delete the MemgraphCluster (its claims are retained under the default retention policy) and recreate it with the new value"
+// +kubebuilder:validation:XValidation:rule="has(self.libPVCSize) == has(oldSelf.libPVCSize) && (!has(self.libPVCSize) || quantity(string(self.libPVCSize)).compareTo(quantity(string(oldSelf.libPVCSize))) >= 0)",message="libPVCSize cannot shrink: Kubernetes cannot shrink a volume. It can only grow"
 // +kubebuilder:validation:XValidation:rule="has(self.libStorageAccessMode) == has(oldSelf.libStorageAccessMode) && (!has(self.libStorageAccessMode) || self.libStorageAccessMode == oldSelf.libStorageAccessMode)",message="libStorageAccessMode cannot be changed on a live cluster: it is part of a StatefulSet volumeClaimTemplate, which Kubernetes forbids changing in place. Delete the MemgraphCluster (its claims are retained under the default retention policy) and recreate it with the new value"
 // +kubebuilder:validation:XValidation:rule="(has(self.createLogStorageClaim) ? self.createLogStorageClaim : true) == (has(oldSelf.createLogStorageClaim) ? oldSelf.createLogStorageClaim : true)",message="createLogStorageClaim cannot be changed on a live cluster: it adds or removes a StatefulSet volumeClaimTemplate, which Kubernetes forbids in place. Delete the MemgraphCluster (its claims are retained under the default retention policy) and recreate it with the new setting"
 // +kubebuilder:validation:XValidation:rule="!(has(self.createLogStorageClaim) ? self.createLogStorageClaim : true) || (has(self.logStorageClassName) == has(oldSelf.logStorageClassName) && (!has(self.logStorageClassName) || self.logStorageClassName == oldSelf.logStorageClassName))",message="logStorageClassName cannot be changed on a live cluster while the log claim exists: it is part of a StatefulSet volumeClaimTemplate, which Kubernetes forbids changing in place. Delete the MemgraphCluster (its claims are retained under the default retention policy) and recreate it with the new value"
-// +kubebuilder:validation:XValidation:rule="!(has(self.createLogStorageClaim) ? self.createLogStorageClaim : true) || (has(self.logPVCSize) == has(oldSelf.logPVCSize) && (!has(self.logPVCSize) || quantity(string(self.logPVCSize)).compareTo(quantity(string(oldSelf.logPVCSize))) == 0))",message="logPVCSize cannot be changed on a live cluster while the log claim exists: it is part of a StatefulSet volumeClaimTemplate, which Kubernetes forbids changing in place. Delete the MemgraphCluster (its claims are retained under the default retention policy) and recreate it with the new value"
+// +kubebuilder:validation:XValidation:rule="!(has(self.createLogStorageClaim) ? self.createLogStorageClaim : true) || (has(self.logPVCSize) == has(oldSelf.logPVCSize) && (!has(self.logPVCSize) || quantity(string(self.logPVCSize)).compareTo(quantity(string(oldSelf.logPVCSize))) >= 0))",message="logPVCSize cannot shrink while the log claim exists: Kubernetes cannot shrink a volume. It can only grow"
 // +kubebuilder:validation:XValidation:rule="!(has(self.createLogStorageClaim) ? self.createLogStorageClaim : true) || (has(self.logStorageAccessMode) == has(oldSelf.logStorageAccessMode) && (!has(self.logStorageAccessMode) || self.logStorageAccessMode == oldSelf.logStorageAccessMode))",message="logStorageAccessMode cannot be changed on a live cluster while the log claim exists: it is part of a StatefulSet volumeClaimTemplate, which Kubernetes forbids changing in place. Delete the MemgraphCluster (its claims are retained under the default retention policy) and recreate it with the new value"
 type RoleStorageSpec struct {
 	// libPVCSize is the requested size of the lib storage claim, which backs
-	// Memgraph's data directory (snapshots, WAL, and durability metadata).
+	// Memgraph's data directory (snapshots, WAL, and durability metadata). It
+	// can grow on a live cluster and never shrink.
 	// +kubebuilder:default="1Gi"
 	// +optional
 	LibPVCSize *resource.Quantity `json:"libPVCSize,omitempty"`
@@ -525,7 +575,7 @@ type RoleStorageSpec struct {
 	CreateLogStorageClaim *bool `json:"createLogStorageClaim,omitempty"`
 
 	// logPVCSize is the requested size of the log storage claim, which backs
-	// Memgraph's log file.
+	// Memgraph's log file. It can grow on a live cluster and never shrink.
 	// +kubebuilder:default="1Gi"
 	// +optional
 	LogPVCSize *resource.Quantity `json:"logPVCSize,omitempty"`
@@ -586,16 +636,18 @@ type StorageSpec struct {
 // The block's presence is pinned by a transition rule on CoreDumpsSpec, not
 // here: a rule on a block never fires when the block is added or removed
 // whole. The rule below fires only while the block exists in both versions,
-// which is exactly "while the role collects dumps", and pins the one field
-// that lands in the claim template. The has() guard keeps it evaluable
+// which is exactly "while the role collects dumps", and lets the one field
+// that lands in the claim template grow but never shrink, the way the
+// storage sizes do (see RoleStorageSpec). The has() guard keeps it evaluable
 // against a bare {} the API server checks before the field default applies.
 //
-// +kubebuilder:validation:XValidation:rule="has(self.size) == has(oldSelf.size) && (!has(self.size) || quantity(string(self.size)).compareTo(quantity(string(oldSelf.size))) == 0)",message="coreDumps size cannot be changed on a live cluster while the role collects dumps: it is part of a StatefulSet volumeClaimTemplate, which Kubernetes forbids changing in place. Delete the MemgraphCluster (its claims are retained under the default retention policy) and recreate it with the new value"
+// +kubebuilder:validation:XValidation:rule="has(self.size) == has(oldSelf.size) && (!has(self.size) || quantity(string(self.size)).compareTo(quantity(string(oldSelf.size))) >= 0)",message="coreDumps size cannot shrink while the role collects dumps: Kubernetes cannot shrink a volume. It can only grow"
 type RoleCoreDumpsSpec struct {
 	// size is the requested size of the role's core dumps claim. A dump is
 	// roughly as large as the crashing process' resident memory, which is why
 	// this is per role: a data instance holds the graph, a coordinator holds
-	// Raft state. Size it against the role's memory limit, not its data.
+	// Raft state. Size it against the role's memory limit, not its data. It
+	// can grow while the role collects dumps and never shrink.
 	// +kubebuilder:default="10Gi"
 	// +optional
 	Size *resource.Quantity `json:"size,omitempty"`

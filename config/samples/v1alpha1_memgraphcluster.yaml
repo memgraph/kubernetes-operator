@@ -45,11 +45,13 @@ spec:
     # claim. The storage class names have no default and are commented out on
     # purpose: left unset, each claim uses the cluster's default StorageClass,
     # while the empty string turns dynamic provisioning off and binds a
-    # pre-created PersistentVolume. Sizes, access modes and classes become
-    # StatefulSet volumeClaimTemplates, which Kubernetes treats as immutable,
-    # so admission refuses changing any of them on a live cluster: delete the
-    # MemgraphCluster (the claims are retained) and recreate it with the new
-    # values. Setting createLogStorageClaim to false drops the log claim for
+    # pre-created PersistentVolume. The sizes can grow on a live cluster, never
+    # shrink: the operator grows every claim under its running pod
+    # (docs/storage-resize.md), on a class with allowVolumeExpansion. Access
+    # modes and classes become StatefulSet volumeClaimTemplates, which
+    # Kubernetes treats as immutable, so admission refuses changing them on a
+    # live cluster: delete the MemgraphCluster (the claims are retained) and
+    # recreate it with the new values. Setting createLogStorageClaim to false drops the log claim for
     # that role and passes an empty --log-file, leaving stderr (and so
     # `kubectl logs`) as the only log sink; the other log* knobs are then
     # ignored, and free to change. Flipping it is refused for the same
@@ -64,7 +66,7 @@ spec:
       logStorageAccessMode: ReadWriteOnce
       # logStorageClassName: standard
     data:
-      libPVCSize: 1Gi
+      libPVCSize: 5Gi
       libStorageAccessMode: ReadWriteOnce
       # libStorageClassName: standard
       createLogStorageClaim: true
@@ -89,7 +91,8 @@ spec:
     # Per role, because only these two answers differ between them: whether the
     # role collects dumps at all — the block being present — and how much room
     # one needs; a dump is about as large as the crashing process' memory, and a
-    # data instance holds the graph while a coordinator holds Raft state.
+    # data instance holds the graph while a coordinator holds Raft state. The
+    # size can grow on a live cluster like the storage sizes.
     # coordinators:
     # size: 10Gi
     # data:
@@ -283,7 +286,8 @@ spec:
       # podAntiAffinity: {}
       # priorityClassName: system-cluster-critical
     data:
-      nodeSelector: {}
+      nodeSelector:
+        agentpool: resize
         # role: data-node
       tolerations: []
       topologySpreadConstraints: []

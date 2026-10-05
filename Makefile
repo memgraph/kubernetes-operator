@@ -108,6 +108,9 @@ setup-test-e2e: ## Set up a multi-node Kind cluster for e2e tests if it does not
 	# And no Prometheus Operator, so the monitoring scenario installs the one
 	# CRD the operator builds against; no Prometheus runs in the suite.
 	KUBECTL=$(KUBECTL) hack/kind-prometheus-crds.sh
+	# And its default provisioner cannot grow a volume, so the resize scenario
+	# gets a CSI driver that can, behind a StorageClass of its own.
+	KUBECTL=$(KUBECTL) hack/kind-csi-hostpath.sh
 
 # The generous timeout covers the whole suite end to end: building the manager
 # image, pulling real Memgraph images, and bootstrapping an HA cluster in Kind.
