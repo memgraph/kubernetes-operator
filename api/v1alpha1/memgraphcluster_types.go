@@ -42,6 +42,15 @@ const (
 	DefaultLicenseSecretKey      = "MEMGRAPH_ENTERPRISE_LICENSE"
 	DefaultOrganizationSecretKey = "MEMGRAPH_ORGANIZATION_NAME"
 
+	// The keys of the awsCredentials Secret, fixed rather than knobs: they are
+	// the names the AWS SDKs and the CLI read the same four values under, and
+	// the credentials are the ones the core dumps uploader's Secret already
+	// holds, so one Secret can serve both.
+	AWSAccessKeySecretKey   = "AWS_ACCESS_KEY_ID"
+	AWSSecretKeySecretKey   = "AWS_SECRET_ACCESS_KEY"
+	AWSRegionSecretKey      = "AWS_REGION"
+	AWSEndpointURLSecretKey = "AWS_ENDPOINT_URL"
+
 	DefaultCoreDumpsSize        = "10Gi"
 	DefaultConfigureCorePattern = true
 
@@ -124,6 +133,16 @@ const (
 
 	// EnvOrganization holds the organization name, wired from the secrets block.
 	EnvOrganization = "MEMGRAPH_ORGANIZATION_NAME"
+
+	// The EnvAWS variables hold a data instance's AWS configuration, wired
+	// from the awsCredentials block. Memgraph does not read them itself: the
+	// command line hands them to --aws-access-key, --aws-secret-key,
+	// --aws-region and --aws-endpoint-url through Kubernetes' $(VAR)
+	// expansion, so the pod spec names the Secret and never a value.
+	EnvAWSAccessKey   = "MEMGRAPH_AWS_ACCESS_KEY"
+	EnvAWSSecretKey   = "MEMGRAPH_AWS_SECRET_KEY"
+	EnvAWSRegion      = "MEMGRAPH_AWS_REGION"
+	EnvAWSEndpointURL = "MEMGRAPH_AWS_ENDPOINT_URL"
 
 	// EnvPodName carries the pod's own name, from which a coordinator derives
 	// its zero-based ordinal identity and stable hostname at startup.
@@ -406,6 +425,38 @@ type SecretsSpec struct {
 	// +kubebuilder:default="MEMGRAPH_ORGANIZATION_NAME"
 	// +optional
 	OrganizationKey string `json:"organizationKey,omitempty"`
+}
+
+// AWSCredentialsSpec references an existing Kubernetes Secret holding the AWS
+// configuration of the data instances, all four values under fixed keys:
+// AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION and AWS_ENDPOINT_URL.
+// Every key is required, because a flag fed from a missing optional key would
+// reach Memgraph as the unexpanded $(VAR) text; an instance talking to AWS
+// itself sets AWS_ENDPOINT_URL to the empty string. Like the license, the
+// Secret is consumed by reference only, and on two paths. A data instance
+// starts with the Secret's values as --aws-access-key, --aws-secret-key,
+// --aws-region and --aws-endpoint-url, which Memgraph takes over the values it
+// persisted from an earlier run. A running one gets a change written to the
+// Secret through SET DATABASE SETTING, read before it is written, without a
+// restart. Coordinators get none of them: they run no queries that read from
+// AWS.
+//
+// Pointing at a differently named Secret, or adding the block, is a
+// pod-template change and rolls the data instances, though the live SET
+// reaches every ready one first. Removing the block issues no SET: Memgraph
+// persists all four settings across restarts, so an instance keeps the last
+// values until SET DATABASE SETTING clears them, for example
+// SET DATABASE SETTING "aws.access_key" TO "".
+type AWSCredentialsSpec struct {
+	// secretName names a Secret in the cluster's namespace holding the access
+	// key under AWS_ACCESS_KEY_ID, the secret key under AWS_SECRET_ACCESS_KEY,
+	// the region under AWS_REGION and the endpoint URL under
+	// AWS_ENDPOINT_URL.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
+	// +required
+	SecretName string `json:"secretName"`
 }
 
 // RoleStorageSpec configures the two PersistentVolumeClaims every pod of a
@@ -1084,7 +1135,7 @@ type ExtraEnvSpec struct {
 	// +listType=map
 	// +listMapKey=name
 	// +kubebuilder:validation:MaxItems=64
-	// +kubebuilder:validation:XValidation:rule="self.all(e, !(e.name in ['MEMGRAPH_ENTERPRISE_LICENSE', 'MEMGRAPH_ORGANIZATION_NAME', 'POD_NAME']))",message="extraEnv must not set MEMGRAPH_ENTERPRISE_LICENSE or MEMGRAPH_ORGANIZATION_NAME (they come from the secrets block) or POD_NAME (it carries the pod's own identity)"
+	// +kubebuilder:validation:XValidation:rule="self.all(e, !(e.name in ['MEMGRAPH_ENTERPRISE_LICENSE', 'MEMGRAPH_ORGANIZATION_NAME', 'MEMGRAPH_AWS_ACCESS_KEY', 'MEMGRAPH_AWS_SECRET_KEY', 'MEMGRAPH_AWS_REGION', 'MEMGRAPH_AWS_ENDPOINT_URL', 'POD_NAME']))",message="extraEnv must not set MEMGRAPH_ENTERPRISE_LICENSE, MEMGRAPH_ORGANIZATION_NAME or MEMGRAPH_AWS_* (they come from the secrets and awsCredentials blocks) or POD_NAME (it carries the pod's own identity)"
 	// +optional
 	Coordinators []EnvVar `json:"coordinators,omitempty"`
 
@@ -1092,7 +1143,7 @@ type ExtraEnvSpec struct {
 	// +listType=map
 	// +listMapKey=name
 	// +kubebuilder:validation:MaxItems=64
-	// +kubebuilder:validation:XValidation:rule="self.all(e, !(e.name in ['MEMGRAPH_ENTERPRISE_LICENSE', 'MEMGRAPH_ORGANIZATION_NAME', 'POD_NAME']))",message="extraEnv must not set MEMGRAPH_ENTERPRISE_LICENSE or MEMGRAPH_ORGANIZATION_NAME (they come from the secrets block) or POD_NAME (it carries the pod's own identity)"
+	// +kubebuilder:validation:XValidation:rule="self.all(e, !(e.name in ['MEMGRAPH_ENTERPRISE_LICENSE', 'MEMGRAPH_ORGANIZATION_NAME', 'MEMGRAPH_AWS_ACCESS_KEY', 'MEMGRAPH_AWS_SECRET_KEY', 'MEMGRAPH_AWS_REGION', 'MEMGRAPH_AWS_ENDPOINT_URL', 'POD_NAME']))",message="extraEnv must not set MEMGRAPH_ENTERPRISE_LICENSE, MEMGRAPH_ORGANIZATION_NAME or MEMGRAPH_AWS_* (they come from the secrets and awsCredentials blocks) or POD_NAME (it carries the pod's own identity)"
 	// +optional
 	Data []EnvVar `json:"data,omitempty"`
 }
@@ -1273,11 +1324,11 @@ type InitContainersSpec struct {
 // The ports, the addresses the pods listen on, the coordinator identity, the
 // data directory, the log file, the TLS files and the metrics format are
 // excluded: they must stay consistent with the addresses the operator
-// registers, the ports it declares and the files it mounts. So are the four
-// credential flags (aws-access-key, aws-secret-key, license-key,
-// organization-name), because the CR carries no secret material; the license
-// comes from the secrets block, and the AWS keys are set with SET DATABASE
-// SETTING by hand.
+// registers, the ports it declares and the files it mounts. So are the license
+// flags (license-key, organization-name), because the CR carries no secret
+// material and the license comes from the secrets block, and the four AWS
+// flags (aws-access-key, aws-secret-key, aws-region, aws-endpoint-url),
+// which come together from the awsCredentials block's Secret.
 //
 // Values are checked for shape only — one line, at most 4096 characters —
 // with exceptions for the keys everyone touches first: log-level is checked
@@ -1290,7 +1341,7 @@ type FlagsSpec struct {
 	// +kubebuilder:validation:XValidation:rule="self.all(k, !(k.replace('-', '_') in ['enabled_reads_on_main', 'sync_failover_only', 'global_read_only']) || self[k] in ['true', 'false'])",message="enabled_reads_on_main, sync_failover_only and global_read_only take \"true\" or \"false\""
 	// +kubebuilder:validation:XValidation:rule="self.all(k, !(k.replace('-', '_') in ['instance_down_timeout_sec', 'instance_health_check_frequency_sec', 'max_failover_replica_lag', 'max_replica_read_lag', 'deltas_batch_progress_size']) || self[k].matches('^[0-9]+$'))",message="instance_down_timeout_sec, instance_health_check_frequency_sec, max_failover_replica_lag, max_replica_read_lag and deltas_batch_progress_size take a non-negative integer"
 	// +kubebuilder:validation:XValidation:rule="self.all(k, k.matches('^[A-Za-z][A-Za-z0-9_-]*$'))",message="flags keys are flag names without leading dashes, such as log-level"
-	// +kubebuilder:validation:XValidation:rule="self.all(k, !k.replace('-', '_').matches('^(bolt_port|management_port|coordinator_port|coordinator_id|coordinator_hostname|data_directory|log_file|bolt_cert_file|bolt_key_file|cluster_cert_file|cluster_key_file|cluster_ca_file|metrics_format|metrics_port|monitoring_port|bolt_address|monitoring_address|aws_access_key|aws_secret_key|license_key|organization_name)$'))",message="flags must not set a port, a listen address, the coordinator identity, the data directory, the log file, a TLS file, the metrics format or a credential (aws-access-key, aws-secret-key, license-key, organization-name): the operator derives the former, and the latter is secret material that comes from the secrets block or SET DATABASE SETTING"
+	// +kubebuilder:validation:XValidation:rule="self.all(k, !k.replace('-', '_').matches('^(bolt_port|management_port|coordinator_port|coordinator_id|coordinator_hostname|data_directory|log_file|bolt_cert_file|bolt_key_file|cluster_cert_file|cluster_key_file|cluster_ca_file|metrics_format|metrics_port|monitoring_port|bolt_address|monitoring_address|aws_access_key|aws_secret_key|aws_region|aws_endpoint_url|license_key|organization_name)$'))",message="flags must not set a port, a listen address, the coordinator identity, the data directory, the log file, a TLS file, the metrics format, the license (license-key, organization-name) or the AWS configuration (aws-access-key, aws-secret-key, aws-region, aws-endpoint-url): the operator derives the former, and the latter come from the secrets and awsCredentials blocks"
 	// +kubebuilder:validation:XValidation:rule="self.all(k, self.all(j, k == j || k.replace('-', '_') != j.replace('-', '_')))",message="two keys spell the same flag"
 	// +kubebuilder:validation:XValidation:rule="self.all(k, k.replace('-', '_') != 'log_level' || self[k] in ['TRACE', 'DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'])",message="log-level must be one of TRACE, DEBUG, INFO, WARNING, ERROR, CRITICAL"
 	// +optional
@@ -1300,7 +1351,7 @@ type FlagsSpec struct {
 	// +kubebuilder:validation:MaxProperties=64
 	// +kubebuilder:validation:XValidation:rule="self.all(k, !(k.replace('-', '_') in ['enabled_reads_on_main', 'sync_failover_only', 'global_read_only', 'instance_down_timeout_sec', 'instance_health_check_frequency_sec', 'max_failover_replica_lag', 'max_replica_read_lag', 'deltas_batch_progress_size']))",message="a coordinator setting is set under flags.coordinators, not flags.data"
 	// +kubebuilder:validation:XValidation:rule="self.all(k, k.matches('^[A-Za-z][A-Za-z0-9_-]*$'))",message="flags keys are flag names without leading dashes, such as log-level"
-	// +kubebuilder:validation:XValidation:rule="self.all(k, !k.replace('-', '_').matches('^(bolt_port|management_port|coordinator_port|coordinator_id|coordinator_hostname|data_directory|log_file|bolt_cert_file|bolt_key_file|cluster_cert_file|cluster_key_file|cluster_ca_file|metrics_format|metrics_port|monitoring_port|bolt_address|monitoring_address|aws_access_key|aws_secret_key|license_key|organization_name)$'))",message="flags must not set a port, a listen address, the coordinator identity, the data directory, the log file, a TLS file, the metrics format or a credential (aws-access-key, aws-secret-key, license-key, organization-name): the operator derives the former, and the latter is secret material that comes from the secrets block or SET DATABASE SETTING"
+	// +kubebuilder:validation:XValidation:rule="self.all(k, !k.replace('-', '_').matches('^(bolt_port|management_port|coordinator_port|coordinator_id|coordinator_hostname|data_directory|log_file|bolt_cert_file|bolt_key_file|cluster_cert_file|cluster_key_file|cluster_ca_file|metrics_format|metrics_port|monitoring_port|bolt_address|monitoring_address|aws_access_key|aws_secret_key|aws_region|aws_endpoint_url|license_key|organization_name)$'))",message="flags must not set a port, a listen address, the coordinator identity, the data directory, the log file, a TLS file, the metrics format, the license (license-key, organization-name) or the AWS configuration (aws-access-key, aws-secret-key, aws-region, aws-endpoint-url): the operator derives the former, and the latter come from the secrets and awsCredentials blocks"
 	// +kubebuilder:validation:XValidation:rule="self.all(k, self.all(j, k == j || k.replace('-', '_') != j.replace('-', '_')))",message="two keys spell the same flag"
 	// +kubebuilder:validation:XValidation:rule="self.all(k, k.replace('-', '_') != 'log_level' || self[k] in ['TRACE', 'DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'])",message="log-level must be one of TRACE, DEBUG, INFO, WARNING, ERROR, CRITICAL"
 	// +optional
@@ -1913,6 +1964,13 @@ type MemgraphClusterSpec struct {
 	// +kubebuilder:default={}
 	// +optional
 	Secrets SecretsSpec `json:"secrets,omitzero"`
+
+	// awsCredentials references the Secret holding the AWS access key,
+	// secret key, region and endpoint URL the data instances use for their
+	// AWS integration (LOAD PARQUET and the other S3 readers). Absent, the
+	// operator sets none of them.
+	// +optional
+	AWSCredentials *AWSCredentialsSpec `json:"awsCredentials,omitempty"`
 
 	// storage configures the persistent volumes backing both roles and their
 	// retention on cluster deletion.

@@ -158,6 +158,11 @@ func DataStatefulSet(cluster *memgraphcomv1alpha1.MemgraphCluster, replicas int3
 
 	container := memgraphContainer(spec, role)
 	container.Args = commonArgs(spec, role)
+	if spec.awsCredentialsSecret != "" {
+		env, args := awsCredentials(spec.awsCredentialsSecret)
+		container.Env = append(env, container.Env...)
+		container.Args = append(container.Args, args...)
+	}
 	container.Ports = []corev1.ContainerPort{
 		{Name: boltPortName, ContainerPort: memgraphcomv1alpha1.BoltPort},
 		{Name: managementPortName, ContainerPort: memgraphcomv1alpha1.ManagementPort},
@@ -251,6 +256,44 @@ func commonArgs(spec normalizedSpec, role normalizedRole) []string {
 		)
 	}
 	return args
+}
+
+// awsCredentials wires a data instance's AWS configuration from the Secret:
+// four environment variables read from it, and the four flags that hand them
+// to Memgraph through Kubernetes' $(VAR) expansion, so the pod spec carries
+// the Secret's name and never its values. They are flags, not Memgraph's own
+// AWS_* environment fallback, because Memgraph restores a persisted setting
+// over the environment but not over a flag given on the command line: only
+// the flag makes a restart pick up what the Secret holds now. Memgraph's
+// gflags has no --fromenv to keep them off the command line instead. Every
+// key is required: Kubernetes leaves a reference to an undefined variable as
+// literal text, so an optional key left out would start Memgraph on the
+// string "$(MEMGRAPH_AWS_REGION)".
+func awsCredentials(secret string) ([]corev1.EnvVar, []string) {
+	fromSecret := func(name, key string) corev1.EnvVar {
+		return corev1.EnvVar{
+			Name: name,
+			ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: secret},
+					Key:                  key,
+				},
+			},
+		}
+	}
+	values := []struct{ flag, variable, key string }{
+		{"aws-access-key", memgraphcomv1alpha1.EnvAWSAccessKey, memgraphcomv1alpha1.AWSAccessKeySecretKey},
+		{"aws-secret-key", memgraphcomv1alpha1.EnvAWSSecretKey, memgraphcomv1alpha1.AWSSecretKeySecretKey},
+		{"aws-region", memgraphcomv1alpha1.EnvAWSRegion, memgraphcomv1alpha1.AWSRegionSecretKey},
+		{"aws-endpoint-url", memgraphcomv1alpha1.EnvAWSEndpointURL, memgraphcomv1alpha1.AWSEndpointURLSecretKey},
+	}
+	env := make([]corev1.EnvVar, 0, len(values))
+	args := make([]string, 0, len(values))
+	for _, value := range values {
+		env = append(env, fromSecret(value.variable, value.key))
+		args = append(args, "--"+value.flag+"=$("+value.variable+")")
+	}
+	return env, args
 }
 
 // memgraphContainer builds the parts of the Memgraph container shared by both

@@ -89,8 +89,8 @@ type MemgraphClusterReconciler struct {
 	Scheme *runtime.Scheme
 
 	// APIReader reads straight from the API server, bypassing the informer
-	// cache. The license Secret is read through it, so the cache holds no
-	// Secret data at all: the Secret watch is metadata-only.
+	// cache. The license and AWS credentials Secrets are read through it, so
+	// the cache holds no Secret data at all: the Secret watch is metadata-only.
 	APIReader client.Reader
 
 	// Memgraph opens Bolt connections to coordinators. Tests substitute a
@@ -167,11 +167,12 @@ type MemgraphClusterReconciler struct {
 // ConfigMap but the cache holds only the operator's own.
 // +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch;create;patch;delete
 //
-// Secrets are read, never written, and only for the license: a pod reads the
-// license Secret when it starts, so a renewal reaches running pods only if the
-// operator reads it too and SETs it. list and watch feed a metadata-only
-// informer that maps a changed Secret to the clusters naming it, and get reads
-// that one Secret uncached; no Secret data is ever cached.
+// Secrets are read, never written, and only for the license and the AWS
+// credentials: a pod reads those Secrets when it starts, so a renewal or a
+// rotation reaches running pods only if the operator reads it too and SETs it.
+// list and watch feed a metadata-only informer that maps a changed Secret to
+// the clusters naming it, and get reads that one Secret uncached; no Secret
+// data is ever cached.
 // +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch
 
 // Reconcile drives the cluster toward the declared MemgraphCluster spec in
@@ -1105,7 +1106,10 @@ func (r *MemgraphClusterReconciler) reconcileRegistration(
 		// ready pod now, whatever else the pass goes on to do, and the flag file
 		// already carries it for any pod the roll replaces. A pod the roll has
 		// down is simply not ready and is caught up on the next pass.
+		// The AWS credentials are run-time settings like those, from a Secret
+		// instead of the spec, so they go the same way and at the same time.
 		applied := r.reconcileSettings(ctx, cluster, replicas, roles)
+		applied.merge(r.reconcileAWSCredentials(ctx, cluster, replicas, roles))
 
 		// What each key of spec.flags is, by the running Memgraph's own account:
 		// a flag, a coordinator setting, or nothing it has. The two views are
@@ -1640,6 +1644,98 @@ func exemptCurrentPods(roles *rolloutRoles, classes flagClasses) ([]string, bool
 	return nil, true
 }
 
+// reconcileAWSCredentials brings every ready data instance's AWS configuration
+// (both credentials, the region and the endpoint URL) in line with the
+// awsCredentials Secret, one connection per pod, each read
+// before it is written. A data instance reads the Secret when it starts, so
+// this is what makes a rotation live without a restart; the coordinators run
+// no queries that read from AWS and are left alone.
+//
+// It reports into the run-time settings outcome, since that is what the four
+// values are: a Secret that cannot be read and a pod that does not answer
+// are pending, a SET an instance refuses is rejected, and none of it fails the
+// pass or restarts a pod. The values are sent to Memgraph and compared, and
+// never logged, put in an event or written to status: the region and endpoint
+// are not secret, but they share the Secret and the code path with the keys.
+func (r *MemgraphClusterReconciler) reconcileAWSCredentials(
+	ctx context.Context,
+	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	replicas replicaCounts,
+	roles rolloutRoles,
+) settingsOutcome {
+	name := resources.AWSCredentialsSecretOf(cluster)
+	if name == "" {
+		return settingsOutcome{}
+	}
+	log := logf.FromContext(ctx)
+	desired, err := r.readAWSCredentials(ctx, cluster.Namespace, name)
+	if err != nil {
+		log.Info("Could not read the AWS credentials Secret", "secret", name, "reason", err.Error())
+		return settingsOutcome{pending: []string{"the AWS credentials, because " + err.Error()}}
+	}
+
+	var outcome settingsOutcome
+	ready := make(map[string]bool, len(roles.data.Pods))
+	for _, pod := range roles.data.Pods {
+		ready[pod.Name] = pod.Ready
+	}
+	for _, endpoint := range resources.DataEndpoints(cluster, replicas.data.applied) {
+		if !ready[endpoint.Pod] {
+			continue
+		}
+		changes, err := r.applySecretSettings(ctx, endpoint, func(observed map[string]string) []settings.Change {
+			return settings.Diff(desired, observed)
+		})
+		for _, change := range changes {
+			// The value may be a credential, so only the setting is named.
+			log.Info("Applied AWS setting from Secret", "pod", endpoint.Pod, "setting", change.Setting,
+				"secret", name)
+		}
+		var rejection *settingRejected
+		switch {
+		case err == nil:
+		case errors.As(err, &rejection):
+			outcome.rejected = append(outcome.rejected, fmt.Sprintf("%s rejected %s: %v",
+				endpoint.Pod, rejection.command, rejection.err))
+		default:
+			log.Info("Could not read the AWS settings from a ready pod", "pod", endpoint.Pod, "reason", err.Error())
+			outcome.pending = append(outcome.pending, endpoint.Pod)
+		}
+	}
+	return outcome
+}
+
+// readAWSCredentials reads the four AWS values from the Secret, uncached like
+// the license, and returns them keyed by the settings they go to. A Secret
+// missing any key yields none: the pods cannot start on it either, and a
+// partial set is never applied.
+func (r *MemgraphClusterReconciler) readAWSCredentials(
+	ctx context.Context,
+	namespace, name string,
+) (map[string]string, error) {
+	var secret corev1.Secret
+	if err := r.APIReader.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, &secret); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, fmt.Errorf("the Secret %s does not exist", name)
+		}
+		return nil, fmt.Errorf("getting Secret %s: %w", name, err)
+	}
+	desired := map[string]string{}
+	for _, credential := range []struct{ setting, key string }{
+		{settings.AWSAccessKeySetting, memgraphcomv1alpha1.AWSAccessKeySecretKey},
+		{settings.AWSSecretKeySetting, memgraphcomv1alpha1.AWSSecretKeySecretKey},
+		{settings.AWSRegionSetting, memgraphcomv1alpha1.AWSRegionSecretKey},
+		{settings.AWSEndpointURLSetting, memgraphcomv1alpha1.AWSEndpointURLSecretKey},
+	} {
+		value, ok := secret.Data[credential.key]
+		if !ok {
+			return nil, fmt.Errorf("the Secret %s has no key %s", name, credential.key)
+		}
+		desired[credential.setting] = string(value)
+	}
+	return desired, nil
+}
+
 // settingRejected is a SET DATABASE SETTING the instance refused, as opposed
 // to a pod the operator could not talk to.
 type settingRejected struct {
@@ -1731,7 +1827,9 @@ func (r *MemgraphClusterReconciler) reconcileLicense(
 			if !ready[endpoint.Pod] {
 				continue
 			}
-			changes, err := r.applyLicense(ctx, endpoint, license, organization)
+			changes, err := r.applySecretSettings(ctx, endpoint, func(observed map[string]string) []settings.Change {
+				return settings.License(license, organization, observed)
+			})
 			for _, change := range changes {
 				// The value is the license itself, so only the setting is named.
 				log.Info("Applied license setting from Secret", "pod", endpoint.Pod, "setting", change.Setting,
@@ -1782,14 +1880,15 @@ func (r *MemgraphClusterReconciler) readLicense(
 	return string(secret.Data[ref.LicenseKey]), string(secret.Data[ref.OrganizationKey]), nil
 }
 
-// applyLicense reads one instance's license settings and issues the SETs that
-// bring them in line with the Secret, returning the changes that landed. A
-// refused SET comes back as a settingRejected whose command names the
-// setting and not its value; any other error is a pod that could not be read.
-func (r *MemgraphClusterReconciler) applyLicense(
+// applySecretSettings reads one instance's settings and issues the SETs plan
+// returns to bring the settings a Secret holds in line, returning the changes
+// that landed. A refused SET comes back as a settingRejected whose command
+// names the setting and not its value, since the value is secret material;
+// any other error is a pod that could not be read.
+func (r *MemgraphClusterReconciler) applySecretSettings(
 	ctx context.Context,
 	endpoint resources.Endpoint,
-	license, organization string,
+	plan func(observed map[string]string) []settings.Change,
 ) ([]settings.Change, error) {
 	log := logf.FromContext(ctx)
 	conn, err := r.Memgraph.Connect(ctx, endpoint.Address, endpoint.TLS)
@@ -1806,7 +1905,7 @@ func (r *MemgraphClusterReconciler) applyLicense(
 		return nil, err
 	}
 	var applied []settings.Change
-	for _, change := range settings.License(license, organization, observed) {
+	for _, change := range plan(observed) {
 		if err := conn.SetSetting(ctx, change.Setting, change.Value); err != nil {
 			return applied, &settingRejected{
 				command: fmt.Sprintf("SET DATABASE SETTING %q from the Secret", change.Setting),
@@ -1819,8 +1918,8 @@ func (r *MemgraphClusterReconciler) applyLicense(
 }
 
 // clustersForSecret maps a Secret event to the clusters in its namespace whose
-// pods read their license from it. The event carries metadata only, which is
-// all the mapping needs.
+// pods read their license or their AWS credentials from it. The event carries
+// metadata only, which is all the mapping needs.
 func (r *MemgraphClusterReconciler) clustersForSecret(ctx context.Context, secret client.Object) []reconcile.Request {
 	var clusters memgraphcomv1alpha1.MemgraphClusterList
 	if err := r.List(ctx, &clusters, client.InNamespace(secret.GetNamespace())); err != nil {
@@ -1829,8 +1928,10 @@ func (r *MemgraphClusterReconciler) clustersForSecret(ctx context.Context, secre
 	}
 	var requests []reconcile.Request
 	for i := range clusters.Items {
-		if resources.LicenseSecretOf(&clusters.Items[i]).Name == secret.GetName() {
-			requests = append(requests, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&clusters.Items[i])})
+		cluster := &clusters.Items[i]
+		if resources.LicenseSecretOf(cluster).Name == secret.GetName() ||
+			resources.AWSCredentialsSecretOf(cluster) == secret.GetName() {
+			requests = append(requests, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(cluster)})
 		}
 	}
 	return requests
@@ -2227,10 +2328,10 @@ func (r *MemgraphClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&appsv1.Deployment{}).
 		Owns(&corev1.Service{}).
 		Owns(&corev1.ConfigMap{}).
-		// The license Secret is not the operator's, so it is watched rather
-		// than owned, and by metadata only: the mapping needs the name, and
-		// caching Secret data from every namespace would hold material the
-		// operator has no use for.
+		// The license and AWS credentials Secrets are not the operator's, so
+		// they are watched rather than owned, and by metadata only: the
+		// mapping needs the name, and caching Secret data from every namespace
+		// would hold material the operator has no use for.
 		WatchesMetadata(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(r.clustersForSecret))
 	if r.GatewayAPI {
 		builder = builder.Owns(&gatewayv1.Gateway{}).Owns(&gatewayv1.TCPRoute{})

@@ -214,6 +214,10 @@ func baselineSettings() map[string]string {
 	return map[string]string{
 		"enterprise.license":        startupLicense,
 		"organization.name":         startupOrganization,
+		"aws.access_key":            "",
+		"aws.secret_key":            "",
+		"aws.region":                "",
+		"aws.endpoint_url":          "",
 		"log.level":                 "TRACE",
 		"log.to_stderr":             "true",
 		"query.timeout":             "600",

@@ -26,6 +26,16 @@ const (
 	OrganizationSetting = "organization.name"
 )
 
+// The run-time settings Memgraph keeps its AWS configuration in, as SHOW
+// DATABASE SETTINGS names them. The awsCredentials Secret is applied under
+// these names with Diff, like any setting the spec names directly.
+const (
+	AWSAccessKeySetting   = "aws.access_key"
+	AWSSecretKeySetting   = "aws.secret_key"
+	AWSRegionSetting      = "aws.region"
+	AWSEndpointURLSetting = "aws.endpoint_url"
+)
+
 // License diffs the license and organization name an instance should run with
 // against the settings it reports, and returns the changes that bring it in
 // line: the organization first, then the license, each only when it differs.

@@ -82,8 +82,6 @@ The flags this covers, with the setting each maps to, as of Memgraph 3.13.0:
 | `timezone` | `timezone` |
 | `bolt-server-name-for-init` | `server.name` |
 | `file-download-conn-timeout-sec` | `file.download_conn_timeout_sec` |
-| `aws-region` | `aws.region` |
-| `aws-endpoint-url` | `aws.endpoint_url` |
 
 The table lives in the operator (`internal/settings`) and is checked against Memgraph's source on an image bump. On an older Memgraph that does not yet know a setting at run time, the `SET` is refused and reported as below; the flag file still carries the value for the next restart.
 
@@ -100,7 +98,7 @@ Run-time settings are applied on the pass that finds the cluster registered, bef
 
 ## Removing a flag
 
-Removing a key removes its line from the flag file and issues no `SET`. For a startup-only flag that is a template change like any other, and the roll brings every pod onto Memgraph's default. For a run-time flag the running instances keep their current value until they next restart without the flag — and for the few settings Memgraph persists across restarts (`timezone`, `storage-gc-aggressive`, `hops-limit-partial-results`, `storage-omit-vector-index-properties-on-return`, `bolt-server-name-for-init`, `file-download-conn-timeout-sec`, the AWS settings, the three slow-query log settings), even then: Memgraph restores the last value it was set to whenever the flag is not given explicitly, and has no way to reset one to its default. Set the default by hand with `SET DATABASE SETTING`, or write it into the map, if you need it back before the core offers a reset.
+Removing a key removes its line from the flag file and issues no `SET`. For a startup-only flag that is a template change like any other, and the roll brings every pod onto Memgraph's default. For a run-time flag the running instances keep their current value until they next restart without the flag — and for the few settings Memgraph persists across restarts (`timezone`, `storage-gc-aggressive`, `hops-limit-partial-results`, `storage-omit-vector-index-properties-on-return`, `bolt-server-name-for-init`, `file-download-conn-timeout-sec`, the three slow-query log settings), even then: Memgraph restores the last value it was set to whenever the flag is not given explicitly, and has no way to reset one to its default. Set the default by hand with `SET DATABASE SETTING`, or write it into the map, if you need it back before the core offers a reset.
 
 One exception, by design: a flag the operator has a default for (`log-level`, `also-log-to-stderr`, `log-retention-days`) goes back to that default when you remove your override, because the flag file then says so and the operator keeps the running instances in line with the file.
 
@@ -138,6 +136,38 @@ Admission rejects these keys, in either spelling:
 - **`data-directory`, `log-file`**: where the lib and log claims are mounted. `log-file` follows the log claim: empty when the role has none, which is what keeps a read-only root filesystem from crash-looping.
 - **`bolt-cert-file`, `bolt-key-file`, `cluster-cert-file`, `cluster-key-file`, `cluster-ca-file`**: derived from `spec.tls`, see [TLS](tls.md).
 - **`metrics-format`**: always OpenMetrics, see [monitoring](monitoring.md).
-- **`aws-access-key`, `aws-secret-key`, `license-key`, `organization-name`**: the CR carries no secret material. The license comes from the `secrets` block. Set the AWS keys on each instance with `SET DATABASE SETTING "aws.access_key" TO "..."` for now; a Secret reference may follow if there is demand.
+- **`license-key`, `organization-name`**: the CR carries no secret material; the license comes from the `secrets` block.
+- **`aws-access-key`, `aws-secret-key`, `aws-region`, `aws-endpoint-url`**: all four come from the `awsCredentials` block's Secret (below), so the flag file and the Secret can never disagree.
 
 Everything else is yours, including the operator's own logging defaults. Memgraph's [configuration reference](https://memgraph.com/docs/database-management/configuration) lists the flags.
+
+## AWS credentials
+
+The data instances' AWS integration (`LOAD PARQUET` and the other S3 readers) takes all four of its values from one Secret, the way the license does:
+
+```sh
+kubectl create secret generic aws-s3-credentials \
+  --from-literal=AWS_ACCESS_KEY_ID=... \
+  --from-literal=AWS_SECRET_ACCESS_KEY=... \
+  --from-literal=AWS_REGION=eu-west-1 \
+  --from-literal=AWS_ENDPOINT_URL=          # empty for AWS itself, e.g. http://minio:9000 otherwise
+```
+
+```yaml
+spec:
+  awsCredentials:
+    secretName: aws-s3-credentials
+```
+
+| Secret key | Flag | Setting |
+| --- | --- | --- |
+| `AWS_ACCESS_KEY_ID` | `aws-access-key` | `aws.access_key` |
+| `AWS_SECRET_ACCESS_KEY` | `aws-secret-key` | `aws.secret_key` |
+| `AWS_REGION` | `aws-region` | `aws.region` |
+| `AWS_ENDPOINT_URL` | `aws-endpoint-url` | `aws.endpoint_url` |
+
+The keys are fixed: they are the names the AWS SDKs read, and the credentials are the ones the core dumps uploader's Secret already holds, so one Secret can serve both. **All four are required**, `AWS_ENDPOINT_URL` too even when it is empty: Kubernetes leaves a reference to a variable it could not set as literal text, so a missing key would start Memgraph on the string `$(MEMGRAPH_AWS_ENDPOINT_URL)`. A pod whose Secret lacks a key does not start, as with the license. Coordinators get none of the four; they run no queries that read from AWS.
+
+- **At startup** a data instance runs with `--aws-access-key=$(MEMGRAPH_AWS_ACCESS_KEY) --aws-secret-key=$(MEMGRAPH_AWS_SECRET_KEY) --aws-region=$(MEMGRAPH_AWS_REGION) --aws-endpoint-url=$(MEMGRAPH_AWS_ENDPOINT_URL)`, every variable read from the Secret, so the pod spec names the Secret and never a value. Memgraph persists all four settings across restarts and restores them over its own `AWS_*` environment fallback, but not over a flag on the command line, so a restarted instance always starts on what the Secret holds now.
+- **While running**, a change to the Secret reaches every ready data instance with `SET DATABASE SETTING`, read before it is written, within a reconcile pass and without a restart. The operator watches the Secret by metadata and reads it uncached; no value is logged, evented or written to status. A Secret or key that is missing, or a ready instance that does not answer, is `Converged=False/SettingsPending`; a refused `SET` is `SettingsRejected`, naming the setting and not its value.
+- **Adding the block or pointing it at another Secret** changes the pod template and rolls the data instances; the live `SET` has already reached every ready one by then. **Removing it** issues no `SET`, like removing any flag: the instances keep the last values until `SET DATABASE SETTING "aws.access_key" TO ""` (and the other three) clears them.

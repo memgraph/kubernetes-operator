@@ -2345,6 +2345,272 @@ var _ = Describe("MemgraphCluster Controller", func() {
 		})
 	})
 
+	Context("when the spec names an AWS credentials Secret", func() {
+		const (
+			resourceName    = "mgc-aws"
+			secretName      = resourceName + "-credentials"
+			accessKey       = "AKIA-started-with"
+			secretKey       = "secret-started-with"
+			rotatedKey      = "secret-rotated-in-the-secret"
+			region          = "eu-west-1"
+			minioEndpoint   = "http://minio:9000"
+			secretKeySET    = `SET DATABASE SETTING "aws.secret_key"`
+			endpointSET     = `SET DATABASE SETTING "aws.endpoint_url"`
+			accessKeySET    = `SET DATABASE SETTING "aws.access_key"`
+			firstInstance   = "instance_0"
+			secondInstance  = "instance_1"
+			dataComponent   = "data"
+			coordsComponent = "coordinator"
+		)
+
+		cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+
+		podName := func(suffix string, ordinal int) string {
+			return fmt.Sprintf("%s%s-%d", resourceName, suffix, ordinal)
+		}
+		podAddress := func(suffix string, ordinal int) string {
+			return fmt.Sprintf("%s.%s%s.%s.svc.cluster.local:%d",
+				podName(suffix, ordinal), resourceName, suffix, resourceNamespace, memgraphcomv1alpha1.BoltPort)
+		}
+		observedCoordinator := func(id int, role string) memgraph.Instance {
+			host, _, _ := strings.Cut(podAddress(coordinatorSuffix, id), ":")
+			return memgraph.Instance{
+				Name:              fmt.Sprintf("coordinator_%d", id),
+				BoltServer:        fmt.Sprintf("%s:%d", host, memgraphcomv1alpha1.BoltPort),
+				CoordinatorServer: fmt.Sprintf("%s:%d", host, memgraphcomv1alpha1.CoordinatorPort),
+				ManagementServer:  fmt.Sprintf("%s:%d", host, memgraphcomv1alpha1.ManagementPort),
+				Health:            "up", Role: role,
+			}
+		}
+
+		// putPod stands in for the StatefulSet controller and the kubelet
+		// envtest does not run. The credentials pass dials only ready pods.
+		putPod := func(suffix, component string, ordinal int, ready bool) {
+			GinkgoHelper()
+			existing := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: podName(suffix, ordinal), Namespace: resourceNamespace}}
+			Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, existing))).To(Succeed())
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      podName(suffix, ordinal),
+					Namespace: resourceNamespace,
+					Labels: map[string]string{
+						nameLabel:      memgraphDbName,
+						instanceLabel:  resourceName,
+						componentLabel: component,
+						managedByLabel: resources.ManagedByValue,
+					},
+				},
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: memgraphDbName, Image: memgraphDbName}}},
+			}
+			Expect(k8sClient.Create(ctx, pod)).To(Succeed())
+			status := corev1.ConditionFalse
+			if ready {
+				status = corev1.ConditionTrue
+			}
+			pod.Status.Conditions = []corev1.PodCondition{{
+				Type: corev1.PodReady, Status: status, LastTransitionTime: metav1.Now(),
+			}}
+			Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
+		}
+
+		putSecret := func(data map[string][]byte) {
+			GinkgoHelper()
+			secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: resourceNamespace}}
+			if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(secret), secret); apierrors.IsNotFound(err) {
+				secret.Data = data
+				Expect(k8sClient.Create(ctx, secret)).To(Succeed())
+				return
+			}
+			secret.Data = data
+			Expect(k8sClient.Update(ctx, secret)).To(Succeed())
+		}
+		// credentials is the Secret's four keys. The endpoint is empty for an
+		// instance talking to AWS itself, which is what Memgraph defaults to.
+		credentials := func(access, secret, endpoint string) map[string][]byte {
+			return map[string][]byte{
+				memgraphcomv1alpha1.AWSAccessKeySecretKey:   []byte(access),
+				memgraphcomv1alpha1.AWSSecretKeySecretKey:   []byte(secret),
+				memgraphcomv1alpha1.AWSRegionSecretKey:      []byte(region),
+				memgraphcomv1alpha1.AWSEndpointURLSecretKey: []byte(endpoint),
+			}
+		}
+		converged := func() *metav1.Condition {
+			GinkgoHelper()
+			get(resourceName, cluster)
+			return apimeta.FindStatusCondition(cluster.Status.Conditions, memgraphcomv1alpha1.ConditionConverged)
+		}
+		awsCommands := func() []string {
+			var sets []string
+			for _, command := range fake.executedCommands() {
+				if strings.Contains(command, `SET DATABASE SETTING "aws.`) {
+					sets = append(sets, command)
+				}
+			}
+			return sets
+		}
+		podUIDs := func() map[string]types.UID {
+			GinkgoHelper()
+			var pods corev1.PodList
+			Expect(k8sClient.List(ctx, &pods, client.InNamespace(resourceNamespace),
+				client.MatchingLabels{instanceLabel: resourceName})).To(Succeed())
+			uids := map[string]types.UID{}
+			for _, pod := range pods.Items {
+				uids[pod.Name] = pod.UID
+			}
+			return uids
+		}
+
+		BeforeEach(func() {
+			putSecret(credentials(accessKey, secretKey, ""))
+			resource := &memgraphcomv1alpha1.MemgraphCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: resourceNamespace},
+				Spec: memgraphcomv1alpha1.MemgraphClusterSpec{
+					AWSCredentials: &memgraphcomv1alpha1.AWSCredentialsSpec{SecretName: secretName},
+				},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+			get(resourceName, cluster)
+
+			fake.setInstances([]memgraph.Instance{
+				observedCoordinator(0, memgraph.RoleLeader),
+				observedCoordinator(1, memgraph.RoleFollower),
+				observedCoordinator(2, memgraph.RoleFollower),
+				{Name: firstInstance, Health: "up", Role: memgraph.RoleMain},
+				{Name: secondInstance, Health: "up", Role: memgraph.RoleReplica},
+			})
+			reconcileCluster(resourceName)
+			markWorkloadsReady(resourceName)
+			for ordinal := range 3 {
+				putPod(coordinatorSuffix, coordsComponent, ordinal, true)
+			}
+			for ordinal := range 2 {
+				putPod(dataSuffix, dataComponent, ordinal, true)
+			}
+		})
+
+		AfterEach(func() {
+			get(resourceName, cluster)
+			Expect(k8sClient.Delete(ctx, cluster)).To(Succeed())
+			deleteOwned(resourceName)
+			for _, suffix := range []string{coordinatorSuffix, dataSuffix} {
+				cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
+					Name: resourceName + suffix + "-flags", Namespace: resourceNamespace,
+				}}
+				Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, cm))).To(Succeed())
+			}
+			Expect(k8sClient.DeleteAllOf(ctx, &corev1.Pod{},
+				client.InNamespace(resourceNamespace),
+				client.MatchingLabels{instanceLabel: resourceName},
+				client.GracePeriodSeconds(0),
+			)).To(Succeed())
+			secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: resourceNamespace}}
+			Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, secret))).To(Succeed())
+		})
+
+		It("should SET the four values on every ready data instance, follow a change, and restart none", func() {
+			reconcileCluster(resourceName)
+
+			for ordinal := range 2 {
+				settings := fake.settingsOf(podAddress(dataSuffix, ordinal))
+				Expect(settings).To(HaveKeyWithValue("aws.access_key", accessKey))
+				Expect(settings).To(HaveKeyWithValue("aws.secret_key", secretKey))
+				Expect(settings).To(HaveKeyWithValue("aws.region", region))
+				Expect(settings).To(HaveKeyWithValue("aws.endpoint_url", ""))
+			}
+			for ordinal := range 3 {
+				Expect(fake.settingsOf(podAddress(coordinatorSuffix, ordinal))).To(HaveKeyWithValue("aws.access_key", ""),
+					"the coordinators run no queries that read from AWS")
+			}
+			Expect(awsCommands()).To(HaveLen(6),
+				"the keys and the region once per data instance; the empty endpoint is already Memgraph's")
+			Expect(converged().Status).To(Equal(metav1.ConditionTrue))
+
+			By("issuing nothing on the next pass, because every instance is in line")
+			reconcileCluster(resourceName)
+			Expect(awsCommands()).To(HaveLen(6))
+
+			By("SETting only what changed once the Secret does")
+			uids := podUIDs()
+			putSecret(credentials(accessKey, rotatedKey, minioEndpoint))
+			reconcileCluster(resourceName)
+			for ordinal := range 2 {
+				settings := fake.settingsOf(podAddress(dataSuffix, ordinal))
+				Expect(settings).To(HaveKeyWithValue("aws.secret_key", rotatedKey))
+				Expect(settings).To(HaveKeyWithValue("aws.endpoint_url", minioEndpoint))
+			}
+			Expect(awsCommands()[6:]).To(HaveLen(4))
+			Expect(awsCommands()[6:]).To(HaveEach(Or(ContainSubstring(secretKeySET), ContainSubstring(endpointSET))))
+			Expect(podUIDs()).To(Equal(uids), "a rotation restarts no pod")
+			Expect(converged().Status).To(Equal(metav1.ConditionTrue))
+		})
+
+		It("should start the data instances with the Secret's values on their command line, by reference", func() {
+			sts := &appsv1.StatefulSet{}
+			get(resourceName+dataSuffix, sts)
+			container := sts.Spec.Template.Spec.Containers[0]
+			Expect(container.Args).To(ContainElements(
+				"--aws-access-key=$(MEMGRAPH_AWS_ACCESS_KEY)", "--aws-secret-key=$(MEMGRAPH_AWS_SECRET_KEY)",
+				"--aws-region=$(MEMGRAPH_AWS_REGION)", "--aws-endpoint-url=$(MEMGRAPH_AWS_ENDPOINT_URL)"))
+			Expect(container.Env).To(ContainElement(And(
+				HaveField("Name", "MEMGRAPH_AWS_SECRET_KEY"),
+				HaveField("ValueFrom.SecretKeyRef.Name", secretName),
+				HaveField("ValueFrom.SecretKeyRef.Key", memgraphcomv1alpha1.AWSSecretKeySecretKey),
+			)))
+			Expect(fmt.Sprint(sts.Spec)).NotTo(ContainSubstring(secretKey), "the pod spec names the Secret, never a credential")
+		})
+
+		It("should skip a data instance that is not ready", func() {
+			putPod(dataSuffix, dataComponent, 1, false)
+
+			reconcileCluster(resourceName)
+
+			Expect(fake.settingsOf(podAddress(dataSuffix, 0))).To(HaveKeyWithValue("aws.access_key", accessKey))
+			Expect(fake.settingsOf(podAddress(dataSuffix, 1))).To(HaveKeyWithValue("aws.access_key", ""),
+				"an unready pod is not dialed: it reads the Secret itself when it starts")
+			Expect(converged().Message).NotTo(ContainSubstring(podName(dataSuffix, 1)),
+				"an unready pod is the roll's or the kubelet's business, not a credential owed")
+		})
+
+		It("should report a credential Memgraph rejects without putting it in status", func() {
+			fake.rejectCommand(accessKeySET, errors.New("Unknown setting name 'aws.access_key'"))
+
+			reconcileCluster(resourceName)
+
+			condition := converged()
+			Expect(condition.Status).To(Equal(metav1.ConditionFalse))
+			Expect(condition.Reason).To(Equal(memgraphcomv1alpha1.ReasonSettingsRejected))
+			Expect(condition.Message).To(ContainSubstring(podName(dataSuffix, 0)))
+			Expect(condition.Message).To(ContainSubstring(`"aws.access_key"`))
+			get(resourceName, cluster)
+			Expect(fmt.Sprint(cluster.Status)).NotTo(ContainSubstring(accessKey), "a credential is secret material")
+		})
+
+		It("should report a missing Secret or key as pending and apply none of the values", func() {
+			secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: resourceNamespace}}
+			Expect(k8sClient.Delete(ctx, secret)).To(Succeed())
+			reconcileCluster(resourceName)
+			condition := converged()
+			Expect(condition.Reason).To(Equal(memgraphcomv1alpha1.ReasonSettingsPending))
+			Expect(condition.Message).To(ContainSubstring(secretName + " does not exist"))
+
+			withoutEndpoint := credentials(accessKey, secretKey, "")
+			delete(withoutEndpoint, memgraphcomv1alpha1.AWSEndpointURLSecretKey)
+			putSecret(withoutEndpoint)
+			reconcileCluster(resourceName)
+			condition = converged()
+			Expect(condition.Reason).To(Equal(memgraphcomv1alpha1.ReasonSettingsPending))
+			Expect(condition.Message).To(ContainSubstring("no key " + memgraphcomv1alpha1.AWSEndpointURLSecretKey))
+			Expect(awsCommands()).To(BeEmpty(), "a partial set is never applied, and the pods could not start on it")
+		})
+
+		It("should map a changed Secret to the clusters that read their AWS credentials from it", func() {
+			named := &metav1.PartialObjectMetadata{ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: resourceNamespace}}
+			Expect(reconciler.clustersForSecret(ctx, named)).To(ConsistOf(reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: resourceName, Namespace: resourceNamespace},
+			}))
+		})
+	})
+
 	Context("when deciding whether a changed flag needs a restart", func() {
 		const (
 			resourceName = "mgc-flag-restarts"
