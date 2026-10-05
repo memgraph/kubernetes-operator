@@ -88,6 +88,13 @@ func LicenseSecretOf(cluster *memgraphcomv1alpha1.MemgraphCluster) LicenseSecret
 	return LicenseSecret{Name: spec.secretName, LicenseKey: spec.licenseKey, OrganizationKey: spec.organizationKey}
 }
 
+// AWSCredentialsSecretOf returns the name of the Secret the data instances
+// read their AWS credentials from, and an empty string for a cluster that
+// names none.
+func AWSCredentialsSecretOf(cluster *memgraphcomv1alpha1.MemgraphCluster) string {
+	return normalize(cluster.Spec).awsCredentialsSecret
+}
+
 // labels returns the full label set stamped on all objects of a role, with the
 // role's custom labels merged underneath: the operator's own identity labels
 // always win a key collision, so a custom label can never detach an object
@@ -158,6 +165,9 @@ type normalizedSpec struct {
 	// intraClusterTLSSecret names the Secret the members authenticate each
 	// other with, and is empty for a cluster whose members talk in plaintext.
 	intraClusterTLSSecret string
+	// awsCredentialsSecret names the Secret the data instances read their AWS
+	// credentials from, and is empty for a cluster that names none.
+	awsCredentialsSecret string
 	// podAntiAffinity is the operator's own anti-affinity rule with its knobs
 	// resolved, and nil for a cluster that asked for none.
 	podAntiAffinity *normalizedPodAntiAffinity
@@ -423,6 +433,9 @@ func normalize(spec memgraphcomv1alpha1.MemgraphClusterSpec) normalizedSpec {
 	}
 	if spec.TLS != nil && spec.TLS.IntraCluster != nil {
 		n.intraClusterTLSSecret = spec.TLS.IntraCluster.SecretName
+	}
+	if spec.AWSCredentials != nil {
+		n.awsCredentialsSecret = spec.AWSCredentials.SecretName
 	}
 	if rule := spec.Scheduling.PodAntiAffinity; rule != nil {
 		n.podAntiAffinity = &normalizedPodAntiAffinity{

@@ -1754,6 +1754,64 @@ func TestStatefulSetExtraEnv(t *testing.T) {
 	}
 }
 
+// TestStatefulSetAWSCredentials pins what spec.awsCredentials adds to the data
+// instances and only to them: four variables read from the Secret's fixed
+// keys, and the four flags that hand them to Memgraph by $(VAR) expansion, so
+// the pod spec names the Secret and never a value. The flags come after
+// the flag file like every pinned flag, which is what makes a restart start on
+// the Secret's values rather than the ones Memgraph persisted.
+func TestStatefulSetAWSCredentials(t *testing.T) {
+	const secretName = "aws-s3-credentials"
+	cluster := minimalCluster()
+	cluster.Spec.AWSCredentials = &memgraphcomv1alpha1.AWSCredentialsSpec{SecretName: secretName}
+
+	fromSecret := func(name, key string) corev1.EnvVar {
+		return corev1.EnvVar{
+			Name: name,
+			ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: secretName},
+					Key:                  key,
+				},
+			},
+		}
+	}
+
+	t.Run(dataComponent, func(t *testing.T) {
+		container := dataStatefulSet(cluster).Spec.Template.Spec.Containers[0]
+		wantEnv := append([]corev1.EnvVar{
+			fromSecret("MEMGRAPH_AWS_ACCESS_KEY", "AWS_ACCESS_KEY_ID"),
+			fromSecret("MEMGRAPH_AWS_SECRET_KEY", "AWS_SECRET_ACCESS_KEY"),
+			fromSecret("MEMGRAPH_AWS_REGION", "AWS_REGION"),
+			fromSecret("MEMGRAPH_AWS_ENDPOINT_URL", "AWS_ENDPOINT_URL"),
+		}, licenseEnv("memgraph-secrets", "MEMGRAPH_ENTERPRISE_LICENSE", "MEMGRAPH_ORGANIZATION_NAME")...)
+		if diff := cmp.Diff(wantEnv, container.Env); diff != "" {
+			t.Errorf("env mismatch (-want +got):\n%s", diff)
+		}
+		wantArgs := expectedArgs(logFilePath,
+			"--aws-access-key=$(MEMGRAPH_AWS_ACCESS_KEY)",
+			"--aws-secret-key=$(MEMGRAPH_AWS_SECRET_KEY)",
+			"--aws-region=$(MEMGRAPH_AWS_REGION)",
+			"--aws-endpoint-url=$(MEMGRAPH_AWS_ENDPOINT_URL)",
+		)
+		if diff := cmp.Diff(wantArgs, container.Args); diff != "" {
+			t.Errorf("args mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run(coordinatorComponent, func(t *testing.T) {
+		container := coordinatorStatefulSet(cluster).Spec.Template.Spec.Containers[0]
+		if diff := cmp.Diff(expectedCoordinatorArgs(logFilePath), container.Args); diff != "" {
+			t.Errorf("args mismatch (-want +got):\n%s", diff)
+		}
+		for _, variable := range container.Env {
+			if strings.HasPrefix(variable.Name, "MEMGRAPH_AWS_") {
+				t.Errorf("coordinator env carries %q; the coordinators run no queries that read from AWS", variable.Name)
+			}
+		}
+	})
+}
+
 // TestStatefulSetBoltTLS pins what spec.tls.bolt adds to both roles: the
 // Secret mounted read-only under the HA chart's path with the two
 // kubernetes.io/tls keys projected by name, and the two flags that turn Bolt —

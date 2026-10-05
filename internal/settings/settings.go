@@ -35,9 +35,10 @@ import (
 // mirrors register_flag in src/flags/run_time_configurable.cpp of the pinned
 // Memgraph version, where the two names are declared side by side; a flag
 // absent from it is read at startup only, and a change to it is carried by
-// a restart. aws_access_key and aws_secret_key are run-time settings too but
-// are left out on purpose: admission rejects them in spec.flags, because
-// they are secret material.
+// a restart. The four AWS flags (aws_access_key, aws_secret_key, aws_region,
+// aws_endpoint_url) are run-time settings too but are left out on purpose:
+// admission rejects them in spec.flags, because they come from the
+// awsCredentials Secret, under the settings named in secrets.go.
 var runtimeSettings = map[string]string{
 	"bolt_server_name_for_init":                      "server.name",
 	"query_execution_timeout_sec":                    "query.timeout",
@@ -50,8 +51,6 @@ var runtimeSettings = map[string]string{
 	"storage_omit_vector_index_properties_on_return": "storage.omit_vector_index_properties_on_return",
 	"timezone":                                       "timezone",
 	"storage_snapshot_interval":                      "storage.snapshot.interval",
-	"aws_region":                                     "aws.region",
-	"aws_endpoint_url":                               "aws.endpoint_url",
 	"file_download_conn_timeout_sec":                 "file.download_conn_timeout_sec",
 	"storage_access_timeout_sec":                     "storage.access_timeout_sec",
 	"log_min_duration_ms":                            "log.min_duration_ms",

@@ -746,7 +746,22 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 						}},
 					},
 				},
-				"they come from the secrets block"),
+				"MEMGRAPH_ENTERPRISE_LICENSE, MEMGRAPH_ORGANIZATION_NAME"),
+			Entry("an env var shadowing an AWS credential the awsCredentials block owns", "invalid-env-aws",
+				memgraphcomv1alpha1.MemgraphClusterSpec{
+					ExtraEnv: memgraphcomv1alpha1.ExtraEnvSpec{
+						Data: []memgraphcomv1alpha1.EnvVar{{
+							Name:  memgraphcomv1alpha1.EnvAWSSecretKey,
+							Value: "smuggled-secret",
+						}},
+					},
+				},
+				"they come from the secrets and awsCredentials blocks"),
+			Entry("an awsCredentials block naming no Secret", "invalid-aws-no-secret",
+				memgraphcomv1alpha1.MemgraphClusterSpec{
+					AWSCredentials: &memgraphcomv1alpha1.AWSCredentialsSpec{},
+				},
+				"spec.awsCredentials.secretName"),
 			Entry("an env var shadowing the pod's own identity", "invalid-env-pod-name",
 				memgraphcomv1alpha1.MemgraphClusterSpec{
 					ExtraEnv: memgraphcomv1alpha1.ExtraEnvSpec{
@@ -795,7 +810,19 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 				memgraphcomv1alpha1.MemgraphClusterSpec{
 					Flags: memgraphcomv1alpha1.FlagsSpec{Data: map[string]memgraphcomv1alpha1.FlagValue{"aws-secret-key": "hunter2"}},
 				},
-				"secret material"),
+				"the AWS configuration"),
+			// The region and endpoint are not secret, but they come from the
+			// awsCredentials Secret with the keys, so two sources cannot fight.
+			Entry("a flag setting the AWS region", "invalid-flags-aws-region",
+				memgraphcomv1alpha1.MemgraphClusterSpec{
+					Flags: memgraphcomv1alpha1.FlagsSpec{Data: map[string]memgraphcomv1alpha1.FlagValue{"aws_region": "eu-west-1"}},
+				},
+				"come from the secrets and awsCredentials blocks"),
+			Entry("a flag setting the AWS endpoint URL", "invalid-flags-aws-endpoint",
+				memgraphcomv1alpha1.MemgraphClusterSpec{
+					Flags: memgraphcomv1alpha1.FlagsSpec{Data: map[string]memgraphcomv1alpha1.FlagValue{"aws-endpoint-url": "http://minio:9000"}},
+				},
+				"come from the secrets and awsCredentials blocks"),
 			// Keys are flag names, not command-line arguments: the dashes belong
 			// to the flag file the operator writes.
 			Entry("a flag key with leading dashes", "invalid-flags-leading-dashes",
@@ -847,7 +874,7 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 				memgraphcomv1alpha1.MemgraphClusterSpec{
 					Flags: memgraphcomv1alpha1.FlagsSpec{Coordinators: map[string]memgraphcomv1alpha1.FlagValue{"license-key": "hunter2"}},
 				},
-				"secret material"),
+				"the license (license-key, organization-name)"),
 			// Two spellings of one flag would be two lines for one flag, with
 			// gflags silently taking whichever came last.
 			Entry("two keys spelling the same flag", "invalid-flags-duplicate",

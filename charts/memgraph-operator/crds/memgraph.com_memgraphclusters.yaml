@@ -70,6 +70,26 @@ spec:
           spec:
             description: spec defines the desired state of MemgraphCluster
             properties:
+              awsCredentials:
+                description: |-
+                  awsCredentials references the Secret holding the AWS access key,
+                  secret key, region and endpoint URL the data instances use for their
+                  AWS integration (LOAD PARQUET and the other S3 readers). Absent, the
+                  operator sets none of them.
+                properties:
+                  secretName:
+                    description: |-
+                      secretName names a Secret in the cluster's namespace holding the access
+                      key under AWS_ACCESS_KEY_ID, the secret key under AWS_SECRET_ACCESS_KEY,
+                      the region under AWS_REGION and the endpoint URL under
+                      AWS_ENDPOINT_URL.
+                    maxLength: 253
+                    minLength: 1
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                    type: string
+                required:
+                - secretName
+                type: object
               clusterDomain:
                 default: cluster.local
                 description: |-
@@ -542,11 +562,13 @@ spec:
                     - name
                     x-kubernetes-list-type: map
                     x-kubernetes-validations:
-                    - message: extraEnv must not set MEMGRAPH_ENTERPRISE_LICENSE or
-                        MEMGRAPH_ORGANIZATION_NAME (they come from the secrets block)
-                        or POD_NAME (it carries the pod's own identity)
+                    - message: extraEnv must not set MEMGRAPH_ENTERPRISE_LICENSE,
+                        MEMGRAPH_ORGANIZATION_NAME or MEMGRAPH_AWS_* (they come from
+                        the secrets and awsCredentials blocks) or POD_NAME (it carries
+                        the pod's own identity)
                       rule: self.all(e, !(e.name in ['MEMGRAPH_ENTERPRISE_LICENSE',
-                        'MEMGRAPH_ORGANIZATION_NAME', 'POD_NAME']))
+                        'MEMGRAPH_ORGANIZATION_NAME', 'MEMGRAPH_AWS_ACCESS_KEY', 'MEMGRAPH_AWS_SECRET_KEY',
+                        'MEMGRAPH_AWS_REGION', 'MEMGRAPH_AWS_ENDPOINT_URL', 'POD_NAME']))
                   data:
                     description: data are added to every data instance pod's Memgraph
                       container.
@@ -576,11 +598,13 @@ spec:
                     - name
                     x-kubernetes-list-type: map
                     x-kubernetes-validations:
-                    - message: extraEnv must not set MEMGRAPH_ENTERPRISE_LICENSE or
-                        MEMGRAPH_ORGANIZATION_NAME (they come from the secrets block)
-                        or POD_NAME (it carries the pod's own identity)
+                    - message: extraEnv must not set MEMGRAPH_ENTERPRISE_LICENSE,
+                        MEMGRAPH_ORGANIZATION_NAME or MEMGRAPH_AWS_* (they come from
+                        the secrets and awsCredentials blocks) or POD_NAME (it carries
+                        the pod's own identity)
                       rule: self.all(e, !(e.name in ['MEMGRAPH_ENTERPRISE_LICENSE',
-                        'MEMGRAPH_ORGANIZATION_NAME', 'POD_NAME']))
+                        'MEMGRAPH_ORGANIZATION_NAME', 'MEMGRAPH_AWS_ACCESS_KEY', 'MEMGRAPH_AWS_SECRET_KEY',
+                        'MEMGRAPH_AWS_REGION', 'MEMGRAPH_AWS_ENDPOINT_URL', 'POD_NAME']))
                 type: object
               extraVolumeMounts:
                 description: |-
@@ -796,11 +820,11 @@ spec:
                       rule: self.all(k, k.matches('^[A-Za-z][A-Za-z0-9_-]*$'))
                     - message: 'flags must not set a port, a listen address, the coordinator
                         identity, the data directory, the log file, a TLS file, the
-                        metrics format or a credential (aws-access-key, aws-secret-key,
-                        license-key, organization-name): the operator derives the
-                        former, and the latter is secret material that comes from
-                        the secrets block or SET DATABASE SETTING'
-                      rule: self.all(k, !k.replace('-', '_').matches('^(bolt_port|management_port|coordinator_port|coordinator_id|coordinator_hostname|data_directory|log_file|bolt_cert_file|bolt_key_file|cluster_cert_file|cluster_key_file|cluster_ca_file|metrics_format|metrics_port|monitoring_port|bolt_address|monitoring_address|aws_access_key|aws_secret_key|license_key|organization_name)$'))
+                        metrics format, the license (license-key, organization-name)
+                        or the AWS configuration (aws-access-key, aws-secret-key,
+                        aws-region, aws-endpoint-url): the operator derives the former,
+                        and the latter come from the secrets and awsCredentials blocks'
+                      rule: self.all(k, !k.replace('-', '_').matches('^(bolt_port|management_port|coordinator_port|coordinator_id|coordinator_hostname|data_directory|log_file|bolt_cert_file|bolt_key_file|cluster_cert_file|cluster_key_file|cluster_ca_file|metrics_format|metrics_port|monitoring_port|bolt_address|monitoring_address|aws_access_key|aws_secret_key|aws_region|aws_endpoint_url|license_key|organization_name)$'))
                     - message: two keys spell the same flag
                       rule: self.all(k, self.all(j, k == j || k.replace('-', '_')
                         != j.replace('-', '_')))
@@ -834,11 +858,11 @@ spec:
                       rule: self.all(k, k.matches('^[A-Za-z][A-Za-z0-9_-]*$'))
                     - message: 'flags must not set a port, a listen address, the coordinator
                         identity, the data directory, the log file, a TLS file, the
-                        metrics format or a credential (aws-access-key, aws-secret-key,
-                        license-key, organization-name): the operator derives the
-                        former, and the latter is secret material that comes from
-                        the secrets block or SET DATABASE SETTING'
-                      rule: self.all(k, !k.replace('-', '_').matches('^(bolt_port|management_port|coordinator_port|coordinator_id|coordinator_hostname|data_directory|log_file|bolt_cert_file|bolt_key_file|cluster_cert_file|cluster_key_file|cluster_ca_file|metrics_format|metrics_port|monitoring_port|bolt_address|monitoring_address|aws_access_key|aws_secret_key|license_key|organization_name)$'))
+                        metrics format, the license (license-key, organization-name)
+                        or the AWS configuration (aws-access-key, aws-secret-key,
+                        aws-region, aws-endpoint-url): the operator derives the former,
+                        and the latter come from the secrets and awsCredentials blocks'
+                      rule: self.all(k, !k.replace('-', '_').matches('^(bolt_port|management_port|coordinator_port|coordinator_id|coordinator_hostname|data_directory|log_file|bolt_cert_file|bolt_key_file|cluster_cert_file|cluster_key_file|cluster_ca_file|metrics_format|metrics_port|monitoring_port|bolt_address|monitoring_address|aws_access_key|aws_secret_key|aws_region|aws_endpoint_url|license_key|organization_name)$'))
                     - message: two keys spell the same flag
                       rule: self.all(k, self.all(j, k == j || k.replace('-', '_')
                         != j.replace('-', '_')))

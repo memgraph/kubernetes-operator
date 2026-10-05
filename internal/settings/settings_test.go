@@ -79,8 +79,6 @@ func TestSettingTable(t *testing.T) {
 		"storage-omit-vector-index-properties-on-return": "storage.omit_vector_index_properties_on_return",
 		timezone:                         timezone,
 		snapshotFlag:                     snapshotInterval,
-		"aws-region":                     "aws.region",
-		"aws-endpoint-url":               "aws.endpoint_url",
 		"file-download-conn-timeout-sec": "file.download_conn_timeout_sec",
 		"storage-access-timeout-sec":     "storage.access_timeout_sec",
 		"log-min-duration-ms":            "log.min_duration_ms",
@@ -98,10 +96,10 @@ func TestSettingTable(t *testing.T) {
 	}
 	for _, flag := range []string{
 		"storage-snapshot-on-exit", "memory-limit", "log-retention-days", "bolt-port",
-		// Secret material: admission rejects them, and the table does not
-		// know them either, so a spec that slipped past admission would still
-		// never see them SET.
-		"aws-access-key", "aws-secret-key",
+		// The awsCredentials Secret's: admission rejects them, and the table
+		// does not know them either, so a spec that slipped past admission
+		// would still never see them SET from the flags.
+		"aws-access-key", "aws-secret-key", "aws-region", "aws-endpoint-url",
 	} {
 		if setting, ok := Setting(flag); ok {
 			t.Errorf("Setting(%q) = %q, want a startup-only flag", flag, setting)
