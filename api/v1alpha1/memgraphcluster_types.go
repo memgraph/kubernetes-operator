@@ -335,15 +335,6 @@ const (
 	// clears it.
 	ReasonLicenseRejected = "LicenseRejected"
 
-	// ReasonOrganizationChanged is set on LicenseApplied when the Secret names
-	// a different organization than the pods run with. Memgraph takes the
-	// license and the organization as two settings and checks the pair after
-	// each one, so neither SET can move first while the old pair is still
-	// valid: the old pair wins and is written back. The pods pick the new pair
-	// up when they restart, which the operator leaves to whoever changed the
-	// organization; the message names the pods still on the old one.
-	ReasonOrganizationChanged = "OrganizationChanged"
-
 	// ReasonMainElected is set when a data instance is observed as MAIN.
 	ReasonMainElected = "MainElected"
 

@@ -1696,8 +1696,8 @@ func (r *MemgraphClusterReconciler) applySettings(
 // Nothing here fails the pass, and nothing here restarts a pod. A Secret or
 // key that cannot be read and a pod that does not answer are pending and
 // retried next pass; a SET an instance refuses names the pod and Memgraph's
-// error; a different organization is reported for a restart to carry. A pod
-// that is not ready is skipped: it reads the Secret itself when it starts.
+// error. A pod that is not ready is skipped: it reads the Secret itself when
+// it starts.
 //
 // The license is secret material: it is sent to Memgraph and compared, and
 // never logged, put in an event or written to status.
@@ -1715,7 +1715,7 @@ func (r *MemgraphClusterReconciler) reconcileLicense(
 		return notLicenseAppliedCondition(memgraphcomv1alpha1.ReasonLicensePending, err.Error())
 	}
 
-	var pending, rejected, organizationChanged []string
+	var pending, rejected []string
 	for _, role := range []struct {
 		endpoints []resources.Endpoint
 		pods      rollout.Role
@@ -1731,7 +1731,7 @@ func (r *MemgraphClusterReconciler) reconcileLicense(
 			if !ready[endpoint.Pod] {
 				continue
 			}
-			changes, moved, err := r.applyLicense(ctx, endpoint, license, organization)
+			changes, err := r.applyLicense(ctx, endpoint, license, organization)
 			for _, change := range changes {
 				// The value is the license itself, so only the setting is named.
 				log.Info("Applied license setting from Secret", "pod", endpoint.Pod, "setting", change.Setting,
@@ -1744,8 +1744,6 @@ func (r *MemgraphClusterReconciler) reconcileLicense(
 			case err != nil:
 				log.Info("Could not read the license settings from a ready pod", "pod", endpoint.Pod, "reason", err.Error())
 				pending = append(pending, endpoint.Pod)
-			case moved:
-				organizationChanged = append(organizationChanged, endpoint.Pod)
 			}
 		}
 	}
@@ -1754,10 +1752,6 @@ func (r *MemgraphClusterReconciler) reconcileLicense(
 	case len(rejected) > 0:
 		return notLicenseAppliedCondition(memgraphcomv1alpha1.ReasonLicenseRejected,
 			truncateMessage(strings.Join(rejected, "; ")))
-	case len(organizationChanged) > 0:
-		return notLicenseAppliedCondition(memgraphcomv1alpha1.ReasonOrganizationChanged, truncateMessage(fmt.Sprintf(
-			"Secret %s names a different organization than %s run with; Memgraph cannot change the organization "+
-				"of a running instance, so restart them to pick it up", ref.Name, strings.Join(organizationChanged, ", "))))
 	case len(pending) > 0:
 		return notLicenseAppliedCondition(memgraphcomv1alpha1.ReasonLicensePending,
 			"Waiting to check the license on "+strings.Join(pending, ", "))
@@ -1789,19 +1783,18 @@ func (r *MemgraphClusterReconciler) readLicense(
 }
 
 // applyLicense reads one instance's license settings and issues the SETs that
-// bring them in line with the Secret, returning the changes that landed and
-// whether the instance runs a different organization, which no SET can move.
-// A refused SET comes back as a settingRejected whose command names the
+// bring them in line with the Secret, returning the changes that landed. A
+// refused SET comes back as a settingRejected whose command names the
 // setting and not its value; any other error is a pod that could not be read.
 func (r *MemgraphClusterReconciler) applyLicense(
 	ctx context.Context,
 	endpoint resources.Endpoint,
 	license, organization string,
-) ([]settings.Change, bool, error) {
+) ([]settings.Change, error) {
 	log := logf.FromContext(ctx)
 	conn, err := r.Memgraph.Connect(ctx, endpoint.Address, endpoint.TLS)
 	if err != nil {
-		return nil, false, err
+		return nil, err
 	}
 	defer func() {
 		if err := conn.Close(ctx); err != nil {
@@ -1810,20 +1803,19 @@ func (r *MemgraphClusterReconciler) applyLicense(
 	}()
 	observed, err := conn.ShowSettings(ctx)
 	if err != nil {
-		return nil, false, err
+		return nil, err
 	}
-	changes, organizationChanged := settings.License(license, organization, observed)
 	var applied []settings.Change
-	for _, change := range changes {
+	for _, change := range settings.License(license, organization, observed) {
 		if err := conn.SetSetting(ctx, change.Setting, change.Value); err != nil {
-			return applied, false, &settingRejected{
+			return applied, &settingRejected{
 				command: fmt.Sprintf("SET DATABASE SETTING %q from the Secret", change.Setting),
 				err:     err,
 			}
 		}
 		applied = append(applied, change)
 	}
-	return applied, organizationChanged, nil
+	return applied, nil
 }
 
 // clustersForSecret maps a Secret event to the clusters in its namespace whose

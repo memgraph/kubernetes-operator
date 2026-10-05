@@ -2299,20 +2299,19 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			Expect(fmt.Sprint(cluster.Status)).NotTo(ContainSubstring(renewedLicense), "the license is secret material")
 		})
 
-		It("should report a changed organization and neither SET nor restart anything", func() {
-			uids := podUIDs()
-			putSecret(renewedLicense, "Another Organization")
+		It("should SET a changed organization together with the license", func() {
+			const organization = "Another Organization"
+			putSecret(renewedLicense, organization)
 
 			reconcileCluster(resourceName)
 
-			Expect(licenseCommands()).To(BeEmpty(),
-				"Memgraph would write the old pair back, so no SET can move the organization")
-			Expect(podUIDs()).To(Equal(uids), "the restart is left to whoever changed the organization")
-			condition := licenseCondition()
-			Expect(condition.Status).To(Equal(metav1.ConditionFalse))
-			Expect(condition.Reason).To(Equal(memgraphcomv1alpha1.ReasonOrganizationChanged))
-			Expect(condition.Message).To(ContainSubstring(podName(coordinatorSuffix, 0)))
-			Expect(condition.Message).NotTo(ContainSubstring("Another Organization"))
+			every(func(suffix string, ordinal int) {
+				settings := fake.settingsOf(podAddress(suffix, ordinal))
+				Expect(settings).To(HaveKeyWithValue("organization.name", organization))
+				Expect(settings).To(HaveKeyWithValue("enterprise.license", renewedLicense))
+			})
+			Expect(licenseCommands()).To(HaveLen(10), "two SETs per pod, the organization and the license")
+			Expect(licenseCondition().Status).To(Equal(metav1.ConditionTrue))
 		})
 
 		It("should report a missing Secret or key as pending", func() {

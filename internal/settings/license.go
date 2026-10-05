@@ -29,27 +29,13 @@ const (
 // License diffs the license and organization name an instance should run with
 // against the settings it reports, and returns the changes that bring it in
 // line: the organization first, then the license, each only when it differs.
-//
-// Memgraph checks the pair after each SET and keeps whichever valid pair
-// expires last, writing the winner back to these settings. A pod still holds
-// the pair it started with in its environment, so while that pair is valid a
-// SET of either half alone produces a pair that does not match, the old one
-// wins, and the SET is undone. A renewal for the same organization is a single
-// SET and lands; a different organization cannot be moved on a running
-// instance at all. organizationChanged reports that case, and no change is
-// planned for it: the pod picks the new pair up from its environment when it
-// restarts. An instance reporting no organization has never held a valid
-// license, so there is no pair to lose to and both changes are planned.
-func License(license, organization string, observed map[string]string) (changes []Change, organizationChanged bool) {
-	current := observed[OrganizationSetting]
-	if current != organization {
-		if current != "" {
-			return nil, true
-		}
+func License(license, organization string, observed map[string]string) []Change {
+	var changes []Change
+	if observed[OrganizationSetting] != organization {
 		changes = append(changes, Change{Setting: OrganizationSetting, Value: organization})
 	}
 	if observed[LicenseSetting] != license {
 		changes = append(changes, Change{Setting: LicenseSetting, Value: license})
 	}
-	return changes, false
+	return changes
 }

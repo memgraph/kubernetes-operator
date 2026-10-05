@@ -30,10 +30,9 @@ func TestLicense(t *testing.T) {
 		otherOrg   = "Other"
 	)
 	for _, tc := range []struct {
-		name                    string
-		observed                map[string]string
-		want                    []Change
-		wantOrganizationChanged bool
+		name     string
+		observed map[string]string
+		want     []Change
 	}{
 		{
 			name:     "an instance already on the Secret's license is left alone",
@@ -45,17 +44,20 @@ func TestLicense(t *testing.T) {
 			want:     []Change{{Setting: LicenseSetting, Value: newLicense}},
 		},
 		{
-			name:                    "a different organization is reported and nothing is set",
-			observed:                map[string]string{LicenseSetting: oldLicense, OrganizationSetting: otherOrg},
-			wantOrganizationChanged: true,
+			name:     "a different organization and license are set, the organization first",
+			observed: map[string]string{LicenseSetting: oldLicense, OrganizationSetting: otherOrg},
+			want: []Change{
+				{Setting: OrganizationSetting, Value: org},
+				{Setting: LicenseSetting, Value: newLicense},
+			},
 		},
 		{
-			name:                    "a different organization is reported even when the license already matches",
-			observed:                map[string]string{LicenseSetting: newLicense, OrganizationSetting: otherOrg},
-			wantOrganizationChanged: true,
+			name:     "a different organization alone is one SET of the organization",
+			observed: map[string]string{LicenseSetting: newLicense, OrganizationSetting: otherOrg},
+			want:     []Change{{Setting: OrganizationSetting, Value: org}},
 		},
 		{
-			name:     "an instance that never held a valid license gets the organization, then the license",
+			name:     "an instance that never held a valid license gets both",
 			observed: map[string]string{LicenseSetting: "", OrganizationSetting: ""},
 			want: []Change{
 				{Setting: OrganizationSetting, Value: org},
@@ -72,12 +74,8 @@ func TestLicense(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, organizationChanged := License(newLicense, org, tc.observed)
-			if diff := cmp.Diff(tc.want, got); diff != "" {
+			if diff := cmp.Diff(tc.want, License(newLicense, org, tc.observed)); diff != "" {
 				t.Errorf("License() changes mismatch (-want +got):\n%s", diff)
-			}
-			if organizationChanged != tc.wantOrganizationChanged {
-				t.Errorf("License() organizationChanged = %v, want %v", organizationChanged, tc.wantOrganizationChanged)
 			}
 		})
 	}
