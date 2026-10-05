@@ -66,6 +66,8 @@ type fakeMemgraph struct {
 	// has nothing to SET, and a test that wants an instance out of line puts
 	// it there.
 	settings map[string]map[string]string
+	// settingsReads counts the SHOW DATABASE SETTINGS each address answered.
+	settingsReads map[string]int
 	// coordinatorSettings is the cluster-wide view every coordinator relays
 	// from the leader, starting from the core's defaults. A test that wants
 	// the leader unreachable for them sets coordinatorSettingsUnknown, which
@@ -231,6 +233,14 @@ func (f *fakeMemgraph) settingsOf(address string) map[string]string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return maps.Clone(f.settingsLocked(address))
+}
+
+// settingsReadsOf is how many SHOW DATABASE SETTINGS the instance at the
+// given address has answered.
+func (f *fakeMemgraph) settingsReadsOf(address string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.settingsReads[address]
 }
 
 // settingsLocked must be called with the cluster lock held.
@@ -591,6 +601,10 @@ func (c *fakeClient) ShowSettings(context.Context) (map[string]string, error) {
 	if c.closed {
 		return nil, fmt.Errorf("fake memgraph: connection to %s already closed", c.address)
 	}
+	if c.cluster.settingsReads == nil {
+		c.cluster.settingsReads = map[string]int{}
+	}
+	c.cluster.settingsReads[c.address]++
 	return maps.Clone(c.cluster.settingsLocked(c.address)), nil
 }
 
