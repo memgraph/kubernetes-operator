@@ -140,6 +140,8 @@ Applications inside the cluster reach an instance at its stable DNS name in the 
 memgraph-data-0.memgraph-data.memgraph.svc.cluster.local:7687
 ```
 
+To load large CSV files, put them on a shared volume every data instance mounts, so the import works on whichever instance is the MAIN — see [Importing data](docs/importing-data.md).
+
 To reach the cluster from outside Kubernetes, expose it with `spec.externalAccess` — see [External access](#external-access) below. To point a local client such as [Memgraph Lab](https://memgraph.com/docs/data-visualization) at the cluster while evaluating, forwarding a port is enough:
 
 ```sh
