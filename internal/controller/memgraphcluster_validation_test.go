@@ -45,11 +45,9 @@ const externalDNSAnnotation = "external-dns.alpha.kubernetes.io/hostname"
 // materialize it.
 func defaultRoleStorage() memgraphcomv1alpha1.RoleStorageSpec {
 	return memgraphcomv1alpha1.RoleStorageSpec{
-		LibPVCSize:            ptr.To(resource.MustParse(memgraphcomv1alpha1.DefaultLibPVCSize)),
-		LibStorageAccessMode:  memgraphcomv1alpha1.DefaultStorageAccessMode,
-		CreateLogStorageClaim: ptr.To(memgraphcomv1alpha1.DefaultCreateLogStorageClaim),
-		LogPVCSize:            ptr.To(resource.MustParse(memgraphcomv1alpha1.DefaultLogPVCSize)),
-		LogStorageAccessMode:  memgraphcomv1alpha1.DefaultStorageAccessMode,
+		LibPVCSize:           ptr.To(resource.MustParse(memgraphcomv1alpha1.DefaultLibPVCSize)),
+		LibStorageAccessMode: memgraphcomv1alpha1.DefaultStorageAccessMode,
+		FileLogging:          ptr.To(memgraphcomv1alpha1.DefaultFileLogging),
 	}
 }
 
@@ -158,8 +156,7 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 			Expect(stored.Spec.Secrets.LicenseKey).To(Equal(memgraphcomv1alpha1.DefaultLicenseSecretKey))
 			Expect(stored.Spec.Secrets.OrganizationKey).To(Equal(memgraphcomv1alpha1.DefaultOrganizationSecretKey))
 			Expect(stored.Spec.Storage.Data.LibPVCSize).To(Equal(ptr.To(resource.MustParse("100Gi"))))
-			Expect(stored.Spec.Storage.Data.LogPVCSize).To(
-				Equal(ptr.To(resource.MustParse(memgraphcomv1alpha1.DefaultLogPVCSize))))
+			Expect(stored.Spec.Storage.Data.FileLogging).To(HaveValue(BeTrue()))
 			Expect(stored.Spec.Storage.RetentionPolicy).To(Equal(memgraphcomv1alpha1.DefaultStorageRetention))
 			Expect(stored.Spec.Storage.Coordinators).To(Equal(defaultRoleStorage()))
 		})
@@ -196,7 +193,7 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 				Name: "valid-empty-storage-class", Namespace: resourceNamespace}, stored)).To(Succeed())
 
 			Expect(stored.Spec.Storage.Data.LibStorageClassName).To(Equal(ptr.To("")))
-			Expect(stored.Spec.Storage.Data.LogStorageClassName).To(BeNil())
+			Expect(stored.Spec.Storage.Coordinators.LibStorageClassName).To(BeNil())
 		})
 
 		DescribeTable("should accept any odd coordinator count from three up and any positive data instance count",
@@ -241,7 +238,7 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 					Data: map[string]memgraphcomv1alpha1.FlagValue{
 						snapshotOnExitFlag: flagOn,
 						"bolt-num-workers": "8",
-						logLevelUnderscore: infoLevel,
+						logLevelUnderscore: debugLevel,
 					},
 				},
 			})
@@ -257,7 +254,7 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 			Expect(stored.Spec.Flags.Data).To(Equal(map[string]memgraphcomv1alpha1.FlagValue{
 				snapshotOnExitFlag: flagOn,
 				"bolt-num-workers": "8",
-				logLevelUnderscore: infoLevel,
+				logLevelUnderscore: debugLevel,
 			}))
 		})
 
@@ -426,7 +423,7 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 				Command: []string{"sh", "-c", "echo hi; sleep 10000"},
 				Env:     []corev1.EnvVar{{Name: "LEVEL", Value: "debug"}},
 				VolumeMounts: []corev1.VolumeMount{{
-					Name: "log-storage", MountPath: "/var/log/memgraph", ReadOnly: true,
+					Name: "scratch", MountPath: "/scratch", ReadOnly: true,
 				}},
 				Resources: corev1.ResourceRequirements{
 					Limits: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("64Mi")},
@@ -827,7 +824,7 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 			// to the flag file the operator writes.
 			Entry("a flag key with leading dashes", "invalid-flags-leading-dashes",
 				memgraphcomv1alpha1.MemgraphClusterSpec{
-					Flags: memgraphcomv1alpha1.FlagsSpec{Data: map[string]memgraphcomv1alpha1.FlagValue{"--log-level": infoLevel}},
+					Flags: memgraphcomv1alpha1.FlagsSpec{Data: map[string]memgraphcomv1alpha1.FlagValue{"--log-level": debugLevel}},
 				},
 				"without leading dashes"),
 			// A newline in a value would start a second line in the flag file,
@@ -879,7 +876,7 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 			// gflags silently taking whichever came last.
 			Entry("two keys spelling the same flag", "invalid-flags-duplicate",
 				memgraphcomv1alpha1.MemgraphClusterSpec{
-					Flags: memgraphcomv1alpha1.FlagsSpec{Data: map[string]memgraphcomv1alpha1.FlagValue{logLevelFlag: infoLevel, logLevelUnderscore: "DEBUG"}},
+					Flags: memgraphcomv1alpha1.FlagsSpec{Data: map[string]memgraphcomv1alpha1.FlagValue{logLevelFlag: debugLevel, logLevelUnderscore: "DEBUG"}},
 				},
 				"spell the same flag"),
 			Entry("a probe timing below one", "invalid-probe-period",
@@ -1276,28 +1273,6 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 				func(c *memgraphcomv1alpha1.MemgraphCluster) {
 					c.Spec.Storage.Data.LibStorageAccessMode = corev1.ReadWriteMany
 				}, "libStorageAccessMode cannot be changed on a live cluster"),
-			Entry("dropping the log claim", "claims-log-dropped",
-				memgraphcomv1alpha1.MemgraphClusterSpec{},
-				func(c *memgraphcomv1alpha1.MemgraphCluster) {
-					c.Spec.Storage.Data.CreateLogStorageClaim = ptr.To(false)
-				}, "createLogStorageClaim cannot be changed on a live cluster"),
-			Entry("adding the log claim", "claims-log-added",
-				memgraphcomv1alpha1.MemgraphClusterSpec{Storage: memgraphcomv1alpha1.StorageSpec{
-					Data: memgraphcomv1alpha1.RoleStorageSpec{CreateLogStorageClaim: ptr.To(false)},
-				}},
-				func(c *memgraphcomv1alpha1.MemgraphCluster) {
-					c.Spec.Storage.Data.CreateLogStorageClaim = ptr.To(true)
-				}, "createLogStorageClaim cannot be changed on a live cluster"),
-			Entry("the log storage class while the claim exists", "claims-log-class",
-				memgraphcomv1alpha1.MemgraphClusterSpec{},
-				func(c *memgraphcomv1alpha1.MemgraphCluster) {
-					c.Spec.Storage.Coordinators.LogStorageClassName = ptr.To(customStorageClassName)
-				}, "logStorageClassName cannot be changed on a live cluster while the log claim exists"),
-			Entry("shrinking the log claim while it exists", "claims-log-size",
-				memgraphcomv1alpha1.MemgraphClusterSpec{},
-				func(c *memgraphcomv1alpha1.MemgraphCluster) {
-					c.Spec.Storage.Coordinators.LogPVCSize = ptr.To(resource.MustParse("512Mi"))
-				}, "logPVCSize cannot shrink while the log claim exists"),
 			Entry("shrinking the core dumps claim while the role collects dumps", "claims-core-dumps-size",
 				memgraphcomv1alpha1.MemgraphClusterSpec{CoreDumps: memgraphcomv1alpha1.CoreDumpsSpec{
 					Data: &memgraphcomv1alpha1.RoleCoreDumpsSpec{},
@@ -1326,7 +1301,7 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 			Entry("the same lib size in other units", "claims-lib-size-units",
 				memgraphcomv1alpha1.MemgraphClusterSpec{},
 				func(c *memgraphcomv1alpha1.MemgraphCluster) {
-					c.Spec.Storage.Data.LibPVCSize = ptr.To(resource.MustParse("1024Mi"))
+					c.Spec.Storage.Data.LibPVCSize = ptr.To(resource.MustParse("10240Mi"))
 				}),
 			Entry("growing every claim of both roles", "claims-grown",
 				memgraphcomv1alpha1.MemgraphClusterSpec{CoreDumps: memgraphcomv1alpha1.CoreDumpsSpec{
@@ -1335,20 +1310,24 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 				}},
 				func(c *memgraphcomv1alpha1.MemgraphCluster) {
 					for _, role := range []*memgraphcomv1alpha1.RoleStorageSpec{&c.Spec.Storage.Coordinators, &c.Spec.Storage.Data} {
-						role.LibPVCSize = ptr.To(resource.MustParse("10Gi"))
-						role.LogPVCSize = ptr.To(resource.MustParse("2Gi"))
+						role.LibPVCSize = ptr.To(resource.MustParse("20Gi"))
 					}
 					c.Spec.CoreDumps.Coordinators.Size = ptr.To(resource.MustParse("20Gi"))
 					c.Spec.CoreDumps.Data.Size = ptr.To(resource.MustParse("20Gi"))
 				}),
-			Entry("the log knobs of a role without a log claim", "claims-log-without-claim",
+			// File logging backs no claim: the log files live on the lib claim,
+			// so turning it either way is an ordinary rolling restart.
+			Entry("turning file logging off", "claims-file-logging-off",
+				memgraphcomv1alpha1.MemgraphClusterSpec{},
+				func(c *memgraphcomv1alpha1.MemgraphCluster) {
+					c.Spec.Storage.Data.FileLogging = ptr.To(false)
+				}),
+			Entry("turning file logging on", "claims-file-logging-on",
 				memgraphcomv1alpha1.MemgraphClusterSpec{Storage: memgraphcomv1alpha1.StorageSpec{
-					Data: memgraphcomv1alpha1.RoleStorageSpec{CreateLogStorageClaim: ptr.To(false)},
+					Coordinators: memgraphcomv1alpha1.RoleStorageSpec{FileLogging: ptr.To(false)},
 				}},
 				func(c *memgraphcomv1alpha1.MemgraphCluster) {
-					c.Spec.Storage.Data.LogPVCSize = ptr.To(resource.MustParse("5Gi"))
-					c.Spec.Storage.Data.LogStorageClassName = ptr.To(customStorageClassName)
-					c.Spec.Storage.Data.LogStorageAccessMode = corev1.ReadWriteMany
+					c.Spec.Storage.Coordinators.FileLogging = ptr.To(true)
 				}),
 			// A role without a block has no size to edit, so the class is the one
 			// core dumps knob that backs no claim here.

@@ -139,7 +139,8 @@ spec:
 		Expect(pattern).To(Equal("/var/core/memgraph/core.%e.%p.%t.%s"))
 
 		By("reading the ownership of every mounted volume from inside the Memgraph container")
-		for _, path := range []string{"/var/lib/memgraph", "/var/log/memgraph", "/var/core/memgraph"} {
+		// The log directory is Memgraph's own, created on the chowned lib mount.
+		for _, path := range []string{"/var/lib/memgraph", "/var/lib/memgraph/logs", "/var/core/memgraph"} {
 			owner, err := execInPod(initNamespace, dataPod, "stat", "-c", "%u:%g", path)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(owner).To(Equal("101:103"),

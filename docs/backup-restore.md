@@ -10,7 +10,6 @@ Each pod of a `MemgraphCluster` owns its PersistentVolumeClaims through the Stat
 | --- | --- | --- |
 | `lib-storage-<cluster>-coordinator-<n>` | the coordinator's Raft state | `<cluster>-coordinator-<n>` |
 | `lib-storage-<cluster>-data-<n>` | the data instance's snapshots, WAL and durable state | `<cluster>-data-<n>` |
-| `log-storage-<cluster>-<role>-<n>` | Memgraph's log files (unless `createLogStorageClaim: false`) | the same pod |
 | `core-dumps-<cluster>-<role>-<n>` | core dumps, when the role collects them | the same pod |
 
 For a cluster named `memgraph` with three coordinators and two data instances, the claims that matter for a backup are therefore `lib-storage-memgraph-coordinator-0`, `-1`, `-2` and `lib-storage-memgraph-data-0`, `-1`. Every claim carries the cluster's identity labels (`app.kubernetes.io/instance: <cluster>`, `app.kubernetes.io/component: coordinator | data`), which is what a group snapshot selects on.
@@ -23,7 +22,7 @@ Three properties of the operator make restore possible, and all three are delibe
 
 ## Taking a backup
 
-Back up the `lib-storage` claims; the log and core-dump claims hold nothing a restore needs. Two things distinguish a database cluster from a stateless workload:
+Back up the `lib-storage` claims; the core-dump claims hold nothing a restore needs. With `storage.<role>.fileLogging` on (the default) a `lib-storage` claim also holds Memgraph's log files under `logs/`, which ride along in the snapshot and are harmless on restore. Two things distinguish a database cluster from a stateless workload:
 
 - **Consistency across members.** Snapshot all `lib-storage` claims of the cluster as one group, at one instant, so the coordinators' view of the cluster and the data instances' storage agree. With Stork that is a `GroupVolumeSnapshot` selecting `app.kubernetes.io/instance=<cluster>`; Velero and Kasten have their own grouping. Snapshots taken one claim at a time, seconds apart, can disagree about which instance was MAIN and how far each replica had caught up.
 - **Application consistency.** A snapshot is crash-consistent: Memgraph recovers from it as it would from a power loss, replaying the WAL since its last own snapshot. Running `CREATE SNAPSHOT;` on the MAIN just before the volume snapshot (a Stork pre-exec `Rule`, a Velero pre-hook) shortens that replay to seconds. It is an optimization, not a requirement.

@@ -340,20 +340,15 @@ type normalizedProbe struct {
 	periodSeconds    int32
 }
 
-// normalizedStorage is one role's lib and log claim configuration with every
-// optional field resolved to its CRD schema default. A nil storage class means
-// "use the cluster default" and is passed through as nil, which is distinct
-// from the empty string (no dynamic provisioning).
+// normalizedStorage is one role's lib claim and file logging configuration
+// with every optional field resolved to its CRD schema default. A nil storage
+// class means "use the cluster default" and is passed through as nil, which is
+// distinct from the empty string (no dynamic provisioning).
 type normalizedStorage struct {
 	libSize       resource.Quantity
 	libAccessMode corev1.PersistentVolumeAccessMode
 	libClass      *string
-	// createLogClaim is false when the role opted out of log storage; the log
-	// fields below are then unused.
-	createLogClaim bool
-	logSize        resource.Quantity
-	logAccessMode  corev1.PersistentVolumeAccessMode
-	logClass       *string
+	fileLogging   bool
 }
 
 func normalize(spec memgraphcomv1alpha1.MemgraphClusterSpec) normalizedSpec {
@@ -583,28 +578,19 @@ func normalizeEnv(spec []memgraphcomv1alpha1.EnvVar) []corev1.EnvVar {
 
 func normalizeStorage(spec memgraphcomv1alpha1.RoleStorageSpec) normalizedStorage {
 	n := normalizedStorage{
-		libSize:        resource.MustParse(memgraphcomv1alpha1.DefaultLibPVCSize),
-		libAccessMode:  spec.LibStorageAccessMode,
-		libClass:       spec.LibStorageClassName,
-		createLogClaim: memgraphcomv1alpha1.DefaultCreateLogStorageClaim,
-		logSize:        resource.MustParse(memgraphcomv1alpha1.DefaultLogPVCSize),
-		logAccessMode:  spec.LogStorageAccessMode,
-		logClass:       spec.LogStorageClassName,
+		libSize:       resource.MustParse(memgraphcomv1alpha1.DefaultLibPVCSize),
+		libAccessMode: spec.LibStorageAccessMode,
+		libClass:      spec.LibStorageClassName,
+		fileLogging:   memgraphcomv1alpha1.DefaultFileLogging,
 	}
-	if spec.CreateLogStorageClaim != nil {
-		n.createLogClaim = *spec.CreateLogStorageClaim
+	if spec.FileLogging != nil {
+		n.fileLogging = *spec.FileLogging
 	}
 	if spec.LibPVCSize != nil {
 		n.libSize = *spec.LibPVCSize
 	}
-	if spec.LogPVCSize != nil {
-		n.logSize = *spec.LogPVCSize
-	}
 	if n.libAccessMode == "" {
 		n.libAccessMode = memgraphcomv1alpha1.DefaultStorageAccessMode
-	}
-	if n.logAccessMode == "" {
-		n.logAccessMode = memgraphcomv1alpha1.DefaultStorageAccessMode
 	}
 	return n
 }

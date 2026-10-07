@@ -93,7 +93,7 @@ stood out there.
 Memgraph is behaving correctly throughout: its RPC clients re-resolve on every attempt and cache
 nothing in-process, which is why the gap is exactly one CoreDNS TTL and nothing more. The
 `Name or service not known` lines at TRACE level in both the coordinator's and the MAIN's logs are
-the signature.
+the signature; the operator's default is INFO, so set `log-level: TRACE` in `spec.flags` to see them.
 
 ## Diagnosing a slow or apparently stuck roll
 
@@ -110,8 +110,9 @@ the signature.
 3. Which pods still need a restart is the pods' `controller-revision-hash` label compared with the
    StatefulSet's `status.updateRevision`; `kubectl get controllerrevisions` shows the args each
    revision carried and when it was created.
-4. Memgraph's own logs persist on the `log-storage` claim at
-   `/var/log/memgraph/memgraph_<date>.log`, so they survive the pod being recreated. Look there for
+4. Memgraph's own logs persist on the `lib-storage` claim at
+   `/var/lib/memgraph/logs/memgraph_<date>.log` (with `fileLogging` on, the default), so they
+   survive the pod being recreated. Look there for
    `Name or service not known` (DNS), `Replica <name> up to date` (the catch-up the roll waits
    for), and `PromoteToMainReq` / `DemoteMainToReplicaReq` (coordinator-driven failovers).
 5. The TTL in force: `kubectl -n kube-system get cm coredns -o jsonpath='{.data.Corefile}'`.

@@ -63,9 +63,9 @@ const (
 	logLevelUnderscore = "log_level"
 	snapshotOnExitFlag = "storage-snapshot-on-exit"
 
-	infoLevel memgraphcomv1alpha1.FlagValue = "INFO"
-	flagOn    memgraphcomv1alpha1.FlagValue = "true"
-	flagOff   memgraphcomv1alpha1.FlagValue = "false"
+	debugLevel memgraphcomv1alpha1.FlagValue = "DEBUG"
+	flagOn     memgraphcomv1alpha1.FlagValue = "true"
+	flagOff    memgraphcomv1alpha1.FlagValue = "false"
 
 	// The coordinator settings the specs and the fake share.
 	downTimeoutSetting = "instance_down_timeout_sec"
@@ -259,26 +259,18 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			}
 		})
 
-		It("should back both roles with retained lib and log claims", func() {
+		It("should back both roles with a retained lib claim", func() {
 			reconcileCluster(resourceName)
 
 			for _, suffix := range []string{coordinatorSuffix, dataSuffix} {
 				sts := &appsv1.StatefulSet{}
 				get(resourceName+suffix, sts)
 
-				claims := map[string]corev1.PersistentVolumeClaimSpec{}
-				for _, claim := range sts.Spec.VolumeClaimTemplates {
-					claims[claim.Name] = claim.Spec
-				}
-				Expect(claims).To(HaveKey("lib-storage"))
-				Expect(claims).To(HaveKey("log-storage"))
-				for name, claim := range claims {
-					Expect(claim.AccessModes).To(ConsistOf(corev1.ReadWriteOnce), "claim %s", name)
-					Expect(claim.Resources.Requests.Storage()).To(HaveValue(Equal(resource.MustParse("1Gi"))),
-						"claim %s", name)
-					Expect(claim.StorageClassName).To(BeNil(),
-						"claim %s must fall back to the cluster's default StorageClass", name)
-				}
+				Expect(sts.Spec.VolumeClaimTemplates).To(HaveLen(1), "the log files live on the lib claim")
+				claim := libClaim(sts)
+				Expect(claim.AccessModes).To(ConsistOf(corev1.ReadWriteOnce))
+				Expect(claim.Resources.Requests.Storage()).To(HaveValue(Equal(resource.MustParse("10Gi"))))
+				Expect(claim.StorageClassName).To(BeNil(), "the claim must fall back to the cluster's default StorageClass")
 
 				// The default keeps data safe from an accidental CR delete and
 				// from a scale-down alike: one retention knob, both halves of
@@ -1994,7 +1986,10 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			resource := &memgraphcomv1alpha1.MemgraphCluster{
 				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: resourceNamespace},
 				Spec: memgraphcomv1alpha1.MemgraphClusterSpec{Storage: memgraphcomv1alpha1.StorageSpec{
-					Data: memgraphcomv1alpha1.RoleStorageSpec{LibStorageClassName: ptr.To(class)},
+					Data: memgraphcomv1alpha1.RoleStorageSpec{
+						LibPVCSize:          ptr.To(resource.MustParse("1Gi")),
+						LibStorageClassName: ptr.To(class),
+					},
 				}},
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
@@ -2356,7 +2351,7 @@ var _ = Describe("MemgraphCluster Controller", func() {
 				Spec: memgraphcomv1alpha1.MemgraphClusterSpec{
 					Flags: memgraphcomv1alpha1.FlagsSpec{
 						Data: map[string]memgraphcomv1alpha1.FlagValue{
-							logLevelFlag:       infoLevel,
+							logLevelFlag:       debugLevel,
 							snapshotOnExitFlag: flagOff,
 						},
 					},
@@ -2393,12 +2388,12 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			get(resourceName+dataSuffix+"-flags", data)
 			expectControlledBy(data, cluster)
 			Expect(data.Data[resources.FlagFileKey]).To(Equal(
-				"--also_log_to_stderr=true\n--log_level=INFO\n--log_retention_days=35\n--storage_snapshot_on_exit=false\n"))
+				"--also_log_to_stderr=true\n--log_level=DEBUG\n--log_retention_days=35\n--storage_snapshot_on_exit=false\n"))
 
 			coordinators := &corev1.ConfigMap{}
 			get(resourceName+coordinatorSuffix+"-flags", coordinators)
 			Expect(coordinators.Data[resources.FlagFileKey]).To(Equal(
-				"--also_log_to_stderr=true\n--log_level=TRACE\n--log_retention_days=35\n"),
+				"--also_log_to_stderr=true\n--log_level=INFO\n--log_retention_days=35\n"),
 				"the data flags are not the coordinators'")
 
 			sts := &appsv1.StatefulSet{}
@@ -2415,16 +2410,16 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			reconcileCluster(resourceName)
 
 			for ordinal := range 2 {
-				Expect(fake.settingsOf(podAddress(dataSuffix, ordinal))).To(HaveKeyWithValue("log.level", string(infoLevel)),
+				Expect(fake.settingsOf(podAddress(dataSuffix, ordinal))).To(HaveKeyWithValue("log.level", string(debugLevel)),
 					"data pod %d must have been SET", ordinal)
 			}
 			for ordinal := range 3 {
-				Expect(fake.settingsOf(podAddress(coordinatorSuffix, ordinal))).To(HaveKeyWithValue("log.level", "TRACE"),
+				Expect(fake.settingsOf(podAddress(coordinatorSuffix, ordinal))).To(HaveKeyWithValue("log.level", "INFO"),
 					"the coordinators keep their default, the flag is the data instances'")
 			}
 			Expect(setCommands()).To(ConsistOf(
-				podAddress(dataSuffix, 0)+`: SET DATABASE SETTING "log.level" TO "INFO"`,
-				podAddress(dataSuffix, 1)+`: SET DATABASE SETTING "log.level" TO "INFO"`,
+				podAddress(dataSuffix, 0)+`: SET DATABASE SETTING "log.level" TO "DEBUG"`,
+				podAddress(dataSuffix, 1)+`: SET DATABASE SETTING "log.level" TO "DEBUG"`,
 			), "exactly the run-time flag that differs, once per instance; the startup-only one is never SET")
 			Expect(flagsAnnotation(dataSuffix)).To(Equal(hashBefore), "a run-time flag is not part of the pod template")
 			Expect(condition(memgraphcomv1alpha1.ConditionConverged).Status).To(Equal(metav1.ConditionTrue))
@@ -2436,10 +2431,10 @@ var _ = Describe("MemgraphCluster Controller", func() {
 
 			By("following a further change to the same flag without touching the template")
 			setFlags(memgraphcomv1alpha1.FlagsSpec{Data: map[string]memgraphcomv1alpha1.FlagValue{
-				logLevelFlag: "DEBUG", snapshotOnExitFlag: flagOff,
+				logLevelFlag: "WARNING", snapshotOnExitFlag: flagOff,
 			}})
 			reconcileCluster(resourceName)
-			Expect(fake.settingsOf(podAddress(dataSuffix, 1))).To(HaveKeyWithValue("log.level", "DEBUG"))
+			Expect(fake.settingsOf(podAddress(dataSuffix, 1))).To(HaveKeyWithValue("log.level", "WARNING"))
 			Expect(flagsAnnotation(dataSuffix)).To(Equal(hashBefore))
 		})
 
@@ -2448,7 +2443,7 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			coordinatorsBefore := flagsAnnotation(coordinatorSuffix)
 
 			setFlags(memgraphcomv1alpha1.FlagsSpec{Data: map[string]memgraphcomv1alpha1.FlagValue{
-				logLevelFlag: infoLevel, snapshotOnExitFlag: flagOn,
+				logLevelFlag: debugLevel, snapshotOnExitFlag: flagOn,
 			}})
 			reconcileCluster(resourceName)
 
@@ -2463,13 +2458,13 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			fake.setUnreachable(podAddress(coordinatorSuffix, 2), true)
 			setFlags(memgraphcomv1alpha1.FlagsSpec{
 				Coordinators: map[string]memgraphcomv1alpha1.FlagValue{logLevelFlag: "WARNING"},
-				Data:         map[string]memgraphcomv1alpha1.FlagValue{logLevelFlag: infoLevel, snapshotOnExitFlag: flagOff},
+				Data:         map[string]memgraphcomv1alpha1.FlagValue{logLevelFlag: debugLevel, snapshotOnExitFlag: flagOff},
 			})
 
 			result := reconcileCluster(resourceName)
 
-			Expect(fake.settingsOf(podAddress(dataSuffix, 0))).To(HaveKeyWithValue("log.level", string(infoLevel)))
-			Expect(fake.settingsOf(podAddress(dataSuffix, 1))).To(HaveKeyWithValue("log.level", "TRACE"),
+			Expect(fake.settingsOf(podAddress(dataSuffix, 0))).To(HaveKeyWithValue("log.level", string(debugLevel)))
+			Expect(fake.settingsOf(podAddress(dataSuffix, 1))).To(HaveKeyWithValue("log.level", "INFO"),
 				"an unready pod is not dialed")
 			Expect(fake.settingsOf(podAddress(coordinatorSuffix, 0))).To(HaveKeyWithValue("log.level", "WARNING"))
 			converged := condition(memgraphcomv1alpha1.ConditionConverged)
@@ -2489,7 +2484,7 @@ var _ = Describe("MemgraphCluster Controller", func() {
 
 		It("should report a SET the instance rejects with Memgraph's error and keep retrying it", func() {
 			setFlags(memgraphcomv1alpha1.FlagsSpec{Data: map[string]memgraphcomv1alpha1.FlagValue{
-				logLevelFlag: infoLevel, "also-log-to-stderr": "1",
+				logLevelFlag: debugLevel, "also-log-to-stderr": "1",
 			}})
 
 			result := reconcileCluster(resourceName)
@@ -2506,7 +2501,7 @@ var _ = Describe("MemgraphCluster Controller", func() {
 
 			By("clearing once the flag is fixed")
 			setFlags(memgraphcomv1alpha1.FlagsSpec{Data: map[string]memgraphcomv1alpha1.FlagValue{
-				logLevelFlag: infoLevel, "also-log-to-stderr": "false",
+				logLevelFlag: debugLevel, "also-log-to-stderr": "false",
 			}})
 			reconcileCluster(resourceName)
 			Expect(fake.settingsOf(podAddress(dataSuffix, 0))).To(HaveKeyWithValue("log.to_stderr", "false"))
@@ -2515,7 +2510,7 @@ var _ = Describe("MemgraphCluster Controller", func() {
 
 		It("should leave a setting alone once its flag is removed, unless the operator has a default for it", func() {
 			setFlags(memgraphcomv1alpha1.FlagsSpec{Data: map[string]memgraphcomv1alpha1.FlagValue{
-				logLevelFlag: infoLevel, "query-execution-timeout-sec": "10",
+				logLevelFlag: debugLevel, "query-execution-timeout-sec": "10",
 			}})
 			reconcileCluster(resourceName)
 			Expect(fake.settingsOf(podAddress(dataSuffix, 0))).To(HaveKeyWithValue("query.timeout", "10"))
@@ -2526,7 +2521,7 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			settings := fake.settingsOf(podAddress(dataSuffix, 0))
 			Expect(settings).To(HaveKeyWithValue("query.timeout", "10"),
 				"a removed flag issues no SET: the setting reverts when the instance next restarts without it")
-			Expect(settings).To(HaveKeyWithValue("log.level", "TRACE"),
+			Expect(settings).To(HaveKeyWithValue("log.level", "INFO"),
 				"a removed flag the operator has a default for goes back to the default, which the flag file now says")
 			Expect(condition(memgraphcomv1alpha1.ConditionConverged).Status).To(Equal(metav1.ConditionTrue))
 		})

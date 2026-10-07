@@ -145,7 +145,7 @@ func flagsConfigMap(
 // reads it as a flag missing its value and ignores it.
 func defaultFlags() map[string]string {
 	return map[string]string{
-		"log_level":          "TRACE",
+		"log_level":          "INFO",
 		"also_log_to_stderr": "true",
 		"log_retention_days": "35",
 	}
