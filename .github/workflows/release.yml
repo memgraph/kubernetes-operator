@@ -1,0 +1,571 @@
+name: Release
+
+# The path from a version tag to installable artifacts: the operator image on
+# Docker Hub, and the install chart in the memgraph.github.io/helm-charts index
+# users already have configured.
+#
+# The chart version and the operator version move independently, so a tag names
+# which of the two it releases:
+#
+#   v0.2.0       an operator release -- builds and publishes the image, and
+#                publishes the chart alongside it. Must equal the appVersion.
+#   chart-0.4.2  a chart-only release -- no image is built, and the chart keeps
+#                pointing at the operator its appVersion already names. Must
+#                equal the chart version.
+#
+# Running this from the Actions tab instead is a dry run: everything is built,
+# packaged and installed on Kind, and nothing is published. Tagging a SemVer
+# prerelease (v0.2.0-rc.1) is the other rehearsal -- it publishes for real, but
+# helm hides prereleases from `helm install` unless --devel is passed, so the
+# public index is exercised without being disturbed.
+#
+# See docs/releasing.md for the procedure and the credentials this needs.
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+      - 'v[0-9]+.[0-9]+.[0-9]+-*'
+      - 'chart-[0-9]+.[0-9]+.[0-9]+'
+      - 'chart-[0-9]+.[0-9]+.[0-9]+-*'
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: 'Publish for real, instead of dry-running the pipeline.'
+        type: boolean
+        default: false
+
+permissions: {}
+
+# Releases are never cancelled halfway: a run stopped between pushing the image
+# and indexing the chart leaves the two out of step.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  IMAGE_REPOSITORY: docker.io/memgraph/kubernetes-operator
+  CHARTS_REPO: memgraph/helm-charts
+  CHARTS_INDEX_URL: https://memgraph.github.io/helm-charts
+  CHART_NAME: memgraph-operator
+  CHART_NAMESPACE: memgraph-operator-system
+
+jobs:
+  resolve:
+    name: Resolve the release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      kind: ${{ steps.resolve.outputs.kind }}
+      chart_version: ${{ steps.resolve.outputs.chart_version }}
+      app_version: ${{ steps.resolve.outputs.app_version }}
+      version: ${{ steps.resolve.outputs.version }}
+      prerelease: ${{ steps.resolve.outputs.prerelease }}
+      publish: ${{ steps.resolve.outputs.publish }}
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: go.mod
+
+      # The chart declares both versions; a tag may only name one of them, and
+      # has to agree with what the chart says. Publishing a version the tagged
+      # tree does not declare is the one way to produce artifacts nobody can
+      # trace back to a commit, so it fails here, before anything is built.
+      - name: Resolve the versions
+        id: resolve
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_PUBLISH: ${{ inputs.publish }}
+        run: |
+          set -euo pipefail
+          chart_version=$(make -s chart-version)
+          app_version=$(make -s chart-app-version)
+
+          if [ "${REF_TYPE}" = tag ]; then
+            publish=true
+            case "${REF_NAME}" in
+              chart-*) kind=chart;    tag_version=${REF_NAME#chart-} ;;
+              *)       kind=operator; tag_version=${REF_NAME#v} ;;
+            esac
+          else
+            # No tag to go on, so the run releases the operator the chart
+            # currently declares. Dry runs take this path.
+            publish=${INPUT_PUBLISH:-false}
+            kind=operator
+            tag_version=""
+          fi
+
+          if [ "${kind}" = operator ]; then
+            version=${app_version}
+            declared="appVersion"
+          else
+            version=${chart_version}
+            declared="version"
+          fi
+
+          if [ -n "${tag_version}" ] && [ "${tag_version}" != "${version}" ]; then
+            echo "::error::Tag ${REF_NAME} releases the ${kind}, but the chart's ${declared} is ${version}, not ${tag_version}. Bump the chart on a pull request first, then tag the merge commit."
+            exit 1
+          fi
+
+          case "${version}" in
+            *-*) prerelease=true ;;
+            *) prerelease=false ;;
+          esac
+
+          {
+            echo "kind=${kind}"
+            echo "chart_version=${chart_version}"
+            echo "app_version=${app_version}"
+            echo "version=${version}"
+            echo "prerelease=${prerelease}"
+            echo "publish=${publish}"
+          } >>"${GITHUB_OUTPUT}"
+
+          {
+            echo "### ${kind} release ${version}"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| chart version | \`${chart_version}\` |"
+            echo "| operator version (appVersion) | \`${app_version}\` |"
+            echo "| prerelease | \`${prerelease}\` |"
+            echo "| publishing | \`${publish}\` |"
+          } >>"${GITHUB_STEP_SUMMARY}"
+
+      # Failing here beats failing after the image is already on Docker Hub.
+      - name: Check the release credentials are present
+        if: steps.resolve.outputs.publish == 'true'
+        env:
+          KIND: ${{ steps.resolve.outputs.kind }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          HELM_CHARTS_TOKEN: ${{ secrets.HELM_CHARTS_TOKEN }}
+        run: |
+          set -euo pipefail
+          missing=()
+          [ -n "${HELM_CHARTS_TOKEN}" ] || missing+=(HELM_CHARTS_TOKEN)
+          if [ "${KIND}" = operator ]; then
+            [ -n "${DOCKERHUB_USERNAME}" ] || missing+=(DOCKERHUB_USERNAME)
+            [ -n "${DOCKERHUB_TOKEN}" ] || missing+=(DOCKERHUB_TOKEN)
+          fi
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error::Missing repository secrets: ${missing[*]}. See docs/releasing.md for what they are and how to create them."
+            exit 1
+          fi
+
+  image:
+    name: Operator image
+    needs: resolve
+    if: needs.resolve.outputs.kind == 'operator'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      # Published tags are immutable, by convention and by the trust users place
+      # in them -- including the 0.0.x and 1.0.0 tags in this repository, which
+      # belong to the operator attempt archived on archive/pre-operator-mvp.
+      #
+      # An image built from this very commit is the exception: it is this same
+      # release's earlier attempt, from a run that failed after the push. That
+      # one is left alone and the build skipped, so re-running finishes the
+      # release instead of being stopped by its own progress. The revision
+      # label is what tells the two apart.
+      - name: Check whether the image tag is already published
+        id: existing
+        if: needs.resolve.outputs.publish == 'true'
+        env:
+          IMAGE: ${{ env.IMAGE_REPOSITORY }}:${{ needs.resolve.outputs.version }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if ! docker manifest inspect "${IMAGE}" >/dev/null 2>&1; then
+            echo "published=false" >>"${GITHUB_OUTPUT}"
+            echo "${IMAGE} is free."
+            exit 0
+          fi
+
+          # Single-platform images inspect as a config object; multi-platform
+          # ones as a map keyed by platform.
+          revision=$(docker buildx imagetools inspect "${IMAGE}" --format '{{ json .Image }}' 2>/dev/null |
+            jq -r 'if has("config") then . else (to_entries | .[0].value) end
+                   | .config.Labels["org.opencontainers.image.revision"] // empty' 2>/dev/null || true)
+
+          if [ "${revision}" = "${SHA}" ]; then
+            echo "published=true" >>"${GITHUB_OUTPUT}"
+            echo "::notice::${IMAGE} was already pushed from ${SHA}; skipping the build and carrying on."
+            exit 0
+          fi
+
+          echo "::error::${IMAGE} already exists and was not built from ${SHA}. Bump the chart's appVersion, or release the chart alone with a chart-<version> tag."
+          exit 1
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
+
+      - name: Log in to Docker Hub
+        if: needs.resolve.outputs.publish == 'true'
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # latest follows stable releases only, so a release candidate never
+      # becomes what an unqualified pull resolves to.
+      - name: Work out the image tags
+        id: tags
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+          PRERELEASE: ${{ needs.resolve.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          {
+            echo "tags<<EOF"
+            echo "${IMAGE_REPOSITORY}:${VERSION}"
+            [ "${PRERELEASE}" = true ] || echo "${IMAGE_REPOSITORY}:latest"
+            echo "EOF"
+          } >>"${GITHUB_OUTPUT}"
+
+      - name: Build and push the operator image
+        if: needs.resolve.outputs.publish == 'true' && steps.existing.outputs.published != 'true'
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
+          labels: |
+            org.opencontainers.image.title=memgraph-operator
+            org.opencontainers.image.description=Kubernetes operator for Memgraph high-availability clusters
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ needs.resolve.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # A dry run still builds both architectures, because a broken arm64 build
+      # is exactly the kind of thing a rehearsal is for.
+      - name: Build the operator image without pushing
+        if: needs.resolve.outputs.publish != 'true'
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: false
+          tags: ${{ steps.tags.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # ... and then exports the amd64 image alone, so the verify job can load
+      # it into Kind and install the chart with its own default image tag. The
+      # layers are already cached by the build above.
+      - name: Export the image for the verify job
+        if: needs.resolve.outputs.publish != 'true'
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          platforms: linux/amd64
+          tags: ${{ env.IMAGE_REPOSITORY }}:${{ needs.resolve.outputs.version }}
+          outputs: type=docker,dest=/tmp/operator-image.tar
+          cache-from: type=gha
+
+      - name: Upload the image
+        if: needs.resolve.outputs.publish != 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: operator-image
+          path: /tmp/operator-image.tar
+          retention-days: 1
+
+  chart:
+    name: Install chart
+    needs: [resolve, image]
+    # The image job is skipped for a chart-only release; the chart still ships.
+    if: always() && needs.resolve.result == 'success' && needs.image.result != 'failure' && needs.image.result != 'cancelled'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+          # The chart-only path compares the generated manifests against the
+          # tag its appVersion names, which needs the tags and their history.
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: go.mod
+
+      # The chart ships CRDs and RBAC rules generated from the Go sources. At a
+      # release this is not a style check: it is what makes the chart's CRD the
+      # one this operator's types describe.
+      - name: Verify the generated chart manifests
+        run: make chart-verify
+
+      - name: Lint the chart
+        run: make helm-lint
+
+      - name: Test the cross-publish path
+        run: make test-chart-publish
+
+      # A chart is only installable if the operator image its appVersion names
+      # is actually on Docker Hub. For an operator release the image job just
+      # pushed it; for a chart-only release it has to already be there.
+      - name: Check the operator image the chart installs exists
+        if: needs.resolve.outputs.kind == 'chart' && needs.resolve.outputs.publish == 'true'
+        env:
+          IMAGE: ${{ env.IMAGE_REPOSITORY }}:${{ needs.resolve.outputs.app_version }}
+        run: |
+          set -euo pipefail
+          if ! docker manifest inspect "${IMAGE}" >/dev/null 2>&1; then
+            echo "::error::The chart's appVersion names ${IMAGE}, which does not exist. Release the operator first with a v<version> tag."
+            exit 1
+          fi
+          echo "${IMAGE} exists."
+
+      # The chart's CRDs come from the commit being released, its appVersion
+      # from whenever the operator was last released. Nothing forces those to
+      # be the same commit, so a chart-only release can ship a CRD the operator
+      # it installs has never seen. This reports it rather than refusing it --
+      # the two versions are deliberately independent -- but it is worth a look
+      # before the release goes out.
+      - name: Report CRD drift against the operator being installed
+        if: needs.resolve.outputs.kind == 'chart'
+        env:
+          APP_VERSION: ${{ needs.resolve.outputs.app_version }}
+        run: |
+          set -euo pipefail
+          tag="v${APP_VERSION}"
+          if ! git rev-parse --verify --quiet "${tag}^{commit}" >/dev/null; then
+            echo "No ${tag} tag to compare against; skipping." >>"${GITHUB_STEP_SUMMARY}"
+            exit 0
+          fi
+          if git diff --quiet "${tag}" -- charts/memgraph-operator/crds; then
+            echo "CRDs are unchanged since operator ${APP_VERSION}." >>"${GITHUB_STEP_SUMMARY}"
+          else
+            echo "::warning::The chart's CRDs differ from those released with operator ${APP_VERSION}, which is the operator this chart installs."
+            {
+              echo
+              echo "> **CRD drift**: this chart ships CRDs that changed since \`${tag}\`,"
+              echo "> but installs operator \`${APP_VERSION}\`. Check the operator understands them."
+              echo
+              echo '```'
+              git diff --stat "${tag}" -- charts/memgraph-operator/crds
+              echo '```'
+            } >>"${GITHUB_STEP_SUMMARY}"
+          fi
+
+      - name: Package the chart
+        if: needs.resolve.outputs.publish != 'true'
+        env:
+          VERSION: ${{ needs.resolve.outputs.chart_version }}
+        run: ./hack/chart-publish.sh --version "${VERSION}"
+
+      - name: Package the chart and publish it to the Memgraph helm repository
+        if: needs.resolve.outputs.publish == 'true'
+        env:
+          VERSION: ${{ needs.resolve.outputs.chart_version }}
+          # Scoped to contents write on the charts repository only; see
+          # docs/releasing.md for its scope and rotation.
+          GH_TOKEN: ${{ secrets.HELM_CHARTS_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Lets git push to the charts repository with the same token, without
+          # it ever appearing in a URL or a log line.
+          gh auth setup-git
+          ./hack/chart-publish.sh --version "${VERSION}" --publish
+
+      - name: Upload the packaged chart
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: chart-package
+          path: dist/chart/*.tgz
+          retention-days: 7
+
+  verify:
+    name: Verify the install
+    needs: [resolve, image, chart]
+    if: always() && needs.chart.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: go.mod
+
+      - name: Install Kind
+        run: go install sigs.k8s.io/kind@v0.32.0
+
+      - name: Create a Kind cluster
+        run: kind create cluster --name release-verify
+
+      # The published path: install exactly as a user would, from the helm
+      # repository they already have configured, pulling the image that was
+      # just pushed. GitHub Pages takes a minute or two to serve a new index.
+      - name: Wait for the chart to appear in the Memgraph helm repository
+        if: needs.resolve.outputs.publish == 'true'
+        env:
+          VERSION: ${{ needs.resolve.outputs.chart_version }}
+        run: |
+          set -euo pipefail
+          helm repo add memgraph "${CHARTS_INDEX_URL}"
+          for attempt in $(seq 1 30); do
+            helm repo update memgraph >/dev/null
+            if helm search repo "memgraph/${CHART_NAME}" --version "${VERSION}" --devel |
+              grep -q "${VERSION}"; then
+              echo "The index serves ${CHART_NAME} ${VERSION} (attempt ${attempt})."
+              exit 0
+            fi
+            sleep 20
+          done
+          echo "::error::${CHARTS_INDEX_URL} did not serve ${CHART_NAME} ${VERSION} within 10 minutes."
+          exit 1
+
+      # The dry-run path: the image was never pushed, so it is loaded into Kind
+      # under the exact tag the chart's appVersion resolves to. The chart is
+      # then installed with its own defaults, image reference included.
+      - name: Download the locally built image
+        if: needs.resolve.outputs.publish != 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: operator-image
+          path: /tmp
+
+      - name: Load the image into Kind
+        if: needs.resolve.outputs.publish != 'true'
+        run: |
+          set -euo pipefail
+          docker load --input /tmp/operator-image.tar
+          kind load docker-image "${IMAGE_REPOSITORY}:${{ needs.resolve.outputs.app_version }}" \
+            --name release-verify
+
+      - name: Download the packaged chart
+        if: needs.resolve.outputs.publish != 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: chart-package
+          path: dist/chart
+
+      - name: Install the operator
+        env:
+          PUBLISH: ${{ needs.resolve.outputs.publish }}
+          VERSION: ${{ needs.resolve.outputs.chart_version }}
+        run: |
+          set -euo pipefail
+          if [ "${PUBLISH}" = true ]; then
+            chart="memgraph/${CHART_NAME}"
+            set -- --version "${VERSION}" --devel
+          else
+            chart="dist/chart/${CHART_NAME}-${VERSION}.tgz"
+            set --
+          fi
+          helm install "${CHART_NAME}" "${chart}" "$@" \
+            --namespace "${CHART_NAMESPACE}" --create-namespace \
+            --wait --timeout 5m
+
+      # What the release actually promises: installing chart <version> runs the
+      # operator its appVersion names. A template bug would satisfy every string
+      # comparison made so far and still fail here.
+      - name: Check the running operator is the released image
+        env:
+          EXPECTED: ${{ env.IMAGE_REPOSITORY }}:${{ needs.resolve.outputs.app_version }}
+        run: |
+          set -euo pipefail
+          actual=$(kubectl get deployment "${CHART_NAME}-controller-manager" \
+            --namespace "${CHART_NAMESPACE}" \
+            -o jsonpath='{.spec.template.spec.containers[?(@.name=="manager")].image}')
+          if [ "${actual}" != "${EXPECTED}" ]; then
+            echo "::error::The chart installed ${actual}, expected ${EXPECTED}."
+            exit 1
+          fi
+          kubectl get crd memgraphclusters.memgraph.com >/dev/null
+          echo "Installed ${actual}, with the MemgraphCluster CRD."
+
+      - name: Uninstall
+        if: always()
+        run: |
+          helm uninstall "${CHART_NAME}" --namespace "${CHART_NAMESPACE}" --ignore-not-found
+          kind delete cluster --name release-verify
+
+  github-release:
+    name: GitHub release
+    needs: [resolve, chart, verify]
+    if: needs.resolve.outputs.publish == 'true' && github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      # Creating the release for this tag.
+      contents: write
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Download the packaged chart
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: chart-package
+          path: dist/chart
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+          KIND: ${{ needs.resolve.outputs.kind }}
+          CHART_VERSION: ${{ needs.resolve.outputs.chart_version }}
+          APP_VERSION: ${{ needs.resolve.outputs.app_version }}
+          PRERELEASE: ${{ needs.resolve.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          notes=$(cat <<EOF
+          Install chart \`${CHART_VERSION}\`, operator image \`${IMAGE_REPOSITORY}:${APP_VERSION}\`.
+
+          \`\`\`sh
+          helm repo add memgraph ${CHARTS_INDEX_URL}
+          helm repo update
+          helm install memgraph-operator memgraph/memgraph-operator --version ${CHART_VERSION} \\
+            --namespace ${CHART_NAMESPACE} --create-namespace
+          \`\`\`
+          EOF
+          )
+          if [ "${KIND}" = chart ]; then
+            notes="${notes}
+
+          A chart-only release: no new operator image, and the chart continues to install \`${APP_VERSION}\`."
+          fi
+
+          prerelease=()
+          [ "${PRERELEASE}" = true ] && prerelease=(--prerelease)
+
+          gh release create "${TAG}" dist/chart/*.tgz \
+            --title "${TAG}" \
+            --notes "${notes}" \
+            --generate-notes \
+            --verify-tag \
+            "${prerelease[@]}"

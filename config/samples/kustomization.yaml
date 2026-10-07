@@ -1,2 +1,4 @@
+## Append samples of your project ##
 resources:
-- memgraph_v1_ha.yaml
+- v1alpha1_memgraphcluster.yaml
+# +kubebuilder:scaffold:manifestskustomizesamples
