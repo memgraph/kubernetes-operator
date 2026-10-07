@@ -926,8 +926,8 @@ var _ = Describe("MemgraphCluster", Ordered, func() {
 		By("recording the provisioned PVCs")
 		before, err := listPVCs(clusterNamespace)
 		Expect(err).NotTo(HaveOccurred())
-		// Two claims (lib and log) per coordinator and data instance pod.
-		Expect(before).To(HaveLen(int(2 * (coordinatorCount + dataInstanceCount))))
+		// One lib claim per coordinator and data instance pod.
+		Expect(before).To(HaveLen(int(coordinatorCount + dataInstanceCount)))
 
 		By("deleting the MemgraphCluster")
 		cmd := exec.Command("kubectl", "delete", "memgraphcluster", clusterName,
@@ -1001,7 +1001,7 @@ spec:
 		Expect(err).NotTo(HaveOccurred(), "Failed to apply the MemgraphCluster")
 
 		By("waiting for the claims to be provisioned and adopted by their StatefulSets")
-		// One lib and one log claim per pod: three coordinators and one data
+		// One lib claim per pod: three coordinators and one data
 		// instance, the smallest topology admission accepts. Adoption is what
 		// the spec has to wait for, not mere existence: the Delete policy
 		// reaches a claim as the StatefulSet owner reference the controller
@@ -1083,7 +1083,7 @@ var _ = Describe("MemgraphCluster topology scaling", Ordered, func() {
 		createLicenseSecret(scalingNamespace, license, organization)
 
 		By("applying the MemgraphCluster to scale")
-		// No log claim and explicit small requests: this cluster runs up to eight
+		// No file logging and explicit small requests: this cluster runs up to eight
 		// pods on the same Kind nodes as the other scenarios', so it asks for as
 		// little as it can while still being a real HA cluster.
 		manifest := fmt.Sprintf(`apiVersion: memgraph.com/v1alpha1
