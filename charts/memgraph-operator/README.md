@@ -2,8 +2,8 @@
 
 Installs the Memgraph Kubernetes operator: the `MemgraphCluster` CustomResourceDefinition, a
 least-privilege RBAC set, and the controller Deployment. Declaring a cluster is then a single
-resource — see the [repository README](../../README.md) and the
-[PRD](../../specs/operator-mvp/PRD.md).
+resource — see the [repository README](../../README.md) and its
+[`docs/`](../../docs).
 
 The chart lives in the operator repository next to the generated manifests: the CRDs under
 `crds/` and the manager's RBAC rules under `rbac/` are generated from the Go types and the

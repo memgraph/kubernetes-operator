@@ -1811,8 +1811,8 @@ func createLicenseSecret(namespace, license, organization string) {
 }
 
 // applyMemgraphCluster applies the CR under test: the README's quickstart
-// manifest, unmodified, which is the minimal spec of the PRD's first-contact
-// story — image, counts, and a license secret reference. The manifest declares
+// manifest, unmodified, which is the minimal spec of a newcomer's first
+// contact — image, counts, and a license secret reference. The manifest declares
 // no namespace, exactly as a newcomer applies it into their own.
 func applyMemgraphCluster() {
 	cmd := exec.Command("kubectl", "apply", "-n", clusterNamespace, "-f", exampleManifest)
