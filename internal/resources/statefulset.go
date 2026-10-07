@@ -33,10 +33,12 @@ import (
 const (
 	memgraphBinary = "/usr/lib/memgraph/memgraph"
 	dataDirectory  = "/var/lib/memgraph/mg_data"
-	logFile        = "/var/log/memgraph/memgraph.log"
+	// logFile sits in a directory of its own on the lib claim because Memgraph
+	// prunes old log files from the log file's directory: the claim root would
+	// put everything else there in reach of that sweep.
+	logFile = "/var/lib/memgraph/logs/memgraph.log"
 
 	libMountPath = "/var/lib/memgraph"
-	logMountPath = "/var/log/memgraph"
 	tmpMountPath = "/tmp"
 	// coreDumpsMountPath is not configurable: it is only ever written to by the
 	// kernel and read by the uploader, both of which the operator points at it,
@@ -51,7 +53,6 @@ const (
 	// Volume names double as the StatefulSet volumeClaimTemplate names, so the
 	// provisioned claims are <volume>-<pod>, e.g. lib-storage-example-data-0.
 	libVolumeName       = "lib-storage"
-	logVolumeName       = "log-storage"
 	coreDumpsVolumeName = "core-dumps"
 	tmpVolumeName       = "tmp"
 
@@ -206,12 +207,14 @@ exec %s \
 // and the Vector sidecar reach the instance at, the metrics format, the data
 // directory on the lib claim, and the log file.
 //
-// A role that opted out of log storage gets --log-file with an empty value,
-// which is what turns file logging off. Leaving the flag out would not: the
-// image ships /etc/memgraph/memgraph.conf with log_file set to the path below,
-// Memgraph parses that file before the command line, and failing to open the
-// resulting path is fatal — so an unmounted log directory on a read-only root
-// filesystem would crash-loop the pod. also_log_to_stderr in the flag file
+// A role with file logging off gets --log-file with an empty value, which is
+// what turns file logging off. Leaving the flag out would not: the image
+// ships /etc/memgraph/memgraph.conf with log_file set to
+// /var/log/memgraph/memgraph.log, Memgraph parses that file before the command
+// line, and failing to open the resulting path is fatal — so on the read-only
+// root filesystem, where nothing is mounted there, the pod would crash-loop.
+// With file logging on, the log file is in its own directory on the lib claim,
+// which Memgraph creates on first start. also_log_to_stderr in the flag file
 // keeps the logs in `kubectl logs` either way.
 //
 // A cluster with Bolt TLS gets the certificate and key flags last. Memgraph
@@ -221,7 +224,7 @@ exec %s \
 // refuses to start with only some of them, so they always travel together.
 func commonArgs(spec normalizedSpec, role normalizedRole) []string {
 	logDestination := logFile
-	if !role.storage.createLogClaim {
+	if !role.storage.fileLogging {
 		logDestination = ""
 	}
 	args := []string{
@@ -422,17 +425,14 @@ func privilegedRootSecurityContext() *corev1.SecurityContext {
 // memgraph user, recursively, for storage drivers that do not honor the pod's
 // fsGroup and hand over a volume root owned by root. It runs after the
 // node-tuning containers, as in the HA chart, and mounts exactly what the
-// Memgraph container will use from the pod's claims: the lib volume, the log
-// volume when the role has a log claim, and the core dumps volume when the
-// role collects dumps. The uid and gid are the ones the pods run as, from the
+// Memgraph container will use from the pod's claims: the lib volume, which
+// holds the log files too, and the core dumps volume when the role collects
+// dumps. The uid and gid are the ones the pods run as, from the
 // securityContext block or the images' defaults; the chart's separate knobs
 // for them could only disagree with the pod. Like the other init containers
 // it runs the cluster's own Memgraph image.
 func fixOwnershipInitContainer(spec normalizedSpec, role normalizedRole, uid, gid int64) corev1.Container {
 	mounts := []corev1.VolumeMount{{Name: libVolumeName, MountPath: libMountPath}}
-	if role.storage.createLogClaim {
-		mounts = append(mounts, corev1.VolumeMount{Name: logVolumeName, MountPath: logMountPath})
-	}
 	if role.coreDumps.enabled {
 		mounts = append(mounts, corev1.VolumeMount{Name: coreDumpsVolumeName, MountPath: coreDumpsMountPath})
 	}
@@ -513,17 +513,14 @@ func uploaderSidecar(coreDumps normalizedCoreDumps) corev1.Container {
 }
 
 // volumeMounts are the Memgraph container's mounts: lib storage, the role's
-// flag file, the scratch directory the read-only root filesystem needs, log
-// storage unless the role opted out of it, the core dumps directory when the
-// role collects dumps, the Bolt and intra-cluster certificates when the
-// cluster has those modes, and last the role's own extra mounts.
+// flag file, the scratch directory the read-only root filesystem needs, the
+// core dumps directory when the role collects dumps, the Bolt and
+// intra-cluster certificates when the cluster has those modes, and last the
+// role's own extra mounts.
 func volumeMounts(spec normalizedSpec, role normalizedRole) []corev1.VolumeMount {
 	mounts := []corev1.VolumeMount{
 		{Name: libVolumeName, MountPath: libMountPath},
 		{Name: flagsVolumeName, MountPath: flagsMountPath, ReadOnly: true},
-	}
-	if role.storage.createLogClaim {
-		mounts = append(mounts, corev1.VolumeMount{Name: logVolumeName, MountPath: logMountPath})
 	}
 	mounts = append(mounts, corev1.VolumeMount{Name: tmpVolumeName, MountPath: tmpMountPath})
 	if role.coreDumps.enabled {
@@ -595,17 +592,13 @@ func podVolumes(
 	return append(volumes, role.extraVolumes...)
 }
 
-// volumeClaimTemplates are the per-pod claims of the role: lib storage always,
-// log storage unless the role opted out of it, and core dumps when enabled. All
-// three follow the cluster's single retention policy.
+// volumeClaimTemplates are the per-pod claims of the role: lib storage always
+// and core dumps when enabled. Both follow the cluster's single retention
+// policy.
 func volumeClaimTemplates(role normalizedRole) []corev1.PersistentVolumeClaim {
 	storage := role.storage
 	claims := []corev1.PersistentVolumeClaim{
 		volumeClaimTemplate(libVolumeName, storage.libSize, storage.libAccessMode, storage.libClass),
-	}
-	if storage.createLogClaim {
-		claims = append(claims,
-			volumeClaimTemplate(logVolumeName, storage.logSize, storage.logAccessMode, storage.logClass))
 	}
 	if role.coreDumps.enabled {
 		// Dumps are written by one node's kernel into one pod's directory, so

@@ -129,9 +129,9 @@ func (f *fakeMemgraph) setUnreachable(address string, unreachable bool) {
 // them. A key not in it is a flag the fake's Memgraph does not have.
 func baselineConfig() map[string]string {
 	return map[string]string{
-		"log_level":                   "TRACE",
+		"log_level":                   "INFO",
 		"log_retention_days":          "35",
-		"log_file":                    "/var/log/memgraph/memgraph.log",
+		"log_file":                    "/var/lib/memgraph/logs/memgraph.log",
 		"query_execution_timeout_sec": "600",
 		"storage_snapshot_interval":   "300",
 		"storage_snapshot_on_exit":    "true",
@@ -220,7 +220,7 @@ func baselineSettings() map[string]string {
 		"aws.secret_key":            "",
 		"aws.region":                "",
 		"aws.endpoint_url":          "",
-		"log.level":                 "TRACE",
+		"log.level":                 "INFO",
 		"log.to_stderr":             "true",
 		"query.timeout":             "600",
 		"storage.snapshot.interval": "300",

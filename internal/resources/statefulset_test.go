@@ -90,13 +90,11 @@ const (
 	defaultImageRef = memgraphcomv1alpha1.DefaultImageReference
 	coreDumpsVolume = "core-dumps"
 	libVolume       = "lib-storage"
-	logVolume       = "log-storage"
 	uploaderImage   = "amazon/aws-cli:2.33.28"
 	libPath         = "/var/lib/memgraph"
-	logPath         = "/var/log/memgraph"
 	coreDumpsPath   = "/var/core/memgraph"
 	dataPath        = "/var/lib/memgraph/mg_data"
-	logFilePath     = "/var/log/memgraph/memgraph.log"
+	logFilePath     = "/var/lib/memgraph/logs/memgraph.log"
 
 	// The operator's identity labels, which custom labels may never override.
 	nameLabel      = "app.kubernetes.io/name"
@@ -348,17 +346,8 @@ func expectedVolumeMounts() []corev1.VolumeMount {
 	return []corev1.VolumeMount{
 		{Name: libVolume, MountPath: libPath},
 		{Name: flagsVolume, MountPath: flagsPath, ReadOnly: true},
-		{Name: logVolume, MountPath: logPath},
 		{Name: tmpVolume, MountPath: "/tmp"},
 	}
-}
-
-// expectedVolumeMountsWithoutLog is the mount set of a role that opted out of
-// log storage: everything except the log volume.
-func expectedVolumeMountsWithoutLog() []corev1.VolumeMount {
-	return slices.DeleteFunc(expectedVolumeMounts(), func(mount corev1.VolumeMount) bool {
-		return mount.Name == logVolume
-	})
 }
 
 // expectedCommand wraps a coordinator start script the way the builder does.
@@ -370,8 +359,8 @@ func expectedCommand(script string) []string {
 // first, then exactly the flags the operator pins — the ones spec.flags may
 // not set — in the order the builder emits them. Nothing from spec.flags and
 // none of the operator's own logging defaults are here: they are in the flag
-// file. A role that opted out of log storage gets an empty --log-file, so
-// that is a parameter; the TLS modes append their file flags.
+// file. A role with file logging off gets an empty --log-file, so that is a
+// parameter; the TLS modes append their file flags.
 func expectedArgs(logDestination string, extra ...string) []string {
 	return append([]string{
 		"--flag-file=" + flagFile,
@@ -395,7 +384,7 @@ func expectedCoordinatorArgs(logDestination string, extra ...string) []string {
 }
 
 // expectedVolumes covers the role's flag file and the ephemeral scratch
-// volume: lib and log storage are provisioned through volumeClaimTemplates.
+// volume: lib storage is provisioned through a volumeClaimTemplate.
 func expectedVolumes(component string) []corev1.Volume {
 	return []corev1.Volume{
 		{
@@ -435,11 +424,10 @@ func expectedClaimTemplate(name, size string, accessMode corev1.PersistentVolume
 }
 
 // expectedClaimTemplates are the claims a spec that never set storage gets:
-// 1Gi ReadWriteOnce on the cluster's default StorageClass for both volumes.
+// one 10Gi ReadWriteOnce lib claim on the cluster's default StorageClass.
 func expectedClaimTemplates() []corev1.PersistentVolumeClaim {
 	return []corev1.PersistentVolumeClaim{
-		expectedClaimTemplate("lib-storage", "1Gi", corev1.ReadWriteOnce, nil),
-		expectedClaimTemplate(logVolume, "1Gi", corev1.ReadWriteOnce, nil),
+		expectedClaimTemplate("lib-storage", "10Gi", corev1.ReadWriteOnce, nil),
 	}
 }
 
@@ -706,8 +694,6 @@ func TestStatefulSetStorageOverrides(t *testing.T) {
 			LibPVCSize:           ptr.To(resource.MustParse("4Gi")),
 			LibStorageAccessMode: corev1.ReadWriteOncePod,
 			LibStorageClassName:  ptr.To("fast-ssd"),
-			LogPVCSize:           ptr.To(resource.MustParse("512Mi")),
-			LogStorageClassName:  ptr.To(""),
 		},
 		Data: memgraphcomv1alpha1.RoleStorageSpec{
 			LibPVCSize:          ptr.To(resource.MustParse("100Gi")),
@@ -725,9 +711,6 @@ func TestStatefulSetStorageOverrides(t *testing.T) {
 			sts:  coordinatorStatefulSet(cluster),
 			want: []corev1.PersistentVolumeClaim{
 				expectedClaimTemplate("lib-storage", "4Gi", corev1.ReadWriteOncePod, ptr.To("fast-ssd")),
-				// An empty storage class is passed through verbatim: it means
-				// "no dynamic provisioning", not "cluster default".
-				expectedClaimTemplate(logVolume, "512Mi", corev1.ReadWriteOnce, ptr.To("")),
 			},
 		},
 		{
@@ -735,8 +718,6 @@ func TestStatefulSetStorageOverrides(t *testing.T) {
 			sts:  dataStatefulSet(cluster),
 			want: []corev1.PersistentVolumeClaim{
 				expectedClaimTemplate("lib-storage", "100Gi", corev1.ReadWriteOnce, ptr.To("gp3")),
-				// Untouched by the spec, so it keeps every schema default.
-				expectedClaimTemplate(logVolume, "1Gi", corev1.ReadWriteOnce, nil),
 			},
 		},
 	}
@@ -749,60 +730,41 @@ func TestStatefulSetStorageOverrides(t *testing.T) {
 	}
 }
 
-// TestStatefulSetWithoutLogStorageClaim asserts that a role which opted out of
-// log storage gets no log claim, no log mount, and an empty --log-file. The
-// empty flag is load-bearing rather than cosmetic: the image's
-// /etc/memgraph/memgraph.conf sets log_file, Memgraph reads it before the
-// command line, and it fails startup when that path cannot be opened — so
-// dropping the flag would crash-loop the pod instead of disabling file logging.
-// Logs still reach `kubectl logs` through --also-log-to-stderr.
-func TestStatefulSetWithoutLogStorageClaim(t *testing.T) {
+// TestStatefulSetFileLoggingOff asserts that a role with file logging off
+// gets an empty --log-file and nothing else changes: the claims and mounts
+// stay, because the log files live on the lib claim. The empty flag is
+// load-bearing rather than cosmetic: the image's /etc/memgraph/memgraph.conf
+// sets log_file, Memgraph reads it before the command line, and it fails
+// startup when that path cannot be opened — so dropping the flag would
+// crash-loop the pod instead of disabling file logging. Logs still reach
+// `kubectl logs` through --also-log-to-stderr.
+func TestStatefulSetFileLoggingOff(t *testing.T) {
 	cluster := minimalCluster()
 	cluster.Spec.Storage = memgraphcomv1alpha1.StorageSpec{
-		Coordinators: memgraphcomv1alpha1.RoleStorageSpec{
-			CreateLogStorageClaim: ptr.To(false),
-		},
-		// The data instances keep their log claim: the knob is per role.
+		Coordinators: memgraphcomv1alpha1.RoleStorageSpec{FileLogging: ptr.To(false)},
+		// The data instances keep logging to a file: the knob is per role.
 		Data: memgraphcomv1alpha1.RoleStorageSpec{},
 	}
 
 	t.Run(coordinatorComponent, func(t *testing.T) {
 		sts := coordinatorStatefulSet(cluster)
 
-		wantClaims := []corev1.PersistentVolumeClaim{
-			expectedClaimTemplate("lib-storage", "1Gi", corev1.ReadWriteOnce, nil),
-		}
-		if diff := cmp.Diff(wantClaims, sts.Spec.VolumeClaimTemplates); diff != "" {
+		if diff := cmp.Diff(expectedClaimTemplates(), sts.Spec.VolumeClaimTemplates); diff != "" {
 			t.Errorf("volume claim templates mismatch (-want +got):\n%s", diff)
 		}
-
 		container := sts.Spec.Template.Spec.Containers[0]
-		if diff := cmp.Diff(expectedVolumeMountsWithoutLog(), container.VolumeMounts); diff != "" {
+		if diff := cmp.Diff(expectedVolumeMounts(), container.VolumeMounts); diff != "" {
 			t.Errorf("volume mounts mismatch (-want +got):\n%s", diff)
 		}
-		wantCommand := expectedCommand(expectedCoordinatorScript)
-		if diff := cmp.Diff(wantCommand, container.Command); diff != "" {
-			t.Errorf("start script mismatch (-want +got):\n%s", diff)
-		}
-		wantArgs := expectedCoordinatorArgs("")
-		if diff := cmp.Diff(wantArgs, container.Args); diff != "" {
+		if diff := cmp.Diff(expectedCoordinatorArgs(""), container.Args); diff != "" {
 			t.Errorf("args mismatch (-want +got):\n%s", diff)
 		}
 	})
 
 	t.Run(dataComponent, func(t *testing.T) {
-		sts := dataStatefulSet(cluster)
-
-		if diff := cmp.Diff(expectedClaimTemplates(), sts.Spec.VolumeClaimTemplates); diff != "" {
-			t.Errorf("volume claim templates mismatch (-want +got):\n%s", diff)
-		}
-
-		container := sts.Spec.Template.Spec.Containers[0]
-		if diff := cmp.Diff(expectedVolumeMounts(), container.VolumeMounts); diff != "" {
-			t.Errorf("volume mounts mismatch (-want +got):\n%s", diff)
-		}
-		if !slices.Contains(container.Args, "--log-file=/var/log/memgraph/memgraph.log") {
-			t.Errorf("args = %v, want the log file the role still has storage for", container.Args)
+		container := dataStatefulSet(cluster).Spec.Template.Spec.Containers[0]
+		if diff := cmp.Diff(expectedArgs(logFilePath), container.Args); diff != "" {
+			t.Errorf("args mismatch (-want +got):\n%s", diff)
 		}
 	})
 }
@@ -969,7 +931,6 @@ func TestStatefulSetSysctlInitContainer(t *testing.T) {
 // init container at all.
 func TestStatefulSetFixOwnershipInitContainer(t *testing.T) {
 	libMount := corev1.VolumeMount{Name: libVolume, MountPath: libPath}
-	logMount := corev1.VolumeMount{Name: logVolume, MountPath: logPath}
 	coreDumpsMount := corev1.VolumeMount{Name: coreDumpsVolume, MountPath: coreDumpsPath}
 
 	withBlock := func() *memgraphcomv1alpha1.MemgraphCluster {
@@ -986,25 +947,14 @@ func TestStatefulSetFixOwnershipInitContainer(t *testing.T) {
 		}
 	})
 
-	t.Run("chowns the lib and log volumes of both roles", func(t *testing.T) {
+	t.Run("chowns the lib volume of both roles", func(t *testing.T) {
 		cluster := withBlock()
 
-		want := []corev1.Container{expectedFixOwnershipInitContainer("101:103", libMount, logMount)}
+		want := []corev1.Container{expectedFixOwnershipInitContainer("101:103", libMount)}
 		for _, sts := range []*appsv1.StatefulSet{coordinatorStatefulSet(cluster), dataStatefulSet(cluster)} {
 			if diff := cmp.Diff(want, sts.Spec.Template.Spec.InitContainers); diff != "" {
 				t.Errorf("%s init containers mismatch (-want +got):\n%s", sts.Name, diff)
 			}
-		}
-	})
-
-	// A role without a log claim has no log volume to mount, let alone chown.
-	t.Run("skips the log volume a role opted out of", func(t *testing.T) {
-		cluster := withBlock()
-		cluster.Spec.Storage.Data.CreateLogStorageClaim = ptr.To(false)
-
-		want := []corev1.Container{expectedFixOwnershipInitContainer("101:103", libMount)}
-		if diff := cmp.Diff(want, dataStatefulSet(cluster).Spec.Template.Spec.InitContainers); diff != "" {
-			t.Errorf("init containers mismatch (-want +got):\n%s", diff)
 		}
 	})
 
@@ -1019,7 +969,7 @@ func TestStatefulSetFixOwnershipInitContainer(t *testing.T) {
 		want := []corev1.Container{
 			expectedSysctlInitContainer(memgraphcomv1alpha1.DefaultMaxMapCount),
 			expectedCorePatternInitContainer(),
-			expectedFixOwnershipInitContainer("101:103", libMount, logMount, coreDumpsMount),
+			expectedFixOwnershipInitContainer("101:103", libMount, coreDumpsMount),
 		}
 		if diff := cmp.Diff(want, dataStatefulSet(cluster).Spec.Template.Spec.InitContainers); diff != "" {
 			t.Errorf("init containers mismatch (-want +got):\n%s", diff)
@@ -1033,7 +983,6 @@ func TestStatefulSetFixOwnershipInitContainer(t *testing.T) {
 // and the ownership container chowning to whatever the block resolved to.
 func TestStatefulSetSecurityContext(t *testing.T) {
 	libMount := corev1.VolumeMount{Name: libVolume, MountPath: libPath}
-	logMount := corev1.VolumeMount{Name: logVolume, MountPath: logPath}
 
 	// The two fields every policy requires are written whatever the block says.
 	policyOnly := &corev1.PodSecurityContext{
@@ -1087,7 +1036,7 @@ func TestStatefulSetSecurityContext(t *testing.T) {
 			FSGroup:    ptr.To(int64(3000)),
 		}
 
-		want := []corev1.Container{expectedFixOwnershipInitContainer("1000:2000", libMount, logMount)}
+		want := []corev1.Container{expectedFixOwnershipInitContainer("1000:2000", libMount)}
 		if diff := cmp.Diff(want, dataStatefulSet(cluster).Spec.Template.Spec.InitContainers); diff != "" {
 			t.Errorf("init containers mismatch (-want +got):\n%s", diff)
 		}
@@ -1101,7 +1050,7 @@ func TestStatefulSetSecurityContext(t *testing.T) {
 			FSGroup:   ptr.To(int64(3000)),
 		}
 
-		want := []corev1.Container{expectedFixOwnershipInitContainer("1000:3000", libMount, logMount)}
+		want := []corev1.Container{expectedFixOwnershipInitContainer("1000:3000", libMount)}
 		if diff := cmp.Diff(want, dataStatefulSet(cluster).Spec.Template.Spec.InitContainers); diff != "" {
 			t.Errorf("init containers mismatch (-want +got):\n%s", diff)
 		}
@@ -1266,7 +1215,7 @@ func TestStatefulSetUserContainers(t *testing.T) {
 		Name:  "log-shipper",
 		Image: "docker.io/fluent/fluent-bit:4.0.0",
 		VolumeMounts: []corev1.VolumeMount{{
-			Name: logVolume, MountPath: logPath, ReadOnly: true,
+			Name: libVolume, MountPath: libPath, ReadOnly: true,
 		}},
 		SecurityContext: &corev1.SecurityContext{RunAsUser: ptr.To(int64(1000))},
 	}

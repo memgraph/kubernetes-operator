@@ -41,40 +41,34 @@ spec:
     # an accidental delete. Switch to Delete on dev clusters that should clean up
     # after themselves.
     retentionPolicy: Retain
-    # Each pod of a role gets a lib claim (Memgraph's data directory) and a log
-    # claim. The storage class names have no default and are commented out on
-    # purpose: left unset, each claim uses the cluster's default StorageClass,
-    # while the empty string turns dynamic provisioning off and binds a
-    # pre-created PersistentVolume. The sizes can grow on a live cluster, never
-    # shrink: the operator grows every claim under its running pod
-    # (docs/storage-resize.md), on a class with allowVolumeExpansion. Access
-    # modes and classes become StatefulSet volumeClaimTemplates, which
-    # Kubernetes treats as immutable, so admission refuses changing them on a
-    # live cluster: delete the MemgraphCluster (the claims are retained) and
-    # recreate it with the new values. Setting createLogStorageClaim to false drops the log claim for
-    # that role and passes an empty --log-file, leaving stderr (and so
-    # `kubectl logs`) as the only log sink; the other log* knobs are then
-    # ignored, and free to change. Flipping it is refused for the same
-    # reason: adding or removing a claim template is not an update Kubernetes
-    # allows.
+    # Each pod of a role gets a lib claim: Memgraph's data directory and, with
+    # fileLogging on, its log files under /var/lib/memgraph/logs. Size it for
+    # snapshots, WAL and log-retention-days of logs (see flags below). The
+    # storage class names have no default and are commented out on purpose:
+    # left unset, each claim uses the cluster's default StorageClass, while the
+    # empty string turns dynamic provisioning off and binds a pre-created
+    # PersistentVolume. The sizes can grow on a live cluster, never shrink: the
+    # operator grows every claim under its running pod (docs/storage-resize.md),
+    # on a class with allowVolumeExpansion. Access modes and classes become
+    # StatefulSet volumeClaimTemplates, which Kubernetes treats as immutable, so
+    # admission refuses changing them on a live cluster: delete the
+    # MemgraphCluster (the claims are retained) and recreate it with the new
+    # values. Setting fileLogging to false passes an empty --log-file, leaving
+    # stderr (and so `kubectl logs`) as the only log sink; it changes on a live
+    # cluster with a rolling restart, and turning it off leaves the log files
+    # already written in place.
     coordinators:
-      libPVCSize: 1Gi
+      libPVCSize: 10Gi
       libStorageAccessMode: ReadWriteOnce
       # libStorageClassName: standard
-      createLogStorageClaim: true
-      logPVCSize: 1Gi
-      logStorageAccessMode: ReadWriteOnce
-      # logStorageClassName: standard
+      fileLogging: true
     data:
-      libPVCSize: 1Gi
+      libPVCSize: 10Gi
       libStorageAccessMode: ReadWriteOnce
       # libStorageClassName: standard
-      createLogStorageClaim: true
-      logPVCSize: 1Gi
-      logStorageAccessMode: ReadWriteOnce
-      # logStorageClassName: standard
+      fileLogging: true
   # A role collects core dumps when its block below is present. That provisions
-  # a third claim per pod, mounts it at /var/core/memgraph — a fixed path, since
+  # a second claim per pod, mounts it at /var/core/memgraph — a fixed path, since
   # only the kernel writes it and only the uploader reads it, and the operator
   # points both at it — and, unless configureCorePattern is false, runs a
   # privileged init container that sets the node's core pattern. Two things that
@@ -166,8 +160,8 @@ spec:
   # directory nor its log file, and a data directory owned by another user
   # fails its startup check. With this block present — the HA chart's
   # fixOwnershipInitContainer — every pod of both roles runs one more init
-  # container, after the node-tuning ones, that chowns the lib, log and core
-  # dumps mount points to the pod's identity (securityContext above, or the
+  # container, after the node-tuning ones, that chowns the lib and core dumps
+  # mount points to the pod's identity (securityContext above, or the
   # images' 101:103) before Memgraph starts. It runs as root with CAP_CHOWN
   # alone on the cluster's own Memgraph image, not privileged, so the baseline
   # Pod Security Standard admits it and "restricted" does not; and it needs
@@ -324,7 +318,7 @@ spec:
   # - Removing a flag issues no SET: a run-time setting keeps its value until
   #   the instance next restarts without the flag.
   #
-  # The operator's own logging defaults (log-level TRACE, also-log-to-stderr
+  # The operator's own logging defaults (log-level INFO, also-log-to-stderr
   # true, log-retention-days 35) may be overridden here. The ports, listen
   # addresses, coordinator identity, data directory, log file, TLS files,
   # metrics format and the two AWS credential flags may not: admission rejects
@@ -371,7 +365,7 @@ spec:
       #   mountPath: /usr/lib/memgraph/query_modules/custom
       #   readOnly: true
   # Containers of your own beside Memgraph in a role's pods — the HA chart's
-  # userContainers: a debugger, a log shipper reading the log volume, an
+  # userContainers: a debugger, a log shipper reading the lib volume, an
   # exporter. Plain core/v1 containers appended after the operator's own, free
   # to mount any volume the pod has (the ones above included). Stored without
   # schema validation like extraVolumes, so a malformed one surfaces as

@@ -49,7 +49,7 @@ The flags do not travel on the command line. Every argument of a container is pa
 --storage_snapshot_on_exit=false
 ```
 
-The file is the operator's own defaults — the HA chart's logging defaults, `log-level` `TRACE`, `also-log-to-stderr` `true`, `log-retention-days` `35` — with the role's `spec.flags` merged over them, the role's value winning. It is mounted read-only at `/etc/memgraph-flags/memgraph.flags` and loaded with `--flag-file`, the first flag on the command line. A flag set from the file counts as explicitly set, exactly like one on the command line.
+The file is the operator's own defaults — the HA chart's logging defaults, `log-level` `INFO`, `also-log-to-stderr` `true`, `log-retention-days` `35` — with the role's `spec.flags` merged over them, the role's value winning. It is mounted read-only at `/etc/memgraph-flags/memgraph.flags` and loaded with `--flag-file`, the first flag on the command line. A flag set from the file counts as explicitly set, exactly like one on the command line.
 
 The command line itself carries only what you may not override: the ports and listen addresses, the data directory, the log file, the metrics format, and the TLS file flags when a TLS mode is on. gflags processes `--flag-file` where it stands and takes the last occurrence of a repeated flag, so a pinned flag after the file wins even if a spelling of it got past admission.
 
@@ -133,7 +133,7 @@ Admission rejects these keys, in either spelling:
 
 - **`bolt-port`, `management-port`, `coordinator-port`, `bolt-address`, `monitoring-address`, `monitoring-port`, `metrics-port`**: the Services, probes, registered addresses, metrics scrapers and the Vector sidecar reach every instance at the fixed ports and on every interface.
 - **`coordinator-id`, `coordinator-hostname`**: a coordinator's identity, derived from its pod ordinal.
-- **`data-directory`, `log-file`**: where the lib and log claims are mounted. `log-file` follows the log claim: empty when the role has none, which is what keeps a read-only root filesystem from crash-looping.
+- **`data-directory`, `log-file`**: both on the lib claim. `log-file` is `/var/lib/memgraph/logs/memgraph.log`, in a directory of its own because Memgraph prunes files older than `log-retention-days` from the log file's directory, and empty when `storage.<role>.fileLogging` is false, which is what keeps the image's own `log_file` default from crash-looping a read-only root filesystem. The log files count toward `libPVCSize`.
 - **`bolt-cert-file`, `bolt-key-file`, `cluster-cert-file`, `cluster-key-file`, `cluster-ca-file`**: derived from `spec.tls`, see [TLS](tls.md).
 - **`metrics-format`**: always OpenMetrics, see [monitoring](monitoring.md).
 - **`license-key`, `organization-name`**: the CR carries no secret material; the license comes from the `secrets` block.

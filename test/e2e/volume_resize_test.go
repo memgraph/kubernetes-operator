@@ -83,13 +83,9 @@ spec:
     coordinators:
       libPVCSize: 1Gi
       libStorageClassName: %[6]s
-      logPVCSize: 1Gi
-      logStorageClassName: %[6]s
     data:
       libPVCSize: 1Gi
       libStorageClassName: %[6]s
-      logPVCSize: 1Gi
-      logStorageClassName: %[6]s
   coreDumps:
     storageClassName: %[6]s
     configureCorePattern: false
@@ -132,13 +128,13 @@ spec:
 		Expect(err).NotTo(HaveOccurred())
 		Expect(pods).To(HaveLen(5))
 		claimsBefore := listClaims(resizeNamespace, resizeClusterName)
-		Expect(claimsBefore).To(HaveLen(15), "three claims for each of the five pods")
+		Expect(claimsBefore).To(HaveLen(10), "two claims for each of the five pods")
 		statefulSetsBefore := statefulSetUIDs(resizeNamespace, resizeClusterName)
 
-		By("growing the lib, log and core dumps sizes of both roles in one edit")
+		By("growing the lib and core dumps sizes of both roles in one edit")
 		cmd := exec.Command("kubectl", "patch", "memgraphcluster", resizeClusterName,
 			"-n", resizeNamespace, "--type=merge", "-p", `{"spec":{
-  "storage":{"coordinators":{"libPVCSize":"2Gi","logPVCSize":"2Gi"},"data":{"libPVCSize":"2Gi","logPVCSize":"2Gi"}},
+  "storage":{"coordinators":{"libPVCSize":"2Gi"},"data":{"libPVCSize":"2Gi"}},
   "coreDumps":{"coordinators":{"size":"2Gi"},"data":{"size":"2Gi"}}}}`)
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred(), "admission must accept a grown size")
@@ -151,7 +147,7 @@ spec:
 			}
 			for _, component := range []string{"coordinator", "data"} {
 				g.Expect(claimTemplateSizes(resizeNamespace, resizeClusterName+"-"+component)).
-					To(Equal("lib-storage=2Gi log-storage=2Gi core-dumps=2Gi"))
+					To(Equal("lib-storage=2Gi core-dumps=2Gi"))
 			}
 		}, 10*time.Minute, 10*time.Second).Should(Succeed())
 		cluster.awaitConverged(5 * time.Minute)
@@ -205,7 +201,7 @@ spec:
 			mounted := claims[fmt.Sprintf("lib-storage-%s-data-0", resizeClusterName)]
 			g.Expect(mounted.capacity).To(Equal("3Gi"))
 			g.Expect(claimTemplateSizes(resizeNamespace, resizeClusterName+"-data")).
-				To(Equal("lib-storage=3Gi log-storage=2Gi core-dumps=2Gi"))
+				To(Equal("lib-storage=3Gi core-dumps=2Gi"))
 		}, 10*time.Minute, 10*time.Second).Should(Succeed())
 		shrunk.awaitConverged(5 * time.Minute)
 		Expect(shrunk.podUIDs()).To(Equal(pods), "an online expansion restarts no pod")
@@ -266,7 +262,7 @@ func listClaims(namespace, cluster string) map[string]observedClaim {
 }
 
 // claimTemplateSizes renders a StatefulSet's claim templates in order with
-// their sizes, e.g. "lib-storage=2Gi log-storage=2Gi".
+// their sizes, e.g. "lib-storage=2Gi core-dumps=2Gi".
 func claimTemplateSizes(namespace, statefulSet string) string {
 	GinkgoHelper()
 	cmd := exec.Command("kubectl", "get", "statefulset", statefulSet, "-n", namespace, "-o",

@@ -43,7 +43,7 @@ const (
 // defaultFlagFile is the flag file of a role without spec.flags: the HA
 // chart's logging defaults, every flag in gflags' underscore spelling with an
 // explicit value, sorted by name.
-const defaultFlagFile = "--also_log_to_stderr=true\n--log_level=TRACE\n--log_retention_days=35\n"
+const defaultFlagFile = "--also_log_to_stderr=true\n--log_level=INFO\n--log_retention_days=35\n"
 
 // TestFlagsConfigMapDefaults pins the two ConfigMaps a cluster without
 // spec.flags gets: one per role, labelled like the role's other objects so the

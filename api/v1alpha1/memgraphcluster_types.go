@@ -56,11 +56,10 @@ const (
 
 	DefaultMaxMapCount int64 = 524288
 
-	DefaultLibPVCSize            = "1Gi"
-	DefaultLogPVCSize            = "1Gi"
-	DefaultCreateLogStorageClaim = true
-	DefaultStorageAccessMode     = corev1.ReadWriteOnce
-	DefaultStorageRetention      = RetentionPolicyRetain
+	DefaultLibPVCSize        = "10Gi"
+	DefaultFileLogging       = true
+	DefaultStorageAccessMode = corev1.ReadWriteOnce
+	DefaultStorageRetention  = RetentionPolicyRetain
 
 	DefaultClusterDomain = "cluster.local"
 
@@ -494,11 +493,11 @@ type AWSCredentialsSpec struct {
 	SecretName string `json:"secretName"`
 }
 
-// RoleStorageSpec configures the two PersistentVolumeClaims every pod of a
-// role gets: lib storage backing Memgraph's data directory, and log storage
-// backing its log file. The knob names mirror the
-// memgraph-high-availability Helm chart's storage.<role> block so translating
-// a values file is mechanical.
+// RoleStorageSpec configures the PersistentVolumeClaim every pod of a role
+// gets, lib storage backing Memgraph's data directory and, with file logging
+// on, its log files, plus whether Memgraph writes log files at all. The knob
+// names mirror the memgraph-high-availability Helm chart's storage.<role>
+// block where the concept carries over.
 //
 // The fields below become StatefulSet volumeClaimTemplates, which Kubernetes
 // treats as immutable. The sizes may grow on a live cluster and never shrink,
@@ -521,9 +520,9 @@ type AWSCredentialsSpec struct {
 // an access mode cannot change on an existing claim, and adding or removing a
 // claim template changes the pods' volumes, which the StatefulSet controller
 // only repairs in ascending ordinal order, MAIN first, which deadlocks the
-// rolling restart. The log claim's knobs are pinned only while the claim
-// exists; nothing reads them otherwise. A size given in other units is not a
-// change: quantities are compared as quantities.
+// rolling restart. A size given in other units is not a change: quantities are
+// compared as quantities. fileLogging is not part of a claim template and
+// changes freely.
 //
 // The has() guards keep every rule evaluable against the block's empty object
 // default, which the API server checks before nested field defaults apply.
@@ -531,15 +530,12 @@ type AWSCredentialsSpec struct {
 // +kubebuilder:validation:XValidation:rule="has(self.libStorageClassName) == has(oldSelf.libStorageClassName) && (!has(self.libStorageClassName) || self.libStorageClassName == oldSelf.libStorageClassName)",message="libStorageClassName cannot be changed on a live cluster: it is part of a StatefulSet volumeClaimTemplate, which Kubernetes forbids changing in place. Delete the MemgraphCluster (its claims are retained under the default retention policy) and recreate it with the new value"
 // +kubebuilder:validation:XValidation:rule="has(self.libPVCSize) == has(oldSelf.libPVCSize) && (!has(self.libPVCSize) || quantity(string(self.libPVCSize)).compareTo(quantity(string(oldSelf.libPVCSize))) >= 0)",message="libPVCSize cannot shrink: Kubernetes cannot shrink a volume. It can only grow"
 // +kubebuilder:validation:XValidation:rule="has(self.libStorageAccessMode) == has(oldSelf.libStorageAccessMode) && (!has(self.libStorageAccessMode) || self.libStorageAccessMode == oldSelf.libStorageAccessMode)",message="libStorageAccessMode cannot be changed on a live cluster: it is part of a StatefulSet volumeClaimTemplate, which Kubernetes forbids changing in place. Delete the MemgraphCluster (its claims are retained under the default retention policy) and recreate it with the new value"
-// +kubebuilder:validation:XValidation:rule="(has(self.createLogStorageClaim) ? self.createLogStorageClaim : true) == (has(oldSelf.createLogStorageClaim) ? oldSelf.createLogStorageClaim : true)",message="createLogStorageClaim cannot be changed on a live cluster: it adds or removes a StatefulSet volumeClaimTemplate, which Kubernetes forbids in place. Delete the MemgraphCluster (its claims are retained under the default retention policy) and recreate it with the new setting"
-// +kubebuilder:validation:XValidation:rule="!(has(self.createLogStorageClaim) ? self.createLogStorageClaim : true) || (has(self.logStorageClassName) == has(oldSelf.logStorageClassName) && (!has(self.logStorageClassName) || self.logStorageClassName == oldSelf.logStorageClassName))",message="logStorageClassName cannot be changed on a live cluster while the log claim exists: it is part of a StatefulSet volumeClaimTemplate, which Kubernetes forbids changing in place. Delete the MemgraphCluster (its claims are retained under the default retention policy) and recreate it with the new value"
-// +kubebuilder:validation:XValidation:rule="!(has(self.createLogStorageClaim) ? self.createLogStorageClaim : true) || (has(self.logPVCSize) == has(oldSelf.logPVCSize) && (!has(self.logPVCSize) || quantity(string(self.logPVCSize)).compareTo(quantity(string(oldSelf.logPVCSize))) >= 0))",message="logPVCSize cannot shrink while the log claim exists: Kubernetes cannot shrink a volume. It can only grow"
-// +kubebuilder:validation:XValidation:rule="!(has(self.createLogStorageClaim) ? self.createLogStorageClaim : true) || (has(self.logStorageAccessMode) == has(oldSelf.logStorageAccessMode) && (!has(self.logStorageAccessMode) || self.logStorageAccessMode == oldSelf.logStorageAccessMode))",message="logStorageAccessMode cannot be changed on a live cluster while the log claim exists: it is part of a StatefulSet volumeClaimTemplate, which Kubernetes forbids changing in place. Delete the MemgraphCluster (its claims are retained under the default retention policy) and recreate it with the new value"
 type RoleStorageSpec struct {
 	// libPVCSize is the requested size of the lib storage claim, which backs
 	// Memgraph's data directory (snapshots, WAL, and durability metadata). It
-	// can grow on a live cluster and never shrink.
-	// +kubebuilder:default="1Gi"
+	// can grow on a live cluster and never shrink. With fileLogging on it holds
+	// the role's log files too.
+	// +kubebuilder:default="10Gi"
 	// +optional
 	LibPVCSize *resource.Quantity `json:"libPVCSize,omitempty"`
 
@@ -558,42 +554,22 @@ type RoleStorageSpec struct {
 	// +optional
 	LibStorageClassName *string `json:"libStorageClassName,omitempty"`
 
-	// createLogStorageClaim decides whether every pod of the role gets a log
-	// storage claim at all. With it disabled the operator drops the claim and
-	// passes an empty --log-file, which turns file logging off, so stderr and
-	// `kubectl logs` (plus whatever collects it) become the single log sink. Use
-	// it to avoid a second PersistentVolumeClaim per pod on clusters that ship
-	// logs off-node anyway.
+	// fileLogging decides whether Memgraph writes log files. With it on, every
+	// pod of the role logs to /var/lib/memgraph/logs/memgraph_<date>.log on the
+	// lib storage claim, so the logs survive the pod and count toward
+	// libPVCSize: size the claim for snapshots, WAL and log-retention-days of
+	// logs, or lower log-level or log-retention-days in flags. With it off the
+	// operator passes an empty --log-file, so stderr and `kubectl logs` (plus
+	// whatever collects them, such as monitoring.vectorRemote) are the only
+	// log sink.
 	//
-	// The remaining log* knobs below are ignored while this is false.
-	//
-	// Like the sizes and classes around it this is a create-time choice:
-	// flipping it adds or removes a volumeClaimTemplate, which Kubernetes
-	// forbids on a live StatefulSet, so admission refuses the flip.
+	// It changes on a live cluster with a rolling restart. Turning it off
+	// leaves the log files already written where they are: Memgraph only
+	// prunes old log files while it writes them, and the operator never
+	// deletes storage.
 	// +kubebuilder:default=true
 	// +optional
-	CreateLogStorageClaim *bool `json:"createLogStorageClaim,omitempty"`
-
-	// logPVCSize is the requested size of the log storage claim, which backs
-	// Memgraph's log file. It can grow on a live cluster and never shrink.
-	// +kubebuilder:default="1Gi"
-	// +optional
-	LogPVCSize *resource.Quantity `json:"logPVCSize,omitempty"`
-
-	// logStorageAccessMode is the access mode requested for the log storage
-	// claim.
-	// +kubebuilder:validation:Enum=ReadWriteOnce;ReadOnlyMany;ReadWriteMany;ReadWriteOncePod
-	// +kubebuilder:default=ReadWriteOnce
-	// +optional
-	LogStorageAccessMode corev1.PersistentVolumeAccessMode `json:"logStorageAccessMode,omitempty"`
-
-	// logStorageClassName is the StorageClass backing the log storage claim.
-	// Leave it unset to use the cluster's default StorageClass; set it to the
-	// empty string to disable dynamic provisioning and bind a pre-created
-	// PersistentVolume.
-	// +kubebuilder:validation:MaxLength=253
-	// +optional
-	LogStorageClassName *string `json:"logStorageClassName,omitempty"`
+	FileLogging *bool `json:"fileLogging,omitempty"`
 }
 
 // StorageSpec configures persistence for both roles plus what happens to a
@@ -893,8 +869,8 @@ type PodSecurityContextSpec struct {
 // log file there; and a data directory that does exist but is owned by
 // another user fails its startup check, "The process is running as user
 // memgraph, but '...' is owned by user ...". The container chowns the lib
-// mount, the log mount when the role has a log claim, and the core dumps
-// mount when the role collects dumps, recursively, to the uid and gid the
+// mount, which holds the log files too, and the core dumps mount when the
+// role collects dumps, recursively, to the uid and gid the
 // pods run as: the images' 101:103 unless securityContext names others, in
 // which case runAsUser and runAsGroup (or fsGroup when no runAsGroup is
 // named) are the target. That is where the chart's memgraphUserId and
@@ -1215,7 +1191,7 @@ type ExtraEnvSpec struct {
 // source is caught when the operator applies the StatefulSet, surfacing on this
 // resource as the ApplyFailed condition rather than as an admission error. Two
 // mistakes that arrive that way in particular: reusing one of the volume names
-// the operator owns (lib-storage, log-storage, core-dumps, tmp), and naming a
+// the operator owns (lib-storage, core-dumps, tmp), and naming a
 // volume source that does not exist.
 type ExtraVolumesSpec struct {
 	// coordinators are added to every coordinator pod.
@@ -1237,13 +1213,13 @@ type ExtraVolumesSpec struct {
 // pod has — usually one from extraVolumes.
 //
 // The paths the operator already mounts are off limits: two mounts cannot share
-// a path, and mounting over Memgraph's data or log directory would hide it.
+// a path, and mounting over Memgraph's data directory would hide it.
 type ExtraVolumeMountsSpec struct {
 	// coordinators are added to every coordinator pod's Memgraph container.
 	// +listType=map
 	// +listMapKey=mountPath
 	// +kubebuilder:validation:MaxItems=64
-	// +kubebuilder:validation:XValidation:rule="self.all(m, !(m.mountPath in ['/var/lib/memgraph', '/var/log/memgraph', '/var/core/memgraph', '/tmp']))",message="extraVolumeMounts must not mount over a path the operator already mounts (/var/lib/memgraph, /var/log/memgraph, /var/core/memgraph, /tmp)"
+	// +kubebuilder:validation:XValidation:rule="self.all(m, !(m.mountPath in ['/var/lib/memgraph', '/var/core/memgraph', '/tmp']))",message="extraVolumeMounts must not mount over a path the operator already mounts (/var/lib/memgraph, /var/core/memgraph, /tmp)"
 	// +optional
 	Coordinators []corev1.VolumeMount `json:"coordinators,omitempty"`
 
@@ -1251,7 +1227,7 @@ type ExtraVolumeMountsSpec struct {
 	// +listType=map
 	// +listMapKey=mountPath
 	// +kubebuilder:validation:MaxItems=64
-	// +kubebuilder:validation:XValidation:rule="self.all(m, !(m.mountPath in ['/var/lib/memgraph', '/var/log/memgraph', '/var/core/memgraph', '/tmp']))",message="extraVolumeMounts must not mount over a path the operator already mounts (/var/lib/memgraph, /var/log/memgraph, /var/core/memgraph, /tmp)"
+	// +kubebuilder:validation:XValidation:rule="self.all(m, !(m.mountPath in ['/var/lib/memgraph', '/var/core/memgraph', '/tmp']))",message="extraVolumeMounts must not mount over a path the operator already mounts (/var/lib/memgraph, /var/core/memgraph, /tmp)"
 	// +optional
 	Data []corev1.VolumeMount `json:"data,omitempty"`
 }

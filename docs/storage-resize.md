@@ -7,7 +7,7 @@ kubectl patch mgc memgraph -n memgraph --type=merge -p '{"spec":{"storage":{"dat
 kubectl wait --namespace memgraph --for=condition=Converged memgraphcluster/memgraph --timeout=10m
 ```
 
-The sizes that grow are `storage.<role>.libPVCSize`, `storage.<role>.logPVCSize` (while the role has a log claim) and `coreDumps.<role>.size` (while the role collects dumps), in any combination and in one edit. A size never shrinks: Kubernetes cannot shrink a volume, so admission refuses it. Everything else that backs a claim — the storage classes, the access modes, `createLogStorageClaim`, whether a role collects core dumps — stays fixed at creation, as before.
+The sizes that grow are `storage.<role>.libPVCSize` and `coreDumps.<role>.size` (while the role collects dumps), in any combination and in one edit. A size never shrinks: Kubernetes cannot shrink a volume, so admission refuses it. Everything else that backs a claim — the storage classes, the access modes, whether a role collects core dumps — stays fixed at creation, as before. With file logging on, the lib claim holds the log files too, so a claim filling up with logs is grown the same way, or relieved by lowering `log-retention-days` or `log-level` in `spec.flags`.
 
 ## Requirements
 

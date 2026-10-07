@@ -33,7 +33,7 @@ const (
 	data1   = "lib-storage-cluster-data-1"
 	sts     = "cluster-data"
 	lib     = "lib-storage"
-	log     = "log-storage"
+	dumps   = "core-dumps"
 	pending = "FileSystemResizePending"
 )
 
@@ -41,8 +41,8 @@ var resizedAt = time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
 
 func size(s string) resource.Quantity { return resource.MustParse(s) }
 
-func sizes(lib, log string) map[string]resource.Quantity {
-	return map[string]resource.Quantity{"lib-storage": size(lib), "log-storage": size(log)}
+func sizes(lib, dumps string) map[string]resource.Quantity {
+	return map[string]resource.Quantity{"lib-storage": size(lib), "core-dumps": size(dumps)}
 }
 
 // claim is a bound claim of the given template and ordinal whose filesystem
@@ -87,7 +87,7 @@ func TestDecide(t *testing.T) {
 			name: "nothing to do when every claim and the template hold the desired size",
 			role: Role{
 				StatefulSet: sts, Desired: sizes("1Gi", "1Gi"), Live: sizes("1Gi", "1Gi"),
-				Claims: []Claim{claim(lib, 0, "1Gi"), claim(log, 0, "1Gi")},
+				Claims: []Claim{claim(lib, 0, "1Gi"), claim(dumps, 0, "1Gi")},
 				Pods:   pods(0),
 			},
 		},
@@ -95,7 +95,7 @@ func TestDecide(t *testing.T) {
 			name: "a grown size patches every claim of its template and holds the recreate back",
 			role: Role{
 				StatefulSet: sts, Desired: sizes("10Gi", "1Gi"), Live: sizes("1Gi", "1Gi"),
-				Claims: []Claim{claim(lib, 1, "1Gi"), claim(lib, 0, "1Gi"), claim(log, 0, "1Gi")},
+				Claims: []Claim{claim(lib, 1, "1Gi"), claim(lib, 0, "1Gi"), claim(dumps, 0, "1Gi")},
 				Pods:   pods(0, 1),
 			},
 			want: Decision{
@@ -122,7 +122,7 @@ func TestDecide(t *testing.T) {
 			name: "once every claim asks for the size the StatefulSet is recreated, a quantity in other units being no difference",
 			role: Role{
 				StatefulSet: sts, Desired: sizes("10Gi", "1024Mi"), Live: sizes("1Gi", "1Gi"),
-				Claims: []Claim{growing(claim(lib, 0, "10Gi"), "1Gi"), claim(log, 0, "1Gi")},
+				Claims: []Claim{growing(claim(lib, 0, "10Gi"), "1Gi"), claim(dumps, 0, "1Gi")},
 				Pods:   pods(0),
 			},
 			want: Decision{Recreate: true, Growing: []string{data0 + " (pod cluster-data-0)"}},
@@ -177,13 +177,13 @@ func TestDecide(t *testing.T) {
 			name: "a mounted claim whose filesystem is still to grow is waited on, naming its pod",
 			role: Role{
 				StatefulSet: sts, Desired: sizes("10Gi", "1Gi"), Live: sizes("10Gi", "1Gi"),
-				Claims: []Claim{resizePending(claim(lib, 0, "10Gi"), "1Gi"), resizePending(claim(log, 0, "1Gi"), "512Mi"),
+				Claims: []Claim{resizePending(claim(lib, 0, "10Gi"), "1Gi"), resizePending(claim(dumps, 0, "1Gi"), "512Mi"),
 					resizePending(claim(lib, 1, "10Gi"), "1Gi")},
 				Pods: pods(0, 1),
 			},
 			want: Decision{Growing: []string{
+				"core-dumps-cluster-data-0 (pod cluster-data-0)",
 				data0 + " (pod cluster-data-0)", data1 + " (pod cluster-data-1)",
-				"log-storage-cluster-data-0 (pod cluster-data-0)",
 			}},
 		},
 		{
@@ -263,7 +263,7 @@ func equalDecisions(a, b Decision) bool {
 		slices.Equal(a.Failed, b.Failed)
 }
 
-func statefulSet(lib, log string) *appsv1.StatefulSet {
+func statefulSet(lib, dumps string) *appsv1.StatefulSet {
 	template := func(name, size string) corev1.PersistentVolumeClaim {
 		return corev1.PersistentVolumeClaim{
 			ObjectMeta: metav1.ObjectMeta{Name: name},
@@ -273,7 +273,7 @@ func statefulSet(lib, log string) *appsv1.StatefulSet {
 		}
 	}
 	return &appsv1.StatefulSet{Spec: appsv1.StatefulSetSpec{
-		VolumeClaimTemplates: []corev1.PersistentVolumeClaim{template("lib-storage", lib), template("log-storage", log)},
+		VolumeClaimTemplates: []corev1.PersistentVolumeClaim{template("lib-storage", lib), template("core-dumps", dumps)},
 	}}
 }
 
@@ -281,8 +281,8 @@ func TestKeepLiveSizes(t *testing.T) {
 	desired := statefulSet("10Gi", "2Gi")
 	KeepLiveSizes(desired, statefulSet("1Gi", "1Gi"))
 	got := TemplateSizes(desired)
-	gotLib, gotLog := got[lib], got[log]
-	if gotLib.Cmp(size("1Gi")) != 0 || gotLog.Cmp(size("1Gi")) != 0 {
+	gotLib, gotDumps := got[lib], got[dumps]
+	if gotLib.Cmp(size("1Gi")) != 0 || gotDumps.Cmp(size("1Gi")) != 0 {
 		t.Errorf("KeepLiveSizes() left %v, want the live 1Gi on both templates", got)
 	}
 
@@ -294,7 +294,7 @@ func TestKeepLiveSizes(t *testing.T) {
 }
 
 func TestObserve(t *testing.T) {
-	templates := []string{lib, log}
+	templates := []string{lib, dumps}
 	pvc := func(name string) *corev1.PersistentVolumeClaim {
 		return &corev1.PersistentVolumeClaim{
 			ObjectMeta: metav1.ObjectMeta{Name: name},
@@ -309,7 +309,7 @@ func TestObserve(t *testing.T) {
 	}
 
 	t.Run("reads the template, ordinal, sizes and pending resize", func(t *testing.T) {
-		in := pvc("log-storage-cluster-data-12")
+		in := pvc("core-dumps-cluster-data-12")
 		in.Status.Conditions = []corev1.PersistentVolumeClaimCondition{{
 			Type: pending, Status: corev1.ConditionTrue, LastTransitionTime: metav1.NewTime(resizedAt),
 		}}
@@ -317,7 +317,7 @@ func TestObserve(t *testing.T) {
 		if !ok {
 			t.Fatal("Observe() did not recognise the claim")
 		}
-		if got.Template != log || got.Ordinal != 12 || !got.Bound || got.Request.Cmp(size("10Gi")) != 0 ||
+		if got.Template != dumps || got.Ordinal != 12 || !got.Bound || got.Request.Cmp(size("10Gi")) != 0 ||
 			got.Capacity.Cmp(size("1Gi")) != 0 || !got.ResizePending {
 			t.Errorf("Observe() = %+v", got)
 		}
@@ -371,7 +371,7 @@ func TestObserve(t *testing.T) {
 		"lib-storage-cluster-coordinator-0", // another StatefulSet's
 		"lib-storage-cluster-data-x",
 		"lib-storage-cluster-data-01",
-		"core-dumps-cluster-data-0", // a template the role does not have
+		"tmp-cluster-data-0", // a template the role does not have
 	} {
 		t.Run("ignores "+name, func(t *testing.T) {
 			if _, ok := Observe(sts, templates, pvc(name)); ok {

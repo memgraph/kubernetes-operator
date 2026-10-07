@@ -110,9 +110,9 @@ spec:
     name: %s
   storage:
     coordinators:
-      createLogStorageClaim: false
+      fileLogging: false
     data:
-      createLogStorageClaim: false
+      fileLogging: false
   resources:
     coordinators:
       requests:

@@ -676,10 +676,9 @@ spec:
                     x-kubernetes-list-type: map
                     x-kubernetes-validations:
                     - message: extraVolumeMounts must not mount over a path the operator
-                        already mounts (/var/lib/memgraph, /var/log/memgraph, /var/core/memgraph,
-                        /tmp)
-                      rule: self.all(m, !(m.mountPath in ['/var/lib/memgraph', '/var/log/memgraph',
-                        '/var/core/memgraph', '/tmp']))
+                        already mounts (/var/lib/memgraph, /var/core/memgraph, /tmp)
+                      rule: self.all(m, !(m.mountPath in ['/var/lib/memgraph', '/var/core/memgraph',
+                        '/tmp']))
                   data:
                     description: data are added to every data instance pod's Memgraph
                       container.
@@ -751,10 +750,9 @@ spec:
                     x-kubernetes-list-type: map
                     x-kubernetes-validations:
                     - message: extraVolumeMounts must not mount over a path the operator
-                        already mounts (/var/lib/memgraph, /var/log/memgraph, /var/core/memgraph,
-                        /tmp)
-                      rule: self.all(m, !(m.mountPath in ['/var/lib/memgraph', '/var/log/memgraph',
-                        '/var/core/memgraph', '/tmp']))
+                        already mounts (/var/lib/memgraph, /var/core/memgraph, /tmp)
+                      rule: self.all(m, !(m.mountPath in ['/var/lib/memgraph', '/var/core/memgraph',
+                        '/tmp']))
                 type: object
               extraVolumes:
                 description: |-
@@ -2827,31 +2825,33 @@ spec:
                     description: coordinators configures the storage of every coordinator
                       pod.
                     properties:
-                      createLogStorageClaim:
+                      fileLogging:
                         default: true
                         description: |-
-                          createLogStorageClaim decides whether every pod of the role gets a log
-                          storage claim at all. With it disabled the operator drops the claim and
-                          passes an empty --log-file, which turns file logging off, so stderr and
-                          `kubectl logs` (plus whatever collects it) become the single log sink. Use
-                          it to avoid a second PersistentVolumeClaim per pod on clusters that ship
-                          logs off-node anyway.
+                          fileLogging decides whether Memgraph writes log files. With it on, every
+                          pod of the role logs to /var/lib/memgraph/logs/memgraph_<date>.log on the
+                          lib storage claim, so the logs survive the pod and count toward
+                          libPVCSize: size the claim for snapshots, WAL and log-retention-days of
+                          logs, or lower log-level or log-retention-days in flags. With it off the
+                          operator passes an empty --log-file, so stderr and `kubectl logs` (plus
+                          whatever collects them, such as monitoring.vectorRemote) are the only
+                          log sink.
 
-                          The remaining log* knobs below are ignored while this is false.
-
-                          Like the sizes and classes around it this is a create-time choice:
-                          flipping it adds or removes a volumeClaimTemplate, which Kubernetes
-                          forbids on a live StatefulSet, so admission refuses the flip.
+                          It changes on a live cluster with a rolling restart. Turning it off
+                          leaves the log files already written where they are: Memgraph only
+                          prunes old log files while it writes them, and the operator never
+                          deletes storage.
                         type: boolean
                       libPVCSize:
                         anyOf:
                         - type: integer
                         - type: string
-                        default: 1Gi
+                        default: 10Gi
                         description: |-
                           libPVCSize is the requested size of the lib storage claim, which backs
                           Memgraph's data directory (snapshots, WAL, and durability metadata). It
-                          can grow on a live cluster and never shrink.
+                          can grow on a live cluster and never shrink. With fileLogging on it holds
+                          the role's log files too.
                         pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                         x-kubernetes-int-or-string: true
                       libStorageAccessMode:
@@ -2868,35 +2868,6 @@ spec:
                       libStorageClassName:
                         description: |-
                           libStorageClassName is the StorageClass backing the lib storage claim.
-                          Leave it unset to use the cluster's default StorageClass; set it to the
-                          empty string to disable dynamic provisioning and bind a pre-created
-                          PersistentVolume.
-                        maxLength: 253
-                        type: string
-                      logPVCSize:
-                        anyOf:
-                        - type: integer
-                        - type: string
-                        default: 1Gi
-                        description: |-
-                          logPVCSize is the requested size of the log storage claim, which backs
-                          Memgraph's log file. It can grow on a live cluster and never shrink.
-                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
-                        x-kubernetes-int-or-string: true
-                      logStorageAccessMode:
-                        default: ReadWriteOnce
-                        description: |-
-                          logStorageAccessMode is the access mode requested for the log storage
-                          claim.
-                        enum:
-                        - ReadWriteOnce
-                        - ReadOnlyMany
-                        - ReadWriteMany
-                        - ReadWriteOncePod
-                        type: string
-                      logStorageClassName:
-                        description: |-
-                          logStorageClassName is the StorageClass backing the log storage claim.
                           Leave it unset to use the cluster's default StorageClass; set it to the
                           empty string to disable dynamic provisioning and bind a pre-created
                           PersistentVolume.
@@ -2925,68 +2896,38 @@ spec:
                       rule: has(self.libStorageAccessMode) == has(oldSelf.libStorageAccessMode)
                         && (!has(self.libStorageAccessMode) || self.libStorageAccessMode
                         == oldSelf.libStorageAccessMode)
-                    - message: 'createLogStorageClaim cannot be changed on a live
-                        cluster: it adds or removes a StatefulSet volumeClaimTemplate,
-                        which Kubernetes forbids in place. Delete the MemgraphCluster
-                        (its claims are retained under the default retention policy)
-                        and recreate it with the new setting'
-                      rule: '(has(self.createLogStorageClaim) ? self.createLogStorageClaim
-                        : true) == (has(oldSelf.createLogStorageClaim) ? oldSelf.createLogStorageClaim
-                        : true)'
-                    - message: 'logStorageClassName cannot be changed on a live cluster
-                        while the log claim exists: it is part of a StatefulSet volumeClaimTemplate,
-                        which Kubernetes forbids changing in place. Delete the MemgraphCluster
-                        (its claims are retained under the default retention policy)
-                        and recreate it with the new value'
-                      rule: '!(has(self.createLogStorageClaim) ? self.createLogStorageClaim
-                        : true) || (has(self.logStorageClassName) == has(oldSelf.logStorageClassName)
-                        && (!has(self.logStorageClassName) || self.logStorageClassName
-                        == oldSelf.logStorageClassName))'
-                    - message: 'logPVCSize cannot shrink while the log claim exists:
-                        Kubernetes cannot shrink a volume. It can only grow'
-                      rule: '!(has(self.createLogStorageClaim) ? self.createLogStorageClaim
-                        : true) || (has(self.logPVCSize) == has(oldSelf.logPVCSize)
-                        && (!has(self.logPVCSize) || quantity(string(self.logPVCSize)).compareTo(quantity(string(oldSelf.logPVCSize)))
-                        >= 0))'
-                    - message: 'logStorageAccessMode cannot be changed on a live cluster
-                        while the log claim exists: it is part of a StatefulSet volumeClaimTemplate,
-                        which Kubernetes forbids changing in place. Delete the MemgraphCluster
-                        (its claims are retained under the default retention policy)
-                        and recreate it with the new value'
-                      rule: '!(has(self.createLogStorageClaim) ? self.createLogStorageClaim
-                        : true) || (has(self.logStorageAccessMode) == has(oldSelf.logStorageAccessMode)
-                        && (!has(self.logStorageAccessMode) || self.logStorageAccessMode
-                        == oldSelf.logStorageAccessMode))'
                   data:
                     default: {}
                     description: data configures the storage of every data instance
                       pod.
                     properties:
-                      createLogStorageClaim:
+                      fileLogging:
                         default: true
                         description: |-
-                          createLogStorageClaim decides whether every pod of the role gets a log
-                          storage claim at all. With it disabled the operator drops the claim and
-                          passes an empty --log-file, which turns file logging off, so stderr and
-                          `kubectl logs` (plus whatever collects it) become the single log sink. Use
-                          it to avoid a second PersistentVolumeClaim per pod on clusters that ship
-                          logs off-node anyway.
+                          fileLogging decides whether Memgraph writes log files. With it on, every
+                          pod of the role logs to /var/lib/memgraph/logs/memgraph_<date>.log on the
+                          lib storage claim, so the logs survive the pod and count toward
+                          libPVCSize: size the claim for snapshots, WAL and log-retention-days of
+                          logs, or lower log-level or log-retention-days in flags. With it off the
+                          operator passes an empty --log-file, so stderr and `kubectl logs` (plus
+                          whatever collects them, such as monitoring.vectorRemote) are the only
+                          log sink.
 
-                          The remaining log* knobs below are ignored while this is false.
-
-                          Like the sizes and classes around it this is a create-time choice:
-                          flipping it adds or removes a volumeClaimTemplate, which Kubernetes
-                          forbids on a live StatefulSet, so admission refuses the flip.
+                          It changes on a live cluster with a rolling restart. Turning it off
+                          leaves the log files already written where they are: Memgraph only
+                          prunes old log files while it writes them, and the operator never
+                          deletes storage.
                         type: boolean
                       libPVCSize:
                         anyOf:
                         - type: integer
                         - type: string
-                        default: 1Gi
+                        default: 10Gi
                         description: |-
                           libPVCSize is the requested size of the lib storage claim, which backs
                           Memgraph's data directory (snapshots, WAL, and durability metadata). It
-                          can grow on a live cluster and never shrink.
+                          can grow on a live cluster and never shrink. With fileLogging on it holds
+                          the role's log files too.
                         pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                         x-kubernetes-int-or-string: true
                       libStorageAccessMode:
@@ -3003,35 +2944,6 @@ spec:
                       libStorageClassName:
                         description: |-
                           libStorageClassName is the StorageClass backing the lib storage claim.
-                          Leave it unset to use the cluster's default StorageClass; set it to the
-                          empty string to disable dynamic provisioning and bind a pre-created
-                          PersistentVolume.
-                        maxLength: 253
-                        type: string
-                      logPVCSize:
-                        anyOf:
-                        - type: integer
-                        - type: string
-                        default: 1Gi
-                        description: |-
-                          logPVCSize is the requested size of the log storage claim, which backs
-                          Memgraph's log file. It can grow on a live cluster and never shrink.
-                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
-                        x-kubernetes-int-or-string: true
-                      logStorageAccessMode:
-                        default: ReadWriteOnce
-                        description: |-
-                          logStorageAccessMode is the access mode requested for the log storage
-                          claim.
-                        enum:
-                        - ReadWriteOnce
-                        - ReadOnlyMany
-                        - ReadWriteMany
-                        - ReadWriteOncePod
-                        type: string
-                      logStorageClassName:
-                        description: |-
-                          logStorageClassName is the StorageClass backing the log storage claim.
                           Leave it unset to use the cluster's default StorageClass; set it to the
                           empty string to disable dynamic provisioning and bind a pre-created
                           PersistentVolume.
@@ -3060,38 +2972,6 @@ spec:
                       rule: has(self.libStorageAccessMode) == has(oldSelf.libStorageAccessMode)
                         && (!has(self.libStorageAccessMode) || self.libStorageAccessMode
                         == oldSelf.libStorageAccessMode)
-                    - message: 'createLogStorageClaim cannot be changed on a live
-                        cluster: it adds or removes a StatefulSet volumeClaimTemplate,
-                        which Kubernetes forbids in place. Delete the MemgraphCluster
-                        (its claims are retained under the default retention policy)
-                        and recreate it with the new setting'
-                      rule: '(has(self.createLogStorageClaim) ? self.createLogStorageClaim
-                        : true) == (has(oldSelf.createLogStorageClaim) ? oldSelf.createLogStorageClaim
-                        : true)'
-                    - message: 'logStorageClassName cannot be changed on a live cluster
-                        while the log claim exists: it is part of a StatefulSet volumeClaimTemplate,
-                        which Kubernetes forbids changing in place. Delete the MemgraphCluster
-                        (its claims are retained under the default retention policy)
-                        and recreate it with the new value'
-                      rule: '!(has(self.createLogStorageClaim) ? self.createLogStorageClaim
-                        : true) || (has(self.logStorageClassName) == has(oldSelf.logStorageClassName)
-                        && (!has(self.logStorageClassName) || self.logStorageClassName
-                        == oldSelf.logStorageClassName))'
-                    - message: 'logPVCSize cannot shrink while the log claim exists:
-                        Kubernetes cannot shrink a volume. It can only grow'
-                      rule: '!(has(self.createLogStorageClaim) ? self.createLogStorageClaim
-                        : true) || (has(self.logPVCSize) == has(oldSelf.logPVCSize)
-                        && (!has(self.logPVCSize) || quantity(string(self.logPVCSize)).compareTo(quantity(string(oldSelf.logPVCSize)))
-                        >= 0))'
-                    - message: 'logStorageAccessMode cannot be changed on a live cluster
-                        while the log claim exists: it is part of a StatefulSet volumeClaimTemplate,
-                        which Kubernetes forbids changing in place. Delete the MemgraphCluster
-                        (its claims are retained under the default retention policy)
-                        and recreate it with the new value'
-                      rule: '!(has(self.createLogStorageClaim) ? self.createLogStorageClaim
-                        : true) || (has(self.logStorageAccessMode) == has(oldSelf.logStorageAccessMode)
-                        && (!has(self.logStorageAccessMode) || self.logStorageAccessMode
-                        == oldSelf.logStorageAccessMode))'
                   retentionPolicy:
                     default: Retain
                     description: |-

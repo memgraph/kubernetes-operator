@@ -359,6 +359,21 @@ var _ = Describe("MemgraphCluster", Ordered, func() {
 		}
 	})
 
+	// File logging is on by default and writes to the lib claim, in a
+	// directory of its own: Memgraph creates it on first start, as the
+	// non-root user, on a real volume. Nothing short of a running pod shows
+	// that, so the check reads the directory from inside one pod per role.
+	It("writes each instance's log file to its lib claim", func() {
+		for _, pod := range []string{quickstartCluster.coordinatorPod(0), quickstartCluster.dataPod(0)} {
+			cmd := exec.Command("kubectl", "exec", pod, "-n", clusterNamespace, "-c", "memgraph", "--",
+				"bash", "-c", `for f in /var/lib/memgraph/logs/memgraph_*.log; do [ -s "$f" ] && echo "$f"; done`)
+			out, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "listing the log directory on %s", pod)
+			Expect(utils.GetNonEmptyLines(out)).NotTo(BeEmpty(),
+				"%s has a non-empty memgraph_<date>.log under /var/lib/memgraph/logs", pod)
+		}
+	})
+
 	// The objects the operator creates for a monitoring stack: present while
 	// their blocks are, gone when they go. Whether a Prometheus discovers and
 	// scrapes the ServiceMonitor, or a Grafana sidecar loads the ConfigMap, is
@@ -514,7 +529,6 @@ var _ = Describe("MemgraphCluster", Ordered, func() {
 	// VictoriaLogs in the cluster's namespace, deployed by the test like the
 	// vmagent's sink. Adding the sidecar is a pod-template change, so the spec
 	// also watches the roll carry it in, one pod at a time, and out again.
-	// Every pod logs at TRACE, so every pod has lines to ship.
 	It("ships every instance's logs to a Loki endpoint with a Vector sidecar and rolls it out with the block", func() {
 		const sinkName = "vlogs"
 		const authSecret = "logs-basic-auth"
@@ -1087,9 +1101,9 @@ spec:
     name: %s
   storage:
     coordinators:
-      createLogStorageClaim: false
+      fileLogging: false
     data:
-      createLogStorageClaim: false
+      fileLogging: false
   resources:
     coordinators:
       requests:
@@ -1323,16 +1337,14 @@ spec:
 // anything. It gates a spec rather than asserting one — the retention
 // assertion itself stays on the claims a user would see.
 // expectedClaims is every claim name the given cluster's StatefulSets provision:
-// the two volume claim templates, for each pod of each role. Claim names are
+// the lib volume claim template, for each pod of each role. Claim names are
 // "<template>-<statefulset>-<ordinal>", which is the StatefulSet controller's
 // own naming and therefore stable enough to assert on.
 func expectedClaims(cluster string, replicasByRole map[string]int) []string {
 	var claims []string
 	for _, role := range slices.Sorted(maps.Keys(replicasByRole)) {
 		for ordinal := range replicasByRole[role] {
-			for _, template := range []string{"lib-storage", "log-storage"} {
-				claims = append(claims, fmt.Sprintf("%s-%s-%s-%d", template, cluster, role, ordinal))
-			}
+			claims = append(claims, fmt.Sprintf("lib-storage-%s-%s-%d", cluster, role, ordinal))
 		}
 	}
 	return claims

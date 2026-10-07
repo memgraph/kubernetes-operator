@@ -927,19 +927,9 @@ func (in *RoleStorageSpec) DeepCopyInto(out *RoleStorageSpec) {
 		*out = new(string)
 		**out = **in
 	}
-	if in.CreateLogStorageClaim != nil {
-		in, out := &in.CreateLogStorageClaim, &out.CreateLogStorageClaim
+	if in.FileLogging != nil {
+		in, out := &in.FileLogging, &out.FileLogging
 		*out = new(bool)
-		**out = **in
-	}
-	if in.LogPVCSize != nil {
-		in, out := &in.LogPVCSize, &out.LogPVCSize
-		x := (*in).DeepCopy()
-		*out = &x
-	}
-	if in.LogStorageClassName != nil {
-		in, out := &in.LogStorageClassName, &out.LogStorageClassName
-		*out = new(string)
 		**out = **in
 	}
 }
