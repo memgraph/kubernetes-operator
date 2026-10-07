@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -30,6 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -52,6 +54,7 @@ import (
 	"github.com/memgraph/kubernetes-operator/internal/resources"
 	"github.com/memgraph/kubernetes-operator/internal/rollout"
 	"github.com/memgraph/kubernetes-operator/internal/settings"
+	"github.com/memgraph/kubernetes-operator/internal/volumes"
 )
 
 // fieldOwner identifies this controller as the server-side-apply field
@@ -142,12 +145,19 @@ type MemgraphClusterReconciler struct {
 // revision and readiness, and delete is the restart itself. External Services
 // exist only while the spec asks for them: removing the externalAccess block, or
 // retiring the data instance one fronts, has to take the Service away, and
-// server-side apply never removes an object. Headless Services and StatefulSets
-// are never deleted — the same verb covers them, but nothing here issues it.
+// server-side apply never removes an object. Headless Services are never
+// deleted — the same verb covers them, but nothing here issues it.
+//
+// A StatefulSet is deleted for one reason only, and only ever with its pods and
+// claims orphaned: a grown storage size, because Kubernetes forbids changing a
+// live StatefulSet's claim templates and the next apply recreates it around the
+// pods with the new ones. The claims themselves are patched to the new size and
+// never created or deleted — the StatefulSet controller does both.
 // +kubebuilder:rbac:groups=memgraph.com,resources=memgraphclusters,verbs=get;list;watch
 // +kubebuilder:rbac:groups=memgraph.com,resources=memgraphclusters/status,verbs=get;patch
 // +kubebuilder:rbac:groups=memgraph.com,resources=memgraphclusters/finalizers,verbs=update
-// +kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;create;patch
+// +kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;create;patch;delete
+// +kubebuilder:rbac:groups=core,resources=persistentvolumeclaims,verbs=get;list;watch;patch
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;patch;delete
 // +kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;patch;delete
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;delete
@@ -212,6 +222,30 @@ func (r *MemgraphClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, err
 	}
 
+	// A grown storage size goes to the claims before anything is applied: the
+	// apply restates the live claim templates, which Kubernetes refuses to
+	// change, and the StatefulSet only takes the new ones by being recreated —
+	// which ends the pass, so nothing else acts while it is missing.
+	coordinatorSet := resources.CoordinatorStatefulSet(&cluster, replicas.coordinators.applied)
+	dataSet := resources.DataStatefulSet(&cluster, replicas.data.applied)
+	claims, recreating, err := r.reconcileVolumes(ctx, &cluster,
+		claimedRole{replicas.coordinators, coordinatorSet, resources.CoordinatorPodSelector(&cluster)},
+		claimedRole{replicas.data, dataSet, resources.DataPodSelector(&cluster)},
+	)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if recreating != "" {
+		if err := r.writeStatus(ctx, &cluster, lastObserved(&cluster),
+			notConvergedCondition(memgraphcomv1alpha1.ReasonVolumeExpansionInProgress, recreating),
+		); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: requeueWhilePending}, nil
+	}
+	volumes.KeepLiveSizes(coordinatorSet, replicas.coordinators.statefulSet)
+	volumes.KeepLiveSizes(dataSet, replicas.data.statefulSet)
+
 	// The external objects follow the data pods the operator runs, not the
 	// count it declares: a retiring instance keeps serving clients until its pod
 	// is shed, and the pass that sheds the pod is the one that drops its way in.
@@ -225,8 +259,8 @@ func (r *MemgraphClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		// the apply creates finds its file already there.
 		resources.CoordinatorFlagsConfigMap(&cluster),
 		resources.DataFlagsConfigMap(&cluster),
-		resources.CoordinatorStatefulSet(&cluster, replicas.coordinators.applied),
-		resources.DataStatefulSet(&cluster, replicas.data.applied),
+		coordinatorSet,
+		dataSet,
 	)
 	desired = append(desired, external...)
 	desired = append(desired, monitoring...)
@@ -271,7 +305,7 @@ func (r *MemgraphClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, err
 	}
 
-	return r.reconcileRegistration(ctx, reads, &cluster, replicas, exposure, roles)
+	return r.reconcileRegistration(ctx, reads, &cluster, replicas, exposure, roles, claims)
 }
 
 // desiredExternal is every external object the spec asks for: the Services in
@@ -762,10 +796,13 @@ func (r *MemgraphClusterReconciler) replicaCounts(
 	for _, role := range []struct {
 		name     string
 		declared int32
+		selector map[string]string
 		resolved *roleReplicas
 	}{
-		{resources.CoordinatorName(cluster), resources.DeclaredCoordinators(cluster), &counts.coordinators},
-		{resources.DataName(cluster), resources.DeclaredDataInstances(cluster), &counts.data},
+		{resources.CoordinatorName(cluster), resources.DeclaredCoordinators(cluster),
+			resources.CoordinatorPodSelector(cluster), &counts.coordinators},
+		{resources.DataName(cluster), resources.DeclaredDataInstances(cluster),
+			resources.DataPodSelector(cluster), &counts.data},
 	} {
 		sts, err := r.getStatefulSet(ctx, cluster.Namespace, role.name)
 		if err != nil {
@@ -774,8 +811,19 @@ func (r *MemgraphClusterReconciler) replicaCounts(
 		// The count the operator's own previous apply left, zero before the
 		// first one.
 		var current int32
-		if sts != nil && sts.Spec.Replicas != nil {
+		switch {
+		case sts != nil && sts.Spec.Replicas != nil:
 			current = *sts.Spec.Replicas
+		case sts == nil:
+			// No StatefulSet, but possibly its pods: one deleted to be
+			// recreated with grown claim templates leaves them running. The
+			// count it ran is then read off them, because the declared count
+			// may be lower — lowered in the window, or a retirement under way
+			// — and recreating at it would shed pods whose members never left
+			// the cluster.
+			if current, err = r.runningOrdinals(ctx, cluster, role.name, role.selector); err != nil {
+				return replicaCounts{}, err
+			}
 		}
 		// The larger of the two, so growing applies the declared count while
 		// shrinking holds the current one.
@@ -785,6 +833,219 @@ func (r *MemgraphClusterReconciler) replicaCounts(
 		}
 	}
 	return counts, nil
+}
+
+// runningOrdinals is one past the highest ordinal among a role's existing
+// pods, zero when it has none: the replica count the role's last StatefulSet
+// ran with, read off the pods it left behind. The highest ordinal rather than
+// the number of pods, because a scale-up creates pods in parallel and a
+// restart takes one down, either of which leaves a gap below the top.
+func (r *MemgraphClusterReconciler) runningOrdinals(
+	ctx context.Context,
+	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	statefulSet string,
+	selector map[string]string,
+) (int32, error) {
+	var pods corev1.PodList
+	if err := r.List(ctx, &pods, client.InNamespace(cluster.Namespace), client.MatchingLabels(selector)); err != nil {
+		return 0, fmt.Errorf("listing pods of StatefulSet %s: %w", statefulSet, err)
+	}
+	var count int32
+	for i := range pods.Items {
+		if ordinal, ok := podOrdinal(statefulSet, pods.Items[i].Name); ok {
+			count = max(count, ordinal+1)
+		}
+	}
+	return count, nil
+}
+
+// podOrdinal is the ordinal of a StatefulSet's pod, by its name.
+func podOrdinal(statefulSet, pod string) (int32, bool) {
+	suffix, ok := strings.CutPrefix(pod, statefulSet+"-")
+	if !ok {
+		return 0, false
+	}
+	ordinal, err := strconv.ParseInt(suffix, 10, 32)
+	if err != nil || ordinal < 0 || strconv.FormatInt(ordinal, 10) != suffix {
+		return 0, false
+	}
+	return int32(ordinal), true
+}
+
+// claimedRole is one role as reconcileVolumes needs it: its replica
+// arithmetic with the StatefulSet the pass read, the StatefulSet the spec
+// describes, and the selector its pods and claims carry.
+type claimedRole struct {
+	replicas roleReplicas
+	desired  *appsv1.StatefulSet
+	selector map[string]string
+}
+
+// volumeOutcome is what reconcileVolumes left for the rest of the pass: what
+// keeps the declared storage from being usable yet, each as a message naming
+// the claim.
+type volumeOutcome struct {
+	growing []string
+	// errors are what the storage driver reports for claims in growing.
+	errors  []string
+	refused []string
+	failed  []string
+}
+
+// growingMessage names the claims still growing and, when the storage driver
+// reports trouble, its first error: the one that says why, which otherwise
+// only a describe of the claim shows. One is enough — the claims of a role
+// share a driver, and the condition message has room for one cloud API
+// response.
+func (o volumeOutcome) growingMessage() string {
+	message := "Waiting for " + strings.Join(o.growing, ", ") + " to reach the declared size"
+	if len(o.errors) == 0 {
+		return message + ". This takes about a minute on a storage driver that grows volumes in use; " +
+			"see docs/storage-resize.md if it persists"
+	}
+	message += ". The storage driver reports "
+	const suffix = "; see docs/storage-resize.md"
+	// A driver's error ends with its reason — gRPC's "desc = ...", then the
+	// cloud API's own message — so one too long to fit keeps its tail.
+	report := o.errors[0]
+	if room := maxConditionMessage - len(message) - len(suffix); len(report) > room {
+		report = "..." + report[len(report)-max(room-3, 0):]
+	}
+	return message + report + suffix
+}
+
+func (o volumeOutcome) done() bool {
+	return len(o.growing) == 0 && len(o.refused) == 0 && len(o.failed) == 0
+}
+
+// reconcileVolumes carries a grown storage size to the claims of both roles,
+// one step per pass as internal/volumes decides it: patch every claim of the
+// role still asking for less, retained ones included; once none is left,
+// delete the StatefulSet with its pods and claims orphaned so the next apply
+// recreates it with the new claim templates; and report every claim whose
+// new size is not usable yet. Nothing is restarted for it (see
+// internal/volumes).
+//
+// A recreate ends the pass, and so does a StatefulSet still being deleted:
+// the message returned says which, and the caller reports it and requeues.
+// The pass that finds the StatefulSet gone applies it again, at the count its
+// pods show (see replicaCounts), and nothing restarts, because a size change
+// leaves both the pods' volumes and the pod template as they were.
+//
+// A patch the API server refuses — a StorageClass without
+// allowVolumeExpansion — is reported, not returned: it is retried every pass,
+// and nothing is deleted while it stands.
+func (r *MemgraphClusterReconciler) reconcileVolumes(
+	ctx context.Context,
+	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	roles ...claimedRole,
+) (volumeOutcome, string, error) {
+	log := logf.FromContext(ctx)
+	var outcome volumeOutcome
+	for _, role := range roles {
+		live := role.replicas.statefulSet
+		if live != nil && live.DeletionTimestamp != nil {
+			return outcome, fmt.Sprintf("Waiting for StatefulSet %s to be deleted before recreating it; "+
+				"its pods and claims are kept", live.Name), nil
+		}
+
+		observed, pvcs, err := r.observeClaims(ctx, cluster, role)
+		if err != nil {
+			return outcome, "", err
+		}
+		decision := volumes.Decide(observed)
+		for _, patch := range decision.Patches {
+			if err := r.growClaim(ctx, pvcs[patch.Claim], patch.Size); err != nil {
+				if !apierrors.IsForbidden(err) && !apierrors.IsInvalid(err) {
+					return outcome, "", err
+				}
+				outcome.refused = append(outcome.refused, fmt.Sprintf("%s: %v", patch.Claim, err))
+				continue
+			}
+			log.Info("Patched a PersistentVolumeClaim to the grown storage size",
+				"persistentvolumeclaim", patch.Claim, "size", patch.Size.String())
+		}
+		outcome.growing = append(outcome.growing, decision.Growing...)
+		outcome.errors = append(outcome.errors, decision.Errors...)
+		outcome.failed = append(outcome.failed, decision.Failed...)
+
+		// Recreate is only ever decided with no patch left to issue, so a
+		// refused one has always held it back.
+		if decision.Recreate {
+			uid := live.UID
+			err := r.Delete(ctx, live, client.Preconditions{UID: &uid},
+				client.PropagationPolicy(metav1.DeletePropagationOrphan))
+			switch {
+			case err == nil, apierrors.IsNotFound(err), apierrors.IsConflict(err):
+			default:
+				return outcome, "", fmt.Errorf("deleting StatefulSet %s to recreate it: %w", live.Name, err)
+			}
+			log.Info("Deleted a StatefulSet with its pods and claims orphaned, to recreate it with grown claim templates",
+				"statefulset", live.Name)
+			return outcome, fmt.Sprintf("Recreating StatefulSet %s with the grown claim sizes; "+
+				"its pods and claims are kept", live.Name), nil
+		}
+	}
+	return outcome, "", nil
+}
+
+// observeClaims reads one role's claims and pods as internal/volumes sees
+// them, with the claims by name for the patches.
+func (r *MemgraphClusterReconciler) observeClaims(
+	ctx context.Context,
+	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	role claimedRole,
+) (volumes.Role, map[string]*corev1.PersistentVolumeClaim, error) {
+	name := role.desired.Name
+	observed := volumes.Role{StatefulSet: name, Desired: volumes.TemplateSizes(role.desired)}
+	if role.replicas.statefulSet != nil {
+		observed.Live = volumes.TemplateSizes(role.replicas.statefulSet)
+	}
+	templates := slices.Sorted(maps.Keys(observed.Desired))
+
+	var list corev1.PersistentVolumeClaimList
+	if err := r.List(ctx, &list, client.InNamespace(cluster.Namespace), client.MatchingLabels(role.selector)); err != nil {
+		return volumes.Role{}, nil, fmt.Errorf("listing PersistentVolumeClaims of StatefulSet %s: %w", name, err)
+	}
+	pvcs := make(map[string]*corev1.PersistentVolumeClaim, len(list.Items))
+	for i := range list.Items {
+		if claim, ok := volumes.Observe(name, templates, &list.Items[i]); ok {
+			observed.Claims = append(observed.Claims, claim)
+			pvcs[claim.Name] = &list.Items[i]
+		}
+	}
+
+	var pods corev1.PodList
+	if err := r.List(ctx, &pods, client.InNamespace(cluster.Namespace), client.MatchingLabels(role.selector)); err != nil {
+		return volumes.Role{}, nil, fmt.Errorf("listing pods of StatefulSet %s: %w", name, err)
+	}
+	for i := range pods.Items {
+		if ordinal, ok := podOrdinal(name, pods.Items[i].Name); ok {
+			observed.Pods = append(observed.Pods, volumes.Pod{Name: pods.Items[i].Name, Ordinal: ordinal})
+		}
+	}
+	return observed, pvcs, nil
+}
+
+// growClaim patches one claim's storage request, conditioned on the version
+// observed so a claim changed in between is judged again next pass.
+func (r *MemgraphClusterReconciler) growClaim(
+	ctx context.Context,
+	pvc *corev1.PersistentVolumeClaim,
+	size resource.Quantity,
+) error {
+	base := pvc.DeepCopy()
+	if pvc.Spec.Resources.Requests == nil {
+		pvc.Spec.Resources.Requests = corev1.ResourceList{}
+	}
+	pvc.Spec.Resources.Requests[corev1.ResourceStorage] = size
+	err := r.Patch(ctx, pvc, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
+	switch {
+	case err == nil, apierrors.IsNotFound(err), apierrors.IsConflict(err):
+		return nil
+	default:
+		return fmt.Errorf("patching PersistentVolumeClaim %s: %w", pvc.Name, err)
+	}
 }
 
 // rolloutRoles is both roles' pods as the rolling restart sees them.
@@ -1010,6 +1271,7 @@ func (r *MemgraphClusterReconciler) reconcileRegistration(
 	replicas replicaCounts,
 	exposure externalAccess,
 	roles rolloutRoles,
+	claims volumeOutcome,
 ) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
@@ -1131,7 +1393,7 @@ func (r *MemgraphClusterReconciler) reconcileRegistration(
 		classes := r.classifyFlags(ctx, cluster, leader, replicas, roles)
 		applied.merge(r.reconcileCoordinatorSettings(ctx, cluster, leader, classes))
 		applied.unknown = classes.unknownMessage()
-		converged := r.convergedCondition(ctx, cluster, topology, exposure, applied)
+		converged := r.convergedCondition(ctx, cluster, topology, exposure, applied, claims)
 
 		if waitFor, ok := exemptCurrentPods(&roles, classes); !ok {
 			return r.waitForFlagClasses(ctx, cluster, latest, converged, waitFor)
@@ -1172,10 +1434,11 @@ func (r *MemgraphClusterReconciler) reconcileRegistration(
 			readyOrNot(latest.main), converged, updated); statusErr != nil {
 			return ctrl.Result{}, statusErr
 		}
-		if !applied.done() {
+		if !applied.done() || !claims.done() {
 			// A setting is still owed to some pod: a Bolt endpoint lagging its
 			// pod's readiness clears on its own, and a rejection is retried for
-			// the reason a rejected registration is.
+			// the reason a rejected registration is. A claim still growing is
+			// watched, but a refused one has nothing to watch.
 			return ctrl.Result{RequeueAfter: requeueWhilePending}, nil
 		}
 		return ctrl.Result{RequeueAfter: resyncInterval}, nil
@@ -1236,13 +1499,16 @@ func (r *MemgraphClusterReconciler) reconcileRegistration(
 // or ServiceMonitor the cluster cannot serve at all, then an external address
 // still being provisioned, then a run-time setting an instance refused, then
 // one owed to a pod that did not answer — most permanent first, so the message
-// names what a human has to act on before what will clear on its own.
+// names what a human has to act on before what will clear on its own. A grown
+// storage size slots in the same way: refused or given up on right after what
+// cannot be served, still growing just before the settings still owed.
 func (r *MemgraphClusterReconciler) convergedCondition(
 	ctx context.Context,
 	cluster *memgraphcomv1alpha1.MemgraphCluster,
 	topology planner.Topology,
 	exposure externalAccess,
 	applied settingsOutcome,
+	claims volumeOutcome,
 ) metav1.Condition {
 	log := logf.FromContext(ctx)
 	switch unservable := joinNonEmpty(exposure.failure, r.serviceMonitorFailure(cluster)); {
@@ -1253,6 +1519,16 @@ func (r *MemgraphClusterReconciler) convergedCondition(
 		// in-cluster at pod addresses, unscraped by the operator's object.
 		log.Info("Could not serve what the spec asks for", "reason", unservable)
 		return notConvergedCondition(memgraphcomv1alpha1.ReasonApplyFailed, unservable)
+	case len(claims.refused) > 0:
+		// The API server refused a claim its new size, which retrying alone
+		// does not change: the StorageClass has to allow expansion.
+		log.Info("Could not grow a PersistentVolumeClaim", "reason", claims.refused)
+		return notConvergedCondition(memgraphcomv1alpha1.ReasonVolumeExpansionRefused,
+			truncateMessage(strings.Join(claims.refused, "; ")))
+	case len(claims.failed) > 0:
+		log.Info("Found a PersistentVolumeClaim resize the storage provider gave up on", "reason", claims.failed)
+		return notConvergedCondition(memgraphcomv1alpha1.ReasonVolumeExpansionFailed,
+			truncateMessage(strings.Join(claims.failed, "; ")))
 	case len(exposure.pending) > 0:
 		// Every member is registered, but not yet at the address the spec
 		// asks for: the members behind these objects are announced at their
@@ -1273,6 +1549,10 @@ func (r *MemgraphClusterReconciler) convergedCondition(
 		// it and nothing restarts for it; only the spec can clear this.
 		log.Info("Found flags the running Memgraph does not have", "reason", applied.unknown)
 		return notConvergedCondition(memgraphcomv1alpha1.ReasonUnknownFlags, truncateMessage(applied.unknown))
+	case len(claims.growing) > 0:
+		log.Info("Waited for PersistentVolumeClaims to grow", "persistentvolumeclaims", claims.growing)
+		return notConvergedCondition(memgraphcomv1alpha1.ReasonVolumeExpansionInProgress,
+			truncateMessage(claims.growingMessage()))
 	case len(applied.pending) > 0:
 		log.Info("Waited to apply run-time settings", "pods", applied.pending)
 		return notConvergedCondition(memgraphcomv1alpha1.ReasonSettingsPending,
@@ -1965,6 +2245,15 @@ func (r *MemgraphClusterReconciler) clustersForSecret(ctx context.Context, secre
 	return requests
 }
 
+// clusterForClaim maps a claim to the cluster its labels name.
+func clusterForClaim(_ context.Context, claim client.Object) []reconcile.Request {
+	name := resources.ClusterNameOf(claim.GetLabels())
+	if name == "" {
+		return nil
+	}
+	return []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: claim.GetNamespace(), Name: name}}}
+}
+
 // shedRetiredPods applies the shrinking roles' StatefulSets at their declared
 // replica counts — the one place the operator ever lowers a replica count. It is
 // reached only after the plan came back empty, so every pod it sheds belongs to a
@@ -1988,7 +2277,9 @@ func (r *MemgraphClusterReconciler) shedRetiredPods(
 		if role.retiring == 0 {
 			continue
 		}
-		if _, err := r.applyDesired(ctx, cluster, role.build(cluster, role.replicas.declared)); err != nil {
+		shrunk := role.build(cluster, role.replicas.declared)
+		volumes.KeepLiveSizes(shrunk, role.replicas.statefulSet)
+		if _, err := r.applyDesired(ctx, cluster, shrunk); err != nil {
 			return err
 		}
 		log.Info("Shrank a StatefulSet to the declared replica count",
@@ -2349,7 +2640,11 @@ func (r *MemgraphClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		// they are watched rather than owned, and by metadata only: the
 		// mapping needs the name, and caching Secret data from every namespace
 		// would hold material the operator has no use for.
-		WatchesMetadata(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(r.clustersForSecret))
+		WatchesMetadata(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(r.clustersForSecret)).
+		// Claims belong to the StatefulSets, not to the cluster, so they are
+		// watched rather than owned: a claim growing is what a resize waits
+		// on, and its labels name the cluster.
+		Watches(&corev1.PersistentVolumeClaim{}, handler.EnqueueRequestsFromMapFunc(clusterForClaim))
 	if r.GatewayAPI {
 		builder = builder.Owns(&gatewayv1.Gateway{}).Owns(&gatewayv1.TCPRoute{})
 	}

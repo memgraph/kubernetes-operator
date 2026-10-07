@@ -44,6 +44,14 @@ const (
 	// cluster to get them would be a rude surprise on a large one.
 	ManagedByLabel = "app.kubernetes.io/managed-by"
 	ManagedByValue = "memgraph-operator"
+
+	// NameLabel and NameValue are on every pod and every claim of every
+	// cluster. The claims carry nothing else the operator chose: the
+	// StatefulSet controller labels a claim with its StatefulSet's selector and
+	// the claim templates have no labels of their own, so the manager scopes
+	// its claim cache to these instead of to the managed-by label.
+	NameLabel = "app.kubernetes.io/name"
+	NameValue = "memgraph"
 )
 
 // Named container and Service port names shared by both roles.
@@ -134,10 +142,19 @@ const (
 // and Service selectors.
 func selectorLabels(cluster *memgraphcomv1alpha1.MemgraphCluster, component string) map[string]string {
 	return map[string]string{
-		"app.kubernetes.io/name": "memgraph",
-		instanceLabel:            cluster.Name,
-		componentLabel:           component,
+		NameLabel:      NameValue,
+		instanceLabel:  cluster.Name,
+		componentLabel: component,
 	}
+}
+
+// ClusterNameOf is the name of the cluster an object labelled with a role's
+// selector belongs to, or empty for an object that is no cluster's.
+func ClusterNameOf(labels map[string]string) string {
+	if labels[NameLabel] != NameValue {
+		return ""
+	}
+	return labels[instanceLabel]
 }
 
 // normalizedSpec is a MemgraphClusterSpec with every optional field resolved

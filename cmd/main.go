@@ -175,6 +175,13 @@ func main() {
 		resources.ManagedByLabel: resources.ManagedByValue,
 	})
 
+	// memgraphClaims selects the claims of every cluster. The StatefulSet
+	// controller creates them and labels them with its selector alone, so they
+	// carry no managed-by label to scope by.
+	memgraphClaims := klabels.SelectorFromSet(klabels.Set{
+		resources.NameLabel: resources.NameValue,
+	})
+
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsServerOptions,
@@ -186,12 +193,14 @@ func main() {
 		// would cost memory proportional to somebody else's workload. ConfigMaps
 		// and Deployments the same: the operator owns one of each per cluster
 		// that asks for the Grafana dashboard or a vmagent, and every namespace
-		// has ConfigMaps and Deployments that are none of its business.
+		// has ConfigMaps and Deployments that are none of its business. Claims
+		// the same, which a resize patches and waits on.
 		Cache: cache.Options{
 			ByObject: map[client.Object]cache.ByObject{
-				&corev1.Pod{}:        {Label: managedByOperator},
-				&corev1.ConfigMap{}:  {Label: managedByOperator},
-				&appsv1.Deployment{}: {Label: managedByOperator},
+				&corev1.Pod{}:                   {Label: managedByOperator},
+				&corev1.ConfigMap{}:             {Label: managedByOperator},
+				&appsv1.Deployment{}:            {Label: managedByOperator},
+				&corev1.PersistentVolumeClaim{}: {Label: memgraphClaims},
 			},
 		},
 		LeaderElection:   enableLeaderElection,

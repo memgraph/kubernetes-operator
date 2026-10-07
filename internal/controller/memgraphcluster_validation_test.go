@@ -1243,10 +1243,11 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 			})).To(Succeed())
 		})
 
-		// Every field that lands in a StatefulSet volumeClaimTemplate is pinned:
-		// Kubernetes forbids changing a template in place, so the change is
-		// refused at admission with the procedure that works instead of being
-		// accepted and rejected by the apply forever.
+		// Every field that lands in a StatefulSet volumeClaimTemplate is pinned but
+		// the sizes, which only ever grow: Kubernetes forbids changing a template
+		// in place, so the change is refused at admission with the procedure that
+		// works instead of being accepted and rejected by the apply forever, and
+		// it cannot shrink a volume at all.
 		DescribeTable("should reject changing a claim template field",
 			func(name string, spec memgraphcomv1alpha1.MemgraphClusterSpec,
 				mutate func(*memgraphcomv1alpha1.MemgraphCluster), wantMessage string) {
@@ -1265,11 +1266,11 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 				func(c *memgraphcomv1alpha1.MemgraphCluster) {
 					c.Spec.Storage.Coordinators.LibStorageClassName = nil
 				}, "libStorageClassName cannot be changed on a live cluster"),
-			Entry("the lib claim size", "claims-lib-size",
+			Entry("shrinking the lib claim", "claims-lib-size",
 				memgraphcomv1alpha1.MemgraphClusterSpec{},
 				func(c *memgraphcomv1alpha1.MemgraphCluster) {
-					c.Spec.Storage.Data.LibPVCSize = ptr.To(resource.MustParse("10Gi"))
-				}, "libPVCSize cannot be changed on a live cluster"),
+					c.Spec.Storage.Data.LibPVCSize = ptr.To(resource.MustParse("512Mi"))
+				}, "libPVCSize cannot shrink"),
 			Entry("the lib access mode", "claims-lib-access-mode",
 				memgraphcomv1alpha1.MemgraphClusterSpec{},
 				func(c *memgraphcomv1alpha1.MemgraphCluster) {
@@ -1292,18 +1293,18 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 				func(c *memgraphcomv1alpha1.MemgraphCluster) {
 					c.Spec.Storage.Coordinators.LogStorageClassName = ptr.To(customStorageClassName)
 				}, "logStorageClassName cannot be changed on a live cluster while the log claim exists"),
-			Entry("the log claim size while the claim exists", "claims-log-size",
+			Entry("shrinking the log claim while it exists", "claims-log-size",
 				memgraphcomv1alpha1.MemgraphClusterSpec{},
 				func(c *memgraphcomv1alpha1.MemgraphCluster) {
-					c.Spec.Storage.Coordinators.LogPVCSize = ptr.To(resource.MustParse("2Gi"))
-				}, "logPVCSize cannot be changed on a live cluster while the log claim exists"),
-			Entry("the core dumps size while the role collects dumps", "claims-core-dumps-size",
+					c.Spec.Storage.Coordinators.LogPVCSize = ptr.To(resource.MustParse("512Mi"))
+				}, "logPVCSize cannot shrink while the log claim exists"),
+			Entry("shrinking the core dumps claim while the role collects dumps", "claims-core-dumps-size",
 				memgraphcomv1alpha1.MemgraphClusterSpec{CoreDumps: memgraphcomv1alpha1.CoreDumpsSpec{
 					Data: &memgraphcomv1alpha1.RoleCoreDumpsSpec{},
 				}},
 				func(c *memgraphcomv1alpha1.MemgraphCluster) {
-					c.Spec.CoreDumps.Data.Size = ptr.To(resource.MustParse("20Gi"))
-				}, "coreDumps size cannot be changed on a live cluster while the role collects dumps"),
+					c.Spec.CoreDumps.Data.Size = ptr.To(resource.MustParse("5Gi"))
+				}, "coreDumps size cannot shrink while the role collects dumps"),
 			Entry("the core dumps storage class while a role collects dumps", "claims-core-dumps-class",
 				memgraphcomv1alpha1.MemgraphClusterSpec{CoreDumps: memgraphcomv1alpha1.CoreDumpsSpec{
 					Coordinators: &memgraphcomv1alpha1.RoleCoreDumpsSpec{},
@@ -1314,8 +1315,8 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 		)
 
 		// The rules pin what backs a claim and nothing else: a value that backs no
-		// claim is free to change, and a size respelled in other units is the same
-		// size.
+		// claim is free to change, a size respelled in other units is the same
+		// size, and a size may grow — the operator carries that to the claims.
 		DescribeTable("should accept a storage edit that changes no claim template",
 			func(name string, spec memgraphcomv1alpha1.MemgraphClusterSpec,
 				mutate func(*memgraphcomv1alpha1.MemgraphCluster)) {
@@ -1326,6 +1327,19 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 				memgraphcomv1alpha1.MemgraphClusterSpec{},
 				func(c *memgraphcomv1alpha1.MemgraphCluster) {
 					c.Spec.Storage.Data.LibPVCSize = ptr.To(resource.MustParse("1024Mi"))
+				}),
+			Entry("growing every claim of both roles", "claims-grown",
+				memgraphcomv1alpha1.MemgraphClusterSpec{CoreDumps: memgraphcomv1alpha1.CoreDumpsSpec{
+					Coordinators: &memgraphcomv1alpha1.RoleCoreDumpsSpec{},
+					Data:         &memgraphcomv1alpha1.RoleCoreDumpsSpec{},
+				}},
+				func(c *memgraphcomv1alpha1.MemgraphCluster) {
+					for _, role := range []*memgraphcomv1alpha1.RoleStorageSpec{&c.Spec.Storage.Coordinators, &c.Spec.Storage.Data} {
+						role.LibPVCSize = ptr.To(resource.MustParse("10Gi"))
+						role.LogPVCSize = ptr.To(resource.MustParse("2Gi"))
+					}
+					c.Spec.CoreDumps.Coordinators.Size = ptr.To(resource.MustParse("20Gi"))
+					c.Spec.CoreDumps.Data.Size = ptr.To(resource.MustParse("20Gi"))
 				}),
 			Entry("the log knobs of a role without a log claim", "claims-log-without-claim",
 				memgraphcomv1alpha1.MemgraphClusterSpec{Storage: memgraphcomv1alpha1.StorageSpec{

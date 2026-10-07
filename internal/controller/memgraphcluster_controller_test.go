@@ -22,11 +22,13 @@ import (
 	"fmt"
 	"maps"
 	"strings"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	storagev1 "k8s.io/api/storage/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -1353,17 +1355,18 @@ var _ = Describe("MemgraphCluster Controller", func() {
 		// A rejected apply is retried behind the scenes forever, so the resource
 		// itself has to say what the API server refused — otherwise the
 		// conditions keep describing the cluster that is still running while the
-		// declared spec never lands. Every claim template field is pinned at
-		// admission now, so the trigger is a StatefulSet that predates the
-		// operator with a claim of another size: Kubernetes forbids changing a
-		// StatefulSet's volumeClaimTemplates, so the apply that would bring it
-		// onto the declared spec is refused.
+		// declared spec never lands. Every claim template field but the sizes is
+		// pinned at admission, and the sizes reach a live StatefulSet only by
+		// recreating it, so the trigger is a StatefulSet that predates the
+		// operator with a claim of another access mode: Kubernetes forbids
+		// changing a StatefulSet's volumeClaimTemplates, so the apply that would
+		// bring it onto the declared spec is refused.
 		It("should report the API server's rejection when applying a workload fails", func() {
 			cluster := &memgraphcomv1alpha1.MemgraphCluster{}
 			get(resourceName, cluster)
 			preexisting := resources.DataStatefulSet(cluster, resources.DeclaredDataInstances(cluster))
-			preexisting.Spec.VolumeClaimTemplates[0].Spec.Resources.Requests[corev1.ResourceStorage] =
-				resource.MustParse("2Gi")
+			preexisting.Spec.VolumeClaimTemplates[0].Spec.AccessModes =
+				[]corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany}
 			Expect(k8sClient.Create(ctx, preexisting)).To(Succeed())
 
 			_, err := reconciler.Reconcile(ctx, reconcile.Request{
@@ -1805,6 +1808,444 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			Expect(podExists(dataSuffix, 1)).To(BeTrue())
 			Expect(podExists(coordinatorSuffix, 2)).To(BeTrue())
 			Expect(fake.executedCommands()).To(ContainElement(ContainSubstring("REGISTER INSTANCE instance_1")))
+		})
+	})
+
+	Context("when a storage size grows on a live cluster", func() {
+		const (
+			resourceName = "mgc-resize"
+			revision     = "mgc-resize-6c9f8b7d5"
+			expandable   = "expandable"
+			fixed        = "fixed-size"
+			mainInstance = "instance_0"
+			replica      = "instance_1"
+			data         = "data"
+			coordinator  = "coordinator"
+		)
+
+		observedCoordinator := func(id int, role string) memgraph.Instance {
+			host := fmt.Sprintf("%s-coordinator-%d.%s-coordinator.%s.svc.cluster.local",
+				resourceName, id, resourceName, resourceNamespace)
+			return memgraph.Instance{
+				Name:              fmt.Sprintf("coordinator_%d", id),
+				BoltServer:        fmt.Sprintf("%s:%d", host, memgraphcomv1alpha1.BoltPort),
+				CoordinatorServer: fmt.Sprintf("%s:%d", host, memgraphcomv1alpha1.CoordinatorPort),
+				ManagementServer:  fmt.Sprintf("%s:%d", host, memgraphcomv1alpha1.ManagementPort),
+				Health:            "up", Role: role,
+			}
+		}
+		convergedCluster := func() []memgraph.Instance {
+			return []memgraph.Instance{
+				observedCoordinator(0, memgraph.RoleLeader),
+				observedCoordinator(1, memgraph.RoleFollower),
+				observedCoordinator(2, memgraph.RoleFollower),
+				{Name: mainInstance, Health: "up", Role: memgraph.RoleMain},
+				{Name: replica, Health: "up", Role: memgraph.RoleReplica},
+			}
+		}
+		condition := func(condType string) *metav1.Condition {
+			GinkgoHelper()
+			cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+			get(resourceName, cluster)
+			return apimeta.FindStatusCondition(cluster.Status.Conditions, condType)
+		}
+		claimName := func(ordinal int) string {
+			return fmt.Sprintf("lib-storage-%s%s-%d", resourceName, dataSuffix, ordinal)
+		}
+		getClaim := func(ordinal int) *corev1.PersistentVolumeClaim {
+			GinkgoHelper()
+			pvc := &corev1.PersistentVolumeClaim{}
+			get(claimName(ordinal), pvc)
+			return pvc
+		}
+
+		// putPod stands in for the StatefulSet controller envtest does not
+		// run: one data pod at the role's revision, ready.
+		putPod := func(suffix, component string, ordinal int) {
+			GinkgoHelper()
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      fmt.Sprintf("%s%s-%d", resourceName, suffix, ordinal),
+					Namespace: resourceNamespace,
+					Labels: map[string]string{
+						nameLabel:                       memgraphDbName,
+						instanceLabel:                   resourceName,
+						componentLabel:                  component,
+						managedByLabel:                  resources.ManagedByValue,
+						appsv1.StatefulSetRevisionLabel: revision,
+					},
+				},
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: memgraphDbName, Image: memgraphDbName}}},
+			}
+			Expect(k8sClient.Create(ctx, pod)).To(Succeed())
+			pod.Status.Conditions = []corev1.PodCondition{{
+				Type: corev1.PodReady, Status: corev1.ConditionTrue, LastTransitionTime: metav1.Now(),
+			}}
+			Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
+		}
+		podUID := func(suffix string, ordinal int) types.UID {
+			GinkgoHelper()
+			pod := &corev1.Pod{}
+			err := k8sClient.Get(ctx, types.NamespacedName{
+				Name: fmt.Sprintf("%s%s-%d", resourceName, suffix, ordinal), Namespace: resourceNamespace,
+			}, pod)
+			if apierrors.IsNotFound(err) || err == nil && pod.DeletionTimestamp != nil {
+				return ""
+			}
+			Expect(err).NotTo(HaveOccurred())
+			return pod.UID
+		}
+
+		// putClaim stands in for the StatefulSet controller again: one bound
+		// lib claim of a data pod, labelled with the StatefulSet's selector,
+		// holding what it asks for.
+		putClaim := func(ordinal int, class, size string) {
+			GinkgoHelper()
+			pvc := &corev1.PersistentVolumeClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: claimName(ordinal), Namespace: resourceNamespace,
+					Labels: map[string]string{
+						nameLabel: memgraphDbName, instanceLabel: resourceName, componentLabel: data,
+					},
+				},
+				Spec: corev1.PersistentVolumeClaimSpec{
+					AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+					StorageClassName: ptr.To(class),
+					Resources: corev1.VolumeResourceRequirements{
+						Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse(size)},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, pvc)).To(Succeed())
+			pvc.Status.Phase = corev1.ClaimBound
+			pvc.Status.Capacity = corev1.ResourceList{corev1.ResourceStorage: resource.MustParse(size)}
+			Expect(k8sClient.Status().Update(ctx, pvc)).To(Succeed())
+		}
+		// setClaimStatus stands in for the resizer and the kubelet.
+		setClaimStatus := func(ordinal int, mutate func(*corev1.PersistentVolumeClaimStatus)) {
+			GinkgoHelper()
+			pvc := getClaim(ordinal)
+			mutate(&pvc.Status)
+			Expect(k8sClient.Status().Update(ctx, pvc)).To(Succeed())
+		}
+		grownTo := func(size string) func(*corev1.PersistentVolumeClaimStatus) {
+			return func(status *corev1.PersistentVolumeClaimStatus) {
+				status.Capacity = corev1.ResourceList{corev1.ResourceStorage: resource.MustParse(size)}
+				status.Conditions = nil
+			}
+		}
+		resizePendingSince := func(at time.Time) func(*corev1.PersistentVolumeClaimStatus) {
+			return func(status *corev1.PersistentVolumeClaimStatus) {
+				status.Conditions = []corev1.PersistentVolumeClaimCondition{{
+					Type:               corev1.PersistentVolumeClaimFileSystemResizePending,
+					Status:             corev1.ConditionTrue,
+					LastTransitionTime: metav1.NewTime(at),
+				}}
+			}
+		}
+
+		// declareRevision publishes the revision both StatefulSets' pod
+		// templates hash to, which every pod above carries.
+		declareRevision := func() {
+			GinkgoHelper()
+			for _, suffix := range []string{coordinatorSuffix, dataSuffix} {
+				sts := &appsv1.StatefulSet{}
+				get(resourceName+suffix, sts)
+				sts.Status.UpdateRevision = revision
+				Expect(k8sClient.Status().Update(ctx, sts)).To(Succeed())
+			}
+		}
+		converge := func() {
+			GinkgoHelper()
+			reconcileCluster(resourceName)
+			markWorkloadsReady(resourceName)
+			declareRevision()
+			reconcileCluster(resourceName)
+		}
+		growLib := func(size string) {
+			GinkgoHelper()
+			cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+			get(resourceName, cluster)
+			cluster.Spec.Storage.Data.LibPVCSize = ptr.To(resource.MustParse(size))
+			Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
+		}
+		dataSet := func() *appsv1.StatefulSet {
+			GinkgoHelper()
+			sts := &appsv1.StatefulSet{}
+			get(resourceName+dataSuffix, sts)
+			return sts
+		}
+		// collectOrphaned stands in for the garbage collector envtest does not
+		// run: it finishes an orphaning delete by dropping its finalizer.
+		collectOrphaned := func() {
+			GinkgoHelper()
+			sts := dataSet()
+			Expect(sts.DeletionTimestamp).NotTo(BeNil())
+			sts.Finalizers = nil
+			Expect(k8sClient.Update(ctx, sts)).To(Succeed())
+			Eventually(func() bool {
+				return apierrors.IsNotFound(k8sClient.Get(ctx,
+					types.NamespacedName{Name: resourceName + dataSuffix, Namespace: resourceNamespace}, &appsv1.StatefulSet{}))
+			}).Should(BeTrue())
+		}
+
+		createCluster := func(class string) {
+			GinkgoHelper()
+			resource := &memgraphcomv1alpha1.MemgraphCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: resourceNamespace},
+				Spec: memgraphcomv1alpha1.MemgraphClusterSpec{Storage: memgraphcomv1alpha1.StorageSpec{
+					Data: memgraphcomv1alpha1.RoleStorageSpec{LibStorageClassName: ptr.To(class)},
+				}},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+			fake.setInstances(convergedCluster())
+			for ordinal := range 3 {
+				putPod(coordinatorSuffix, coordinator, ordinal)
+			}
+			for ordinal := range 2 {
+				putPod(dataSuffix, data, ordinal)
+				putClaim(ordinal, class, "1Gi")
+			}
+			// A claim retained from an earlier scale-down, which nothing mounts.
+			putClaim(3, class, "1Gi")
+			converge()
+			Expect(condition(memgraphcomv1alpha1.ConditionConverged).Status).To(Equal(metav1.ConditionTrue))
+		}
+
+		BeforeEach(func() {
+			for name, allow := range map[string]bool{expandable: true, fixed: false} {
+				class := &storagev1.StorageClass{
+					ObjectMeta:           metav1.ObjectMeta{Name: name},
+					Provisioner:          "example.com/csi",
+					AllowVolumeExpansion: ptr.To(allow),
+				}
+				Expect(client.IgnoreAlreadyExists(k8sClient.Create(ctx, class))).To(Succeed())
+			}
+		})
+
+		AfterEach(func() {
+			cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+			get(resourceName, cluster)
+			Expect(k8sClient.Delete(ctx, cluster)).To(Succeed())
+			for _, suffix := range []string{coordinatorSuffix, dataSuffix} {
+				sts := &appsv1.StatefulSet{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{
+					Name: resourceName + suffix, Namespace: resourceNamespace,
+				}, sts); err == nil && len(sts.Finalizers) > 0 {
+					sts.Finalizers = nil
+					Expect(k8sClient.Update(ctx, sts)).To(Succeed())
+				}
+			}
+			deleteOwned(resourceName)
+			for _, list := range []client.Object{&corev1.Pod{}, &corev1.PersistentVolumeClaim{}} {
+				Expect(k8sClient.DeleteAllOf(ctx, list,
+					client.InNamespace(resourceNamespace),
+					client.MatchingLabels{instanceLabel: resourceName},
+					client.GracePeriodSeconds(0),
+				)).To(Succeed())
+			}
+			// Claims carry the protection finalizer the controller manager
+			// would drop once no pod uses them; envtest runs none.
+			var claims corev1.PersistentVolumeClaimList
+			Expect(k8sClient.List(ctx, &claims, client.InNamespace(resourceNamespace),
+				client.MatchingLabels{instanceLabel: resourceName})).To(Succeed())
+			for i := range claims.Items {
+				claims.Items[i].Finalizers = nil
+				Expect(client.IgnoreNotFound(k8sClient.Update(ctx, &claims.Items[i]))).To(Succeed())
+			}
+		})
+
+		It("should grow every claim, then recreate the StatefulSet around its pods", func() {
+			createCluster(expandable)
+			uids := map[int]types.UID{0: podUID(dataSuffix, 0), 1: podUID(dataSuffix, 1)}
+
+			growLib("10Gi")
+			reconcileCluster(resourceName)
+
+			for _, ordinal := range []int{0, 1, 3} {
+				Expect(getClaim(ordinal).Spec.Resources.Requests.Storage()).To(HaveValue(Equal(resource.MustParse("10Gi"))),
+					"claim %d, the retained one included, asks for the grown size", ordinal)
+			}
+			sts := dataSet()
+			Expect(sts.DeletionTimestamp).To(BeNil(), "the claims go first")
+			Expect(libClaim(sts).Resources.Requests[corev1.ResourceStorage]).To(Equal(resource.MustParse("1Gi")),
+				"the apply restates the live claim template rather than being refused")
+			converged := condition(memgraphcomv1alpha1.ConditionConverged)
+			Expect(converged.Status).To(Equal(metav1.ConditionFalse))
+			Expect(converged.Reason).To(Equal(memgraphcomv1alpha1.ReasonVolumeExpansionInProgress))
+			Expect(converged.Message).To(ContainSubstring(claimName(0)))
+
+			// Every claim asks for the size: the StatefulSet is deleted with
+			// its dependents orphaned, and the pass ends there.
+			reconcileCluster(resourceName)
+			sts = dataSet()
+			Expect(sts.DeletionTimestamp).NotTo(BeNil())
+			Expect(sts.Finalizers).To(ContainElement(metav1.FinalizerOrphanDependents))
+			converged = condition(memgraphcomv1alpha1.ConditionConverged)
+			Expect(converged.Reason).To(Equal(memgraphcomv1alpha1.ReasonVolumeExpansionInProgress))
+			Expect(converged.Message).To(ContainSubstring("Recreating StatefulSet " + resourceName + dataSuffix))
+
+			// Nothing is applied while it is still being deleted.
+			reconcileCluster(resourceName)
+			Expect(condition(memgraphcomv1alpha1.ConditionConverged).Message).To(ContainSubstring("Waiting for StatefulSet"))
+
+			collectOrphaned()
+			reconcileCluster(resourceName)
+			sts = dataSet()
+			Expect(libClaim(sts).Resources.Requests[corev1.ResourceStorage]).To(Equal(resource.MustParse("10Gi")),
+				"the recreated StatefulSet carries the grown claim template")
+			Expect(sts.Spec.Replicas).To(HaveValue(Equal(int32(2))))
+			for ordinal, uid := range uids {
+				Expect(podUID(dataSuffix, ordinal)).To(Equal(uid), "pod %d is not restarted", ordinal)
+			}
+
+			// Converged waits for the mounted claims to hold the size, not for
+			// the retained one, whose filesystem grows only at its next mount.
+			markWorkloadsReady(resourceName)
+			declareRevision()
+			setClaimStatus(3, resizePendingSince(time.Now()))
+			reconcileCluster(resourceName)
+			converged = condition(memgraphcomv1alpha1.ConditionConverged)
+			Expect(converged.Reason).To(Equal(memgraphcomv1alpha1.ReasonVolumeExpansionInProgress))
+			Expect(converged.Message).To(ContainSubstring(claimName(1)))
+			Expect(converged.Message).NotTo(ContainSubstring(claimName(3)))
+
+			setClaimStatus(0, grownTo("10Gi"))
+			setClaimStatus(1, grownTo("10Gi"))
+			reconcileCluster(resourceName)
+			Expect(condition(memgraphcomv1alpha1.ConditionConverged).Status).To(Equal(metav1.ConditionTrue))
+			Expect(condition(memgraphcomv1alpha1.ConditionUpdated).Status).To(Equal(metav1.ConditionTrue),
+				"a driver growing filesystems online restarts nothing")
+			for ordinal, uid := range uids {
+				Expect(podUID(dataSuffix, ordinal)).To(Equal(uid), "pod %d is not restarted", ordinal)
+			}
+		})
+
+		// While the StatefulSet is gone its replica count is read off the pods
+		// it left: recreating it at a count lowered in the meantime would shed
+		// pods whose members never left the cluster.
+		It("should recreate the StatefulSet at the count its pods run, not a lowered one", func() {
+			createCluster(expandable)
+			growLib("10Gi")
+			reconcileCluster(resourceName)
+			reconcileCluster(resourceName)
+			Expect(dataSet().DeletionTimestamp).NotTo(BeNil())
+
+			cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+			get(resourceName, cluster)
+			cluster.Spec.DataInstances = ptr.To(int32(1))
+			Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
+			collectOrphaned()
+			reconcileCluster(resourceName)
+
+			Expect(dataSet().Spec.Replicas).To(HaveValue(Equal(int32(2))),
+				"instance_1 is shed only by the retirement, once it has left the cluster")
+			Expect(podUID(dataSuffix, 1)).NotTo(BeEmpty())
+		})
+
+		It("should report a resize the StorageClass does not allow and leave the StatefulSet alone", func() {
+			createCluster(fixed)
+			growLib("10Gi")
+			reconcileCluster(resourceName)
+			reconcileCluster(resourceName)
+
+			Expect(dataSet().DeletionTimestamp).To(BeNil(), "nothing is recreated while a claim refuses the size")
+			Expect(getClaim(0).Spec.Resources.Requests.Storage()).To(HaveValue(Equal(resource.MustParse("1Gi"))))
+			converged := condition(memgraphcomv1alpha1.ConditionConverged)
+			Expect(converged.Status).To(Equal(metav1.ConditionFalse))
+			Expect(converged.Reason).To(Equal(memgraphcomv1alpha1.ReasonVolumeExpansionRefused))
+			Expect(converged.Message).To(ContainSubstring(claimName(0)))
+			Expect(converged.Message).To(ContainSubstring("storageclass that provisions the pvc must support resize"))
+		})
+
+		It("should report a resize the storage provider gave up on", func() {
+			createCluster(expandable)
+			growLib("10Gi")
+			reconcileCluster(resourceName)
+			reconcileCluster(resourceName)
+			collectOrphaned()
+			reconcileCluster(resourceName)
+			markWorkloadsReady(resourceName)
+			declareRevision()
+			setClaimStatus(0, func(status *corev1.PersistentVolumeClaimStatus) {
+				status.AllocatedResourceStatuses = map[corev1.ResourceName]corev1.ClaimResourceStatus{
+					corev1.ResourceStorage: corev1.PersistentVolumeClaimControllerResizeInfeasible,
+				}
+				status.Conditions = []corev1.PersistentVolumeClaimCondition{{
+					Type: corev1.PersistentVolumeClaimControllerResizeError, Status: corev1.ConditionTrue,
+					Message: "disk quota exceeded",
+				}}
+			})
+			reconcileCluster(resourceName)
+
+			converged := condition(memgraphcomv1alpha1.ConditionConverged)
+			Expect(converged.Reason).To(Equal(memgraphcomv1alpha1.ReasonVolumeExpansionFailed))
+			Expect(converged.Message).To(ContainSubstring(fmt.Sprintf(
+				"%s (pod %s%s-0): ControllerResizeInfeasible: disk quota exceeded", claimName(0), resourceName, dataSuffix)))
+		})
+
+		// A claim whose filesystem is still to grow under a running pod is
+		// what every driver reports until the kubelet's next sync, so it is
+		// waited on and named, never restarted for.
+		It("should restart nothing while a filesystem waits to grow, naming the pod it waits on", func() {
+			createCluster(expandable)
+			growLib("10Gi")
+			reconcileCluster(resourceName)
+			reconcileCluster(resourceName)
+			collectOrphaned()
+			reconcileCluster(resourceName)
+			markWorkloadsReady(resourceName)
+			declareRevision()
+
+			setClaimStatus(0, resizePendingSince(time.Now()))
+			setClaimStatus(1, resizePendingSince(time.Now()))
+			uids := map[int]types.UID{0: podUID(dataSuffix, 0), 1: podUID(dataSuffix, 1)}
+			reconcileCluster(resourceName)
+
+			for ordinal, uid := range uids {
+				Expect(podUID(dataSuffix, ordinal)).To(Equal(uid), "pod %d is not restarted", ordinal)
+			}
+			Expect(condition(memgraphcomv1alpha1.ConditionUpdated).Status).To(Equal(metav1.ConditionTrue))
+			converged := condition(memgraphcomv1alpha1.ConditionConverged)
+			Expect(converged.Reason).To(Equal(memgraphcomv1alpha1.ReasonVolumeExpansionInProgress))
+			Expect(converged.Message).To(ContainSubstring(
+				fmt.Sprintf("%s (pod %s%s-1)", claimName(1), resourceName, dataSuffix)))
+			Expect(converged.Message).To(ContainSubstring("about a minute"))
+		})
+
+		// What AKS reports on a VM size that cannot change an attached disk:
+		// the resizer retries forever, so it is still in progress, but the
+		// message carries the cloud's reason, which is the one thing to act on.
+		It("should carry the storage driver's resize error while it retries", func() {
+			createCluster(expandable)
+			growLib("10Gi")
+			reconcileCluster(resourceName)
+			reconcileCluster(resourceName)
+			collectOrphaned()
+			reconcileCluster(resourceName)
+			markWorkloadsReady(resourceName)
+			declareRevision()
+			setClaimStatus(0, func(status *corev1.PersistentVolumeClaimStatus) {
+				status.AllocatedResourceStatuses = map[corev1.ResourceName]corev1.ClaimResourceStatus{
+					corev1.ResourceStorage: corev1.PersistentVolumeClaimControllerResizeInProgress,
+				}
+				status.Conditions = []corev1.PersistentVolumeClaimCondition{{
+					Type: corev1.PersistentVolumeClaimControllerResizeError, Status: corev1.ConditionTrue,
+					// The cloud's reason comes last, after an HTTP response
+					// longer than the condition message has room for.
+					Message: "failed to resize disk with error(PATCH " + strings.Repeat("/subscriptions/x", 80) +
+						"\nRESPONSE 409: 409 Conflict\nERROR CODE: OperationNotAllowed\n" +
+						"Change in disk property of VM of size 'Standard_A2_v2' is not supported.",
+				}}
+			})
+			reconcileCluster(resourceName)
+
+			converged := condition(memgraphcomv1alpha1.ConditionConverged)
+			Expect(converged.Reason).To(Equal(memgraphcomv1alpha1.ReasonVolumeExpansionInProgress))
+			Expect(len(converged.Message)).To(BeNumerically("<=", 1024))
+			Expect(converged.Message).To(ContainSubstring("The storage driver reports ..."))
+			Expect(converged.Message).To(HaveSuffix("RESPONSE 409: 409 Conflict ERROR CODE: OperationNotAllowed " +
+				"Change in disk property of VM of size 'Standard_A2_v2' is not supported.; see docs/storage-resize.md"))
 		})
 	})
 
