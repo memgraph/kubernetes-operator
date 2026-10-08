@@ -1,34 +1,37 @@
 name: Release
 
-# The path from a version tag to the operator image on Docker Hub, plus a GitHub
-# release here with the packaged install chart attached.
+# Publishes the operator image on Docker Hub and creates the v<appVersion> tag
+# and GitHub release here, with the packaged install chart attached.
 #
 # The chart reaches users through memgraph/helm-charts, released there by that
 # repository's own workflow: copy charts/memgraph-operator over, merge, and run
 # its Release Charts workflow. Nothing here writes into another repository.
 #
-#   v0.2.0       builds and publishes the image. Must equal the chart's
-#                appVersion, which is what a default install runs.
+# Run it from the Actions tab. The version is the chart's appVersion on the
+# branch it runs from, which is what a default install of the chart runs.
 #
-# Running this from the Actions tab instead is always a dry run, whatever ref it
-# is started from: the image is built for both architectures, the chart is
-# packaged and installed on Kind with it, and nothing is published. Tagging a
-# SemVer prerelease (v0.2.0-rc.1) is the other rehearsal -- it publishes for
-# real, but never moves :latest.
+#   publish off  a dry run, from any branch: the image is built for both
+#                architectures, the chart is packaged and installed on Kind
+#                with it, and nothing is published.
+#   publish on   a release, from main only: the same, plus pushing the image
+#                and creating the tag and the GitHub release on the commit the
+#                run built. A SemVer prerelease (0.2.0-rc.1) publishes for
+#                real, but never moves :latest.
 #
 # See docs/releasing.md for the procedure and the credentials this needs.
 
 on:
-  push:
-    tags:
-      - 'v[0-9]+.[0-9]+.[0-9]+'
-      - 'v[0-9]+.[0-9]+.[0-9]+-*'
   workflow_dispatch:
+    inputs:
+      publish:
+        description: 'Publish for real (main only), instead of dry-running the pipeline.'
+        type: boolean
+        default: false
 
 permissions: {}
 
 # Releases are never cancelled halfway: a run stopped between pushing the image
-# and creating the GitHub release leaves the tag half-released.
+# and creating the GitHub release leaves the version half-released.
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
@@ -45,6 +48,7 @@ jobs:
     permissions:
       contents: read
     outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
       chart_version: ${{ steps.resolve.outputs.chart_version }}
       version: ${{ steps.resolve.outputs.version }}
       prerelease: ${{ steps.resolve.outputs.prerelease }}
@@ -60,31 +64,36 @@ jobs:
         with:
           go-version-file: go.mod
 
-      # The tag has to name the appVersion the chart declares, so a default
-      # install of the packaged chart runs exactly this image. Publishing a
-      # version the tagged tree does not declare is the one way to produce
-      # artifacts nobody can trace back to a commit, so it fails here, before
-      # anything is built.
+      # The release is named after the appVersion the chart declares, so a
+      # default install of the packaged chart runs exactly this image. The tag
+      # is created by this run, so it can only ever point at the commit that
+      # was built; an existing tag elsewhere fails here, before anything is
+      # built, and one on this very commit is a re-run finishing the job.
       - name: Resolve the versions
         id: resolve
         env:
-          EVENT_NAME: ${{ github.event_name }}
-          REF_NAME: ${{ github.ref_name }}
+          REF: ${{ github.ref }}
+          SHA: ${{ github.sha }}
+          PUBLISH: ${{ inputs.publish }}
         run: |
           set -euo pipefail
           chart_version=$(make -s chart-version)
           version=$(make -s chart-app-version)
+          tag="v${version}"
+          publish=${PUBLISH:-false}
 
-          if [ "${EVENT_NAME}" = push ]; then
-            publish=true
-            tag_version=${REF_NAME#v}
-            if [ "${tag_version}" != "${version}" ]; then
-              echo "::error::Tag ${REF_NAME} releases the operator, but the chart's appVersion is ${version}, not ${tag_version}. Bump the chart on a pull request first, then tag the merge commit."
+          if [ "${publish}" = true ]; then
+            if [ "${REF}" != refs/heads/main ]; then
+              echo "::error::Releases are published from main only, not ${REF}. Untick publish for a dry run."
               exit 1
             fi
-          else
-            # Started by hand: a dry run of whatever the chart declares.
-            publish=false
+            # An annotated tag lists its commit on the peeled ^{} line, which
+            # sorts after the tag object's own.
+            existing=$(git ls-remote origin "refs/tags/${tag}" "refs/tags/${tag}^{}" | sort -k2 | awk 'END {print $1}')
+            if [ -n "${existing}" ] && [ "${existing}" != "${SHA}" ]; then
+              echo "::error::Tag ${tag} already exists on ${existing}, not ${SHA}. Bump the chart's appVersion on a pull request first."
+              exit 1
+            fi
           fi
 
           case "${version}" in
@@ -93,6 +102,7 @@ jobs:
           esac
 
           {
+            echo "tag=${tag}"
             echo "chart_version=${chart_version}"
             echo "version=${version}"
             echo "prerelease=${prerelease}"
@@ -379,29 +389,32 @@ jobs:
     if: needs.resolve.outputs.publish == 'true'
     runs-on: ubuntu-latest
     permissions:
-      # Creating the release for this tag.
+      # Creating the tag and the release.
       contents: write
     steps:
-      - name: Clone the code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          persist-credentials: false
-
       - name: Download the packaged chart
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: chart-package
           path: dist/chart
 
-      - name: Create the release
+      # --target makes GitHub create the tag on the commit this run built.
+      - name: Create the tag and the release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+          TAG: ${{ needs.resolve.outputs.tag }}
           CHART_VERSION: ${{ needs.resolve.outputs.chart_version }}
           VERSION: ${{ needs.resolve.outputs.version }}
           PRERELEASE: ${{ needs.resolve.outputs.prerelease }}
         run: |
           set -euo pipefail
+          if gh release view "${TAG}" --repo "${REPO}" >/dev/null 2>&1; then
+            echo "::notice::Release ${TAG} already exists; nothing to do."
+            exit 0
+          fi
+
           notes=$(cat <<EOF
           Operator image \`${IMAGE_REPOSITORY}:${VERSION}\`, installed by chart \`${CHART_VERSION}\` (attached).
           EOF
@@ -411,8 +424,9 @@ jobs:
           [ "${PRERELEASE}" = true ] && prerelease=(--prerelease)
 
           gh release create "${TAG}" dist/chart/*.tgz \
+            --repo "${REPO}" \
+            --target "${SHA}" \
             --title "${TAG}" \
             --notes "${notes}" \
             --generate-notes \
-            --verify-tag \
             "${prerelease[@]}"

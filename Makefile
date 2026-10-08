@@ -268,9 +268,9 @@ helm-uninstall: ## Uninstall the operator, including the CRDs helm leaves behind
 ##@ Release
 
 # Two versions, moving independently: the chart's own version, and the
-# appVersion naming the operator image it installs by default. A v<version> tag
-# releases the operator image, and the release workflow refuses one that is not
-# the chart's appVersion. The chart itself is released from memgraph/helm-charts.
+# appVersion naming the operator image it installs by default. The release
+# workflow publishes the appVersion's image and tags the commit v<appVersion>;
+# the chart itself is released from memgraph/helm-charts.
 # See docs/releasing.md.
 CHART_VERSION = $(shell sed -n 's/^version:[[:space:]]*//p' $(CHART_DIR)/Chart.yaml | tr -d '"' | head -1)
 CHART_APP_VERSION = $(shell sed -n 's/^appVersion:[[:space:]]*//p' $(CHART_DIR)/Chart.yaml | tr -d '"' | head -1)

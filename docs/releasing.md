@@ -3,7 +3,7 @@
 Two artifacts reach users, through two repositories:
 
 - the operator image, `docker.io/memgraph/kubernetes-operator:<appVersion>`, released from here
-  by pushing a `v<version>` tag, and
+  by running the Release workflow, which also tags the commit `v<appVersion>`, and
 - the install chart, in the [`memgraph.github.io/helm-charts`](https://memgraph.github.io/helm-charts)
   index, released from [`memgraph/helm-charts`](https://github.com/memgraph/helm-charts) the same
   way as every other Memgraph chart.
@@ -22,8 +22,9 @@ workflow publishes it. Nothing in this repository writes into that one.
 | `appVersion` | the operator image the chart installs by default | a new operator image is released |
 
 `appVersion` is what `deployment.yaml` uses when `image.tag` is left empty, so it is the operator
-version a default install runs. A `v<version>` tag has to equal it: the workflow refuses any other
-before anything is built. Bump the chart on a pull request, then tag the merge commit.
+version a default install runs. The release takes its version from it and creates the
+`v<appVersion>` tag itself, refusing before anything is built if that tag already exists on
+another commit. Bump the chart on a pull request, then release from `main`.
 
 CI also refuses a pull request that changes the chart without bumping its `version`: a published
 chart version is immutable, so a change that keeps its version is a change users never receive.
@@ -46,21 +47,22 @@ Before copying a chart whose `appVersion` you did not bump, check
    ```
 
 2. Merge it once CI is green.
-3. Tag the merge commit and push:
+3. Run the [Release workflow](../.github/workflows/release.yml) on `main` with **publish** ticked,
+   from **Actions → Release → Run workflow**, or:
 
    ```sh
-   git switch main && git pull
-   git tag v0.2.0 && git push origin v0.2.0
+   gh workflow run release.yml --ref main -f publish=true
    ```
 
-The [Release workflow](../.github/workflows/release.yml) then:
+The workflow then:
 
 - refuses to overwrite an existing image tag, then builds and pushes `linux/amd64` and
   `linux/arm64` — plus `:latest`, for stable versions only;
 - verifies the chart's generated CRDs and RBAC still match the Go sources, lints and packages it;
 - installs the packaged chart on a Kind cluster and asserts the running Deployment is the image
   just pushed;
-- creates the GitHub release here, with the packaged chart attached.
+- creates the `v<appVersion>` tag on the commit it built, and the GitHub release here with the
+  packaged chart attached.
 
 Then publish the chart, below.
 
@@ -69,7 +71,8 @@ Then publish the chart, below.
 After an operator release, or on its own for a template fix, a new values knob or chart
 documentation (bump only `version`, on a pull request here, first):
 
-1. Copy `charts/memgraph-operator/` from the released commit over `charts/memgraph-operator/` in
+1. Copy `charts/memgraph-operator/` from the released commit (the `v<appVersion>` tag, or the
+   merge commit for a chart-only release) over `charts/memgraph-operator/` in
    `memgraph/helm-charts`, and merge that pull request.
 2. Run its **Release Charts** workflow from the Actions tab. chart-releaser releases every chart
    whose version is not released yet and adds it to the index.
@@ -81,13 +84,14 @@ install pulls an image that does not exist.
 
 Two ways, for different questions.
 
-**Dry run** — *does the pipeline work?* Run the Release workflow from the Actions tab. A manual
-run is always a dry run, from whichever branch or tag it is started: both architectures are
-built, the chart is packaged and installed on Kind with the locally built image, and nothing
-reaches Docker Hub or a GitHub release.
+**Dry run** — *does the pipeline work?* Run the Release workflow with **publish** off, from any
+branch (`gh workflow run release.yml --ref <branch>`): both architectures are built, the chart is
+packaged and installed on Kind with the locally built image, and nothing reaches Docker Hub, a
+tag or a GitHub release.
 
 **Prerelease** — *does publishing work?* Declare the prerelease version in `Chart.yaml` like any
-other (`appVersion: "0.2.0-rc.1"`), then tag it `v0.2.0-rc.1`. This publishes for real, but the
+other (`appVersion: "0.2.0-rc.1"`), merge, and release it from `main` with **publish** on; the
+tag is `v0.2.0-rc.1`. This publishes for real, but the
 image is not tagged `:latest` and the GitHub release is marked as a prerelease. A prerelease chart
 version in `memgraph/helm-charts` is likewise hidden from `helm install` unless `--devel` is
 passed.
@@ -102,7 +106,7 @@ Two repository secrets on `memgraph/kubernetes-operator`, checked before anythin
 | `DOCKERHUB_TOKEN` | pushing the operator image |
 
 They are the same pair the other Memgraph repositories use to publish images. The GitHub release
-uses the workflow's own `GITHUB_TOKEN`.
+and the tag use the workflow's own `GITHUB_TOKEN`.
 
 ## When a release goes wrong
 
@@ -111,7 +115,9 @@ uses the workflow's own `GITHUB_TOKEN`.
 - an image tag already pushed **from that same commit** is left alone and the build skipped —
   recognised by its `org.opencontainers.image.revision` label;
 - an image tag that exists but came from anywhere else stops the run, because that is someone
-  else's tag, not this release's.
+  else's tag, not this release's;
+- a `v<appVersion>` tag already on the commit being released is accepted, and an existing GitHub
+  release left alone.
 
 What cannot be undone is a published version number. Chart versions and image tags are immutable
 by convention and by the trust users place in them — to fix a bad release, release the next
