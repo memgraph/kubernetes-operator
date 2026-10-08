@@ -21,7 +21,7 @@ helm install memgraph-operator memgraph/memgraph-operator \
 
 The operator watches every namespace, so one release per cluster is enough.
 
-Releases cross-publish the packaged chart into that index; the source stays here. `helm search
+The chart is maintained in `memgraph/kubernetes-operator` and published to that index. `helm search
 repo memgraph/memgraph-operator --versions` lists what is available, and the chart's `appVersion`
 is the operator version an install runs by default. The two version numbers move independently —
 see [`docs/releasing.md`](../../docs/releasing.md).
