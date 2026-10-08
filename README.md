@@ -2,11 +2,11 @@
 
 A Kubernetes operator for running [Memgraph](https://memgraph.com) high-availability clusters. It exposes a `MemgraphCluster` custom resource (API group `memgraph.com/v1alpha1`, short name `mgc`): declare the cluster topology in a single resource and the operator provisions the workloads, bootstraps HA registration, and continuously reconciles registration state.
 
-> **Status: early development (v1alpha1).** The API and its guarantees can still change between releases. Read [what v1alpha1 does and does not do](#what-v1alpha1-does-and-does-not-do) before running it anywhere that matters. The previous attempt at this operator is preserved on the `archive/pre-operator-mvp` branch; the requirements and issue slices driving the current work live in [`specs/operator-mvp/`](specs/operator-mvp/PRD.md).
+> **Status: early development (v1alpha1).** The API and its guarantees can still change between releases. Read [what v1alpha1 does and does not do](#what-v1alpha1-does-and-does-not-do) before running it anywhere that matters. The previous attempt at this operator is preserved on the `archive/pre-operator-mvp` branch.
 
 ## Description
 
-The operator replaces the `memgraph-high-availability` Helm chart's fire-and-forget registration Job with a controller that continuously drives the cluster toward its declared topology: one StatefulSet per role (coordinators, data instances), automatic bootstrap and MAIN promotion, and automatic re-registration of instances that lose their registration state. See the [PRD](specs/operator-mvp/PRD.md) for the full design.
+The operator replaces the `memgraph-high-availability` Helm chart's fire-and-forget registration Job with a controller that continuously drives the cluster toward its declared topology: one StatefulSet per role (coordinators, data instances), automatic bootstrap and MAIN promotion, and automatic re-registration of instances that lose their registration state. See [`docs/`](docs) for the design of each feature.
 
 ## Quickstart
 
@@ -319,7 +319,7 @@ Pushing under a fresh tag each time works too; the point is that a tag which onc
 
 The install chart is maintained in this repository under [`charts/memgraph-operator`](charts/memgraph-operator/README.md), next to the manifests it ships: its CRDs and the manager's RBAC rules are generated from the Go types and the `+kubebuilder:rbac` markers (`make chart-sync`, verified in CI by `make chart-verify`), so the chart can never drift from the controller version it installs. Pushing a version tag cross-publishes the packaged chart into the [`memgraph.github.io/helm-charts`](https://memgraph.github.io/helm-charts) index. The chart version and the operator version move independently — `v0.2.0` releases the operator, `chart-0.4.2` releases the chart alone. See [`docs/releasing.md`](docs/releasing.md).
 
-Development is sliced into PR-gated issues under [`specs/operator-mvp/issues/`](specs/operator-mvp/issues). Run `make help` for all targets, and see the [Kubebuilder documentation](https://book.kubebuilder.io/introduction.html) for the scaffolding conventions this project follows.
+Each feature's design is documented under [`docs/`](docs). Run `make help` for all targets, and see the [Kubebuilder documentation](https://book.kubebuilder.io/introduction.html) for the scaffolding conventions this project follows.
 
 ## License
 
