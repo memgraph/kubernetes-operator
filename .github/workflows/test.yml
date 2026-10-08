@@ -85,11 +85,6 @@ jobs:
           BASE_REF: origin/${{ github.base_ref || github.ref_name }}
         run: make chart-version-check
 
-      # Releases write into another repository, so the cross-publish path is
-      # tested here, against a local stand-in for it.
-      - name: Test the cross-publish path
-        run: make test-chart-publish
-
       - name: Install Kind
         run: go install sigs.k8s.io/kind@v0.32.0
 
