@@ -40,6 +40,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -84,6 +85,9 @@ const (
 	// go undetected until an unrelated reconcile. This periodic resync is what
 	// makes re-registration continuous rather than one-shot.
 	resyncInterval = 30 * time.Second
+
+	// maxConcurrentReconciles is how many clusters are reconciled at once.
+	maxConcurrentReconciles = 4
 )
 
 // MemgraphClusterReconciler reconciles a MemgraphCluster object
@@ -2631,7 +2635,12 @@ func (r *MemgraphClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if r.ServiceMonitorAPI {
 		builder = builder.Owns(&monitoringv1.ServiceMonitor{})
 	}
-	return builder.Named("memgraphcluster").Complete(r)
+	// The workqueue never hands one cluster to two workers at once, so more
+	// workers only keep clusters from queueing behind each other: a pass can
+	// spend tens of seconds dialling pods that do not answer.
+	return builder.Named("memgraphcluster").
+		WithOptions(controller.Options{MaxConcurrentReconciles: maxConcurrentReconciles}).
+		Complete(r)
 }
 
 // joinNonEmpty joins the messages that are not empty, one sentence after

@@ -1561,20 +1561,28 @@ func (c clusterUnderTest) watchRoll(before map[string]string, timeout time.Durat
 		if down, err := c.notReadyPods(len(before)); err == nil && down > maxDown {
 			maxDown = down
 		}
-		now, err := c.podUIDs()
+		now, err := c.podIncarnations()
 		g.Expect(err).NotTo(HaveOccurred())
-		// Ordinal order within a poll, so a sample that catches two replacements at
-		// once is at least deterministic. One pod at a time is asserted separately;
-		// this only keeps the recorded order stable.
-		names := make([]string, 0, len(now))
-		for name := range now {
-			names = append(names, name)
-		}
-		sort.Strings(names)
-		for _, name := range names {
-			if replaced[name] || now[name] == "" || now[name] == before[name] {
-				continue
+		// A poll can catch two replacements at once, the next pod deleted
+		// while the previous one came back between two samples. They are
+		// ordered by when the replacement pod was created, which follows the
+		// operator's deletes because it waits for each pod to come back ready
+		// before deleting the next; never by name, which sorts every
+		// coordinator ahead of every data instance.
+		var fresh []string
+		for name, pod := range now {
+			if !replaced[name] && pod.uid != before[name] {
+				fresh = append(fresh, name)
 			}
+		}
+		sort.Slice(fresh, func(i, j int) bool {
+			a, b := now[fresh[i]], now[fresh[j]]
+			if !a.created.Equal(b.created) {
+				return a.created.Before(b.created)
+			}
+			return fresh[i] < fresh[j]
+		})
+		for _, name := range fresh {
 			replaced[name] = true
 			order = append(order, name)
 		}
@@ -1583,6 +1591,37 @@ func (c clusterUnderTest) watchRoll(before map[string]string, timeout time.Durat
 	}, timeout, 2*time.Second).Should(Succeed())
 
 	return order, maxDown
+}
+
+// podIncarnation is one pod's UID and when that pod object was created, which
+// is when its StatefulSet replaced the one before it.
+type podIncarnation struct {
+	uid     string
+	created time.Time
+}
+
+// podIncarnations is every current pod of the cluster by name.
+func (c clusterUnderTest) podIncarnations() (map[string]podIncarnation, error) {
+	cmd := exec.Command("kubectl", "get", "pods", "-n", c.namespace,
+		"-l", c.workloadPods(),
+		"-o", `jsonpath={range .items[*]}{.metadata.name}{" "}{.metadata.uid}{" "}{.metadata.creationTimestamp}{"\n"}{end}`)
+	output, err := utils.Run(cmd)
+	if err != nil {
+		return nil, fmt.Errorf("listing pods: %w", err)
+	}
+	pods := map[string]podIncarnation{}
+	for _, line := range utils.GetNonEmptyLines(output) {
+		fields := strings.Fields(line)
+		if len(fields) != 3 {
+			return nil, fmt.Errorf("unexpected pod line %q", line)
+		}
+		created, err := time.Parse(time.RFC3339, fields[2])
+		if err != nil {
+			return nil, fmt.Errorf("parsing creationTimestamp of pod %s: %w", fields[0], err)
+		}
+		pods[fields[0]] = podIncarnation{uid: fields[1], created: created}
+	}
+	return pods, nil
 }
 
 // workloadPodNames is every declared pod of both roles, coordinators first.
