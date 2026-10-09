@@ -338,7 +338,7 @@ spec:
     data:
       log-level: INFO
       # Startup-only: changing it rolls the data pods, MAIN last of them.
-      storage-snapshot-on-exit: "false"
+      storage-snapshot-on-exit: "true"
   # Any pod volume the operator does not provision itself, plus where to mount
   # it in the Memgraph container. Entries are plain core/v1 volumes and volume
   # mounts, appended after the operator's own — the usual reason to reach for

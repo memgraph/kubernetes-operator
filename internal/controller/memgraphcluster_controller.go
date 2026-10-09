@@ -38,11 +38,14 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	ctrlbuilder "sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
@@ -2245,6 +2248,31 @@ func clusterForClaim(_ context.Context, claim client.Object) []reconcile.Request
 	return []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: claim.GetNamespace(), Name: name}}}
 }
 
+// clusterForPod maps a coordinator or data instance pod to its cluster.
+func clusterForPod(_ context.Context, pod client.Object) []reconcile.Request {
+	name := resources.ClusterNameOfMemgraphPod(pod.GetLabels())
+	if name == "" {
+		return nil
+	}
+	return []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: pod.GetNamespace(), Name: name}}}
+}
+
+// memgraphPodChanged passes a pod's creation and deletion, and of its updates
+// only those a pass acts on: readiness, and the revision a rolling restart
+// compares. Every other update — condition heartbeats, container statuses — is
+// dropped, since a pod's status never moves its generation.
+var memgraphPodChanged = predicate.Funcs{
+	UpdateFunc: func(e event.UpdateEvent) bool {
+		oldPod, oldOK := e.ObjectOld.(*corev1.Pod)
+		newPod, newOK := e.ObjectNew.(*corev1.Pod)
+		if !oldOK || !newOK {
+			return true
+		}
+		return podReady(oldPod) != podReady(newPod) ||
+			oldPod.Labels[appsv1.StatefulSetRevisionLabel] != newPod.Labels[appsv1.StatefulSetRevisionLabel]
+	},
+}
+
 // shedRetiredPods applies the shrinking roles' StatefulSets at their declared
 // replica counts — the one place the operator ever lowers a replica count. It is
 // reached only after the plan came back empty, so every pod it sheds belongs to a
@@ -2624,7 +2652,14 @@ func (r *MemgraphClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		// Claims belong to the StatefulSets, not to the cluster, so they are
 		// watched rather than owned: a claim growing is what a resize waits
 		// on, and its labels name the cluster.
-		Watches(&corev1.PersistentVolumeClaim{}, handler.EnqueueRequestsFromMapFunc(clusterForClaim))
+		Watches(&corev1.PersistentVolumeClaim{}, handler.EnqueueRequestsFromMapFunc(clusterForClaim)).
+		// Pods belong to the StatefulSets, not to the cluster, so they are
+		// watched rather than owned, and only for what a pass gates on:
+		// StatefulSet status counts ready pods but not which ones, so a pod
+		// turning unready while another turns ready would otherwise wait for
+		// the next requeue.
+		Watches(&corev1.Pod{}, handler.EnqueueRequestsFromMapFunc(clusterForPod),
+			ctrlbuilder.WithPredicates(memgraphPodChanged))
 	if r.GatewayAPI {
 		builder = builder.Owns(&gatewayv1.Gateway{}).Owns(&gatewayv1.TCPRoute{})
 	}

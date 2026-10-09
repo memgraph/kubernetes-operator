@@ -323,3 +323,24 @@ func TestUsesVMAgent(t *testing.T) {
 		t.Error("UsesVMAgent() = false for a cluster with the block")
 	}
 }
+
+// TestClusterNameOfMemgraphPod pins that the pods of both StatefulSets map to
+// their cluster and the vmagent's, which carries the same identity labels
+// under a role of its own, maps to none.
+func TestClusterNameOfMemgraphPod(t *testing.T) {
+	for name, tc := range map[string]struct {
+		labels map[string]string
+		want   string
+	}{
+		"coordinator": {coordinatorStatefulSet(minimalCluster()).Spec.Template.Labels, clusterName},
+		"data":        {dataStatefulSet(minimalCluster()).Spec.Template.Labels, clusterName},
+		"vmagent":     {resources.VMAgentDeployment(vmagentCluster()).Spec.Template.Labels, ""},
+		"unlabelled":  {nil, ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := resources.ClusterNameOfMemgraphPod(tc.labels); got != tc.want {
+				t.Errorf("ClusterNameOfMemgraphPod() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
