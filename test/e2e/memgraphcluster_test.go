@@ -472,11 +472,17 @@ var _ = Describe("MemgraphCluster", Ordered, func() {
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred())
 
+		// Polled rather than `kubectl wait`, which fails at once on a Deployment
+		// that does not exist yet, and right after the patch the operator has
+		// not created it.
 		By("waiting for the vmagent Deployment to become available under the restricted policy")
-		cmd = exec.Command("kubectl", "wait", "--for=condition=Available", "deployment/"+quickstartCluster.name+"-vmagent",
-			"-n", clusterNamespace, "--timeout=3m")
-		_, err = utils.Run(cmd)
-		Expect(err).NotTo(HaveOccurred(), "the vmagent never became available")
+		Eventually(func(g Gomega) {
+			cmd := exec.Command("kubectl", "get", "deployment", quickstartCluster.name+"-vmagent", "-n", clusterNamespace,
+				"-o", `jsonpath={.status.conditions[?(@.type=="Available")].status}`)
+			output, err := utils.Run(cmd)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(strings.TrimSpace(output)).To(Equal("True"))
+		}, 3*time.Minute, 5*time.Second).Should(Succeed(), "the vmagent never became available")
 
 		By("waiting for every instance's up series to reach the sink with the external label")
 		declared := quickstartCluster.coordinators + quickstartCluster.dataInstances

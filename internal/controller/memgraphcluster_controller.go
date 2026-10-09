@@ -52,6 +52,7 @@ import (
 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 
 	memgraphcomv1alpha1 "github.com/memgraph/kubernetes-operator/api/v1alpha1"
+	"github.com/memgraph/kubernetes-operator/internal/expectations"
 	"github.com/memgraph/kubernetes-operator/internal/memgraph"
 	"github.com/memgraph/kubernetes-operator/internal/planner"
 	"github.com/memgraph/kubernetes-operator/internal/resources"
@@ -130,6 +131,11 @@ type MemgraphClusterReconciler struct {
 	// ServiceMonitorAPIMissing says what the discovery found lacking when
 	// ServiceMonitorAPI is false, so the resource is told what to install.
 	ServiceMonitorAPIMissing string
+
+	// shrinks are the StatefulSet shrinks this process applied and its cache
+	// may not show yet; a pass waits for them before resolving replica
+	// counts (see replicaCounts). The zero value is ready to use.
+	shrinks expectations.StatefulSets
 }
 
 // The install chart's ClusterRole is generated from these markers, so they are
@@ -248,6 +254,13 @@ func (r *MemgraphClusterReconciler) reconcileCluster(
 	replicas, err := r.replicaCounts(ctx, cluster)
 	if err != nil {
 		return ctrl.Result{}, err
+	}
+	if len(replicas.unseenShrinks) > 0 {
+		// The StatefulSet event that clears it requeues the cluster, so the
+		// delay is only a backstop.
+		log.Info("Deferred the pass until the cache shows the StatefulSet shrink it applied",
+			"statefulsets", replicas.unseenShrinks)
+		return ctrl.Result{RequeueAfter: requeueWhilePending}, nil
 	}
 
 	// A grown storage size goes to the claims before anything is applied: the
@@ -685,13 +698,13 @@ func (r *MemgraphClusterReconciler) applyDesired(
 	ctx context.Context,
 	cluster *memgraphcomv1alpha1.MemgraphCluster,
 	desired ...client.Object,
-) (appliedGenerations, error) {
-	applied := appliedGenerations{}
+) (appliedObjects, error) {
+	applied := appliedObjects{}
 	for _, obj := range desired {
 		if err := controllerutil.SetControllerReference(cluster, obj, r.Scheme); err != nil {
 			return nil, fmt.Errorf("setting owner reference on %T %s: %w", obj, obj.GetName(), err)
 		}
-		generation, err := r.apply(ctx, obj)
+		written, err := r.apply(ctx, obj)
 		if err != nil {
 			applyErr := fmt.Errorf("applying %T %s: %w", obj, obj.GetName(), err)
 			msg := truncateMessage(applyErr.Error())
@@ -700,24 +713,31 @@ func (r *MemgraphClusterReconciler) applyDesired(
 				notConvergedCondition(memgraphcomv1alpha1.ReasonApplyFailed, msg))
 			return nil, applyErr
 		}
-		applied[appliedKey(obj)] = generation
+		applied[appliedKey(obj)] = appliedObject{uid: written.GetUID(), generation: written.GetGeneration()}
 	}
 	return applied, nil
 }
 
-// appliedGenerations is the metadata.generation the API server assigned each
-// object a pass applied, keyed by kind and name — two kinds share a name here,
-// the headless Service and the StatefulSet of a role.
-type appliedGenerations map[string]int64
+// appliedObjects is the UID and metadata.generation the API server
+// returned for each object a pass applied, keyed by kind and name — two kinds
+// share a name here, the headless Service and the StatefulSet of a role.
+type appliedObjects map[string]appliedObject
+
+// appliedObject is one applied object as the API server returned it.
+type appliedObject struct {
+	uid        types.UID
+	generation int64
+}
 
 func appliedKey(obj client.Object) string {
 	return obj.GetObjectKind().GroupVersionKind().Kind + "/" + obj.GetName()
 }
 
-// statefulSet is the generation this pass applied to the named StatefulSet, or
-// zero when the pass applied none — which is what a StatefulSet read from the
-// cache is then measured against, and zero is what any generation clears.
-func (a appliedGenerations) statefulSet(name string) int64 {
+// statefulSet is the named StatefulSet as this pass applied it, or the zero
+// value when the pass applied none — whose generation is what a StatefulSet
+// read from the cache is then measured against, and zero is what any
+// generation clears.
+func (a appliedObjects) statefulSet(name string) appliedObject {
 	return a["StatefulSet/"+name]
 }
 
@@ -741,6 +761,10 @@ type roleReplicas struct {
 type replicaCounts struct {
 	coordinators roleReplicas
 	data         roleReplicas
+	// unseenShrinks names the StatefulSets whose shrink this process applied
+	// and its cache does not show yet. While it is non-empty the counts above
+	// are not to be acted on.
+	unseenShrinks []string
 }
 
 // retirementMessage names the members a lowered count is shedding, and is empty
@@ -827,6 +851,12 @@ func (r *MemgraphClusterReconciler) replicaCounts(
 		sts, err := r.getStatefulSet(ctx, cluster.Namespace, role.name)
 		if err != nil {
 			return replicaCounts{}, err
+		}
+		// A cached StatefulSet older than the shrink a previous pass applied
+		// still carries the count before it, and the max below would apply
+		// that count again: the pods just shed would come back.
+		if !r.shrinks.Satisfied(types.NamespacedName{Namespace: cluster.Namespace, Name: role.name}, sts) {
+			counts.unseenShrinks = append(counts.unseenShrinks, role.name)
 		}
 		// The count the operator's own previous apply left, zero before the
 		// first one.
@@ -1096,18 +1126,18 @@ func (r *MemgraphClusterReconciler) observeRollout(
 	ctx context.Context,
 	cluster *memgraphcomv1alpha1.MemgraphCluster,
 	replicas replicaCounts,
-	applied appliedGenerations,
+	applied appliedObjects,
 ) (rolloutRoles, error) {
 	var roles rolloutRoles
 	coordinators, err := r.observeRolloutRole(ctx, cluster, replicas.coordinators,
 		resources.CoordinatorPodSelector(cluster), resources.CoordinatorInstanceName,
-		applied.statefulSet(replicas.coordinators.name))
+		applied.statefulSet(replicas.coordinators.name).generation)
 	if err != nil {
 		return rolloutRoles{}, err
 	}
 	data, err := r.observeRolloutRole(ctx, cluster, replicas.data,
 		resources.DataPodSelector(cluster), resources.DataInstanceName,
-		applied.statefulSet(replicas.data.name))
+		applied.statefulSet(replicas.data.name).generation)
 	if err != nil {
 		return rolloutRoles{}, err
 	}
@@ -2298,9 +2328,13 @@ func (r *MemgraphClusterReconciler) shedRetiredPods(
 		}
 		shrunk := role.build(cluster, role.replicas.declared)
 		volumes.KeepLiveSizes(shrunk, role.replicas.statefulSet)
-		if _, err := r.applyDesired(ctx, cluster, shrunk); err != nil {
+		applied, err := r.applyDesired(ctx, cluster, shrunk)
+		if err != nil {
 			return err
 		}
+		written := applied.statefulSet(role.replicas.name)
+		r.shrinks.Expect(types.NamespacedName{Namespace: cluster.Namespace, Name: role.replicas.name},
+			written.uid, written.generation)
 		log.Info("Shrank a StatefulSet to the declared replica count",
 			"statefulset", role.replicas.name, "replicas", role.replicas.declared)
 	}
@@ -2613,12 +2647,13 @@ func (r *MemgraphClusterReconciler) showInstances(
 // apply server-side-applies a desired object built by the resource builders.
 // Builders set only the fields the operator owns, so the converted apply
 // configuration claims exactly those fields for this controller. It returns the
-// generation the API server assigned the object: the response is decoded back
-// into the applied configuration, so no second read is needed for it.
-func (r *MemgraphClusterReconciler) apply(ctx context.Context, obj client.Object) (int64, error) {
+// object as the API server answered, its UID and generation included: the
+// response is decoded back into the applied configuration, so no second read
+// is needed for them.
+func (r *MemgraphClusterReconciler) apply(ctx context.Context, obj client.Object) (metav1.Object, error) {
 	content, err := runtime.DefaultUnstructuredConverter.ToUnstructured(obj)
 	if err != nil {
-		return 0, fmt.Errorf("converting to unstructured: %w", err)
+		return nil, fmt.Errorf("converting to unstructured: %w", err)
 	}
 	u := &unstructured.Unstructured{Object: content}
 	// Zero-valued struct fields survive the conversion; drop them so the
@@ -2629,9 +2664,9 @@ func (r *MemgraphClusterReconciler) apply(ctx context.Context, obj client.Object
 
 	if err := r.Apply(ctx, client.ApplyConfigurationFromUnstructured(u),
 		client.FieldOwner(fieldOwner), client.ForceOwnership); err != nil {
-		return 0, err
+		return nil, err
 	}
-	return u.GetGeneration(), nil
+	return u, nil
 }
 
 // SetupWithManager sets up the controller with the Manager. The Gateway API
