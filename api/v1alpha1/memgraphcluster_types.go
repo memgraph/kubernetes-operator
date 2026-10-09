@@ -18,6 +18,7 @@ package v1alpha1
 
 import (
 	corev1 "k8s.io/api/core/v1"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -394,7 +395,28 @@ const (
 	// ReasonNoMainElected is set when the cluster is reachable but no data
 	// instance has yet been promoted to MAIN.
 	ReasonNoMainElected = "NoMainElected"
+
+	// ReasonReconciling is set on a condition no pass has decided yet, so
+	// every condition is present from the first status write on.
+	ReasonReconciling = "Reconciling"
 )
+
+// InitializeConditions sets every condition the resource reports to Unknown,
+// leaving those already present untouched.
+func (c *MemgraphCluster) InitializeConditions() {
+	for _, condType := range []string{
+		ConditionReady, ConditionConverged, ConditionUpdated, ConditionLicenseApplied,
+	} {
+		if apimeta.FindStatusCondition(c.Status.Conditions, condType) == nil {
+			apimeta.SetStatusCondition(&c.Status.Conditions, metav1.Condition{
+				Type:               condType,
+				Status:             metav1.ConditionUnknown,
+				Reason:             ReasonReconciling,
+				ObservedGeneration: c.Generation,
+			})
+		}
+	}
+}
 
 // ImageSpec selects the Memgraph container image run by all cluster pods.
 type ImageSpec struct {
