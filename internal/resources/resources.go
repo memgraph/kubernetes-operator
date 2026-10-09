@@ -157,6 +157,17 @@ func ClusterNameOf(labels map[string]string) string {
 	return labels[instanceLabel]
 }
 
+// ClusterNameOfMemgraphPod is the name of the cluster a coordinator or data
+// instance pod belongs to, or empty for any other pod: the vmagent's carries
+// the same identity labels under a role of its own.
+func ClusterNameOfMemgraphPod(labels map[string]string) string {
+	switch labels[componentLabel] {
+	case coordinatorComponent, dataComponent:
+		return ClusterNameOf(labels)
+	}
+	return ""
+}
+
 // normalizedSpec is a MemgraphClusterSpec with every optional field resolved
 // to its default, so builders behave correctly on specs that never passed
 // admission. Most defaults are CRD schema defaults mirrored as Go constants;

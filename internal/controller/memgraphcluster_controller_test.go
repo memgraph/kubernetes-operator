@@ -37,6 +37,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
@@ -4669,5 +4670,53 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			Expect(served).To(BeFalse())
 			Expect(missing).To(Equal("TCPRoute is served only as gateway.networking.k8s.io/v1alpha2"))
 		})
+	})
+})
+
+var _ = Describe("Pod watch", func() {
+	const podNamespace = "default"
+	cluster := &memgraphcomv1alpha1.MemgraphCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "mgc-pods", Namespace: podNamespace},
+	}
+	dataLabels := resources.DataStatefulSet(cluster, 2).Spec.Template.Labels
+	pod := func(revision string, ready corev1.ConditionStatus) *corev1.Pod {
+		labels := maps.Clone(dataLabels)
+		labels[appsv1.StatefulSetRevisionLabel] = revision
+		return &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Namespace: podNamespace, Labels: labels},
+			Status:     corev1.PodStatus{Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: ready}}},
+		}
+	}
+
+	It("should map the pods of both StatefulSets to their cluster and no other pod", func() {
+		want := []reconcile.Request{{NamespacedName: client.ObjectKeyFromObject(cluster)}}
+		coordinator := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+			Namespace: podNamespace,
+			Labels:    resources.CoordinatorStatefulSet(cluster, 3).Spec.Template.Labels,
+		}}
+		Expect(clusterForPod(ctx, coordinator)).To(Equal(want))
+		Expect(clusterForPod(ctx, pod("a", corev1.ConditionTrue))).To(Equal(want))
+
+		// The vmagent's pod carries the same identity labels under its own role.
+		vmagent := pod("a", corev1.ConditionTrue)
+		vmagent.Labels["app.kubernetes.io/component"] = "vmagent"
+		Expect(clusterForPod(ctx, vmagent)).To(BeEmpty())
+	})
+
+	It("should pass only the pod updates a pass acts on", func() {
+		update := func(oldPod, newPod *corev1.Pod) bool {
+			return memgraphPodChanged.Update(event.UpdateEvent{ObjectOld: oldPod, ObjectNew: newPod})
+		}
+		Expect(update(pod("a", corev1.ConditionFalse), pod("a", corev1.ConditionTrue))).To(BeTrue(), "turned ready")
+		Expect(update(pod("a", corev1.ConditionTrue), pod("a", corev1.ConditionFalse))).To(BeTrue(), "turned unready")
+		Expect(update(pod("a", corev1.ConditionTrue), pod("b", corev1.ConditionTrue))).To(BeTrue(), "new revision")
+
+		heartbeat := pod("a", corev1.ConditionTrue)
+		heartbeat.Status.Conditions[0].LastProbeTime = metav1.Now()
+		heartbeat.Status.ContainerStatuses = []corev1.ContainerStatus{{RestartCount: 1}}
+		Expect(update(pod("a", corev1.ConditionTrue), heartbeat)).To(BeFalse(), "status noise")
+
+		Expect(memgraphPodChanged.Create(event.CreateEvent{Object: pod("a", corev1.ConditionFalse)})).To(BeTrue())
+		Expect(memgraphPodChanged.Delete(event.DeleteEvent{Object: pod("a", corev1.ConditionTrue)})).To(BeTrue())
 	})
 })

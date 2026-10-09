@@ -195,7 +195,11 @@ func main() {
 		// that asks for the Grafana dashboard or a vmagent, and every namespace
 		// has ConfigMaps and Deployments that are none of its business. Claims
 		// the same, which a resize patches and waits on.
+		// A read of a kind nothing watches fails instead of starting an
+		// informer mid-reconcile, which would block the worker until it syncs
+		// and hang it for good on a kind it cannot list.
 		Cache: cache.Options{
+			ReaderFailOnMissingInformer: true,
 			ByObject: map[client.Object]cache.ByObject{
 				&corev1.Pod{}:                   {Label: managedByOperator},
 				&corev1.ConfigMap{}:             {Label: managedByOperator},
