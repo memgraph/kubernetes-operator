@@ -115,6 +115,24 @@ func libClaim(sts *appsv1.StatefulSet) corev1.PersistentVolumeClaimSpec {
 	return corev1.PersistentVolumeClaimSpec{}
 }
 
+// laggingCache is a client whose reads of the given StatefulSets return the
+// copies it holds, the way an informer cache serves an object until the watch
+// event of a write reaches it. Everything else, writes included, goes through.
+type laggingCache struct {
+	client.Client
+	statefulSets map[types.NamespacedName]*appsv1.StatefulSet
+}
+
+func (c laggingCache) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if sts, ok := obj.(*appsv1.StatefulSet); ok {
+		if held, ok := c.statefulSets[key]; ok {
+			held.DeepCopyInto(sts)
+			return nil
+		}
+	}
+	return c.Client.Get(ctx, key, obj, opts...)
+}
+
 var _ = Describe("MemgraphCluster Controller", func() {
 	const resourceNamespace = "default"
 
@@ -997,6 +1015,47 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			Expect(s.DataInstances).To(Equal(int32(1)))
 			Expect(s.Main).To(Equal("instance_0"), "the surviving MAIN was never moved")
 			Expect(apimeta.IsStatusConditionTrue(s.Conditions,
+				memgraphcomv1alpha1.ConditionConverged)).To(BeTrue())
+		})
+
+		// The shrink is the one write a lagging cache would undo: the count a pass
+		// applies is the larger of the declared one and the one the cached
+		// StatefulSet carries, so a pass reading the pre-shrink StatefulSet would
+		// apply the old count again and bring the shed pod back.
+		It("should not grow a StatefulSet it shrank back while the cache shows the old count", func() {
+			baseline := bootstrapped()
+			setCounts(3, 1)
+			reconcileCluster(resourceName)
+			Expect(sinceBootstrap(baseline)).To(HaveLen(1))
+
+			beforeShrink := &appsv1.StatefulSet{}
+			get(resourceName+dataSuffix, beforeShrink)
+			reconcileCluster(resourceName)
+			shrunk := &appsv1.StatefulSet{}
+			get(resourceName+dataSuffix, shrunk)
+			Expect(*shrunk.Spec.Replicas).To(Equal(int32(1)))
+
+			By("reconciling while the cache still serves the StatefulSet from before the shrink")
+			reconciler.Client = laggingCache{Client: k8sClient, statefulSets: map[types.NamespacedName]*appsv1.StatefulSet{
+				client.ObjectKeyFromObject(beforeShrink): beforeShrink,
+			}}
+			result := reconcileCluster(resourceName)
+			// The generation, not just the count: a pass that grew the StatefulSet
+			// back would shrink it again further on, once it found the member
+			// already gone, and the end state alone would hide the pod the
+			// StatefulSet controller recreated in between.
+			afterLag := &appsv1.StatefulSet{}
+			get(resourceName+dataSuffix, afterLag)
+			Expect(afterLag.Generation).To(Equal(shrunk.Generation), "the StatefulSet must not be written at all")
+			Expect(result.RequeueAfter).To(BeNumerically(">", 0), "the pass waits for the cache, it does not give up")
+			Expect(sinceBootstrap(baseline)).To(HaveLen(1), "nothing is issued while the cache lags")
+
+			By("converging once the cache shows the shrink")
+			reconciler.Client = k8sClient
+			reconcileCluster(resourceName)
+			Expect(replicas(dataSuffix)).To(Equal(int32(1)))
+			Expect(status().DataInstances).To(Equal(int32(1)))
+			Expect(apimeta.IsStatusConditionTrue(status().Conditions,
 				memgraphcomv1alpha1.ConditionConverged)).To(BeTrue())
 		})
 
