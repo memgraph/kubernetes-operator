@@ -209,15 +209,40 @@ type MemgraphClusterReconciler struct {
 // RegistrationFailed. Deletion needs no handling here — every object
 // carries a controller owner reference, so garbage collection removes the
 // workloads with the CR.
+//
+// Status is written once, at the end of the pass, whether the pass succeeded
+// or not: everything below only sets it on the in-memory object, and the patch
+// is skipped when nothing changed, so a converged cluster re-observed on every
+// resync does not churn the resource version.
 func (r *MemgraphClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	log := logf.FromContext(ctx)
-
-	var cluster memgraphcomv1alpha1.MemgraphCluster
-	if err := r.Get(ctx, req.NamespacedName, &cluster); err != nil {
+	cluster := new(memgraphcomv1alpha1.MemgraphCluster)
+	if err := r.Get(ctx, req.NamespacedName, cluster); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	replicas, err := r.replicaCounts(ctx, &cluster)
+	orig := cluster.DeepCopy()
+	cluster.InitializeConditions()
+
+	result, reconcileErr := r.reconcileCluster(ctx, cluster)
+
+	if equality.Semantic.DeepEqual(orig.Status, cluster.Status) {
+		return result, reconcileErr
+	}
+	if err := r.Status().Patch(ctx, cluster, client.MergeFrom(orig)); err != nil {
+		return ctrl.Result{}, errors.Join(reconcileErr, fmt.Errorf("patching MemgraphCluster status: %w", err))
+	}
+	return result, reconcileErr
+}
+
+// reconcileCluster is one pass over the cluster and its child objects. It
+// records what it observes on cluster.Status and leaves writing it to Reconcile.
+func (r *MemgraphClusterReconciler) reconcileCluster(
+	ctx context.Context,
+	cluster *memgraphcomv1alpha1.MemgraphCluster,
+) (ctrl.Result, error) {
+	log := logf.FromContext(ctx)
+
+	replicas, err := r.replicaCounts(ctx, cluster)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -226,21 +251,18 @@ func (r *MemgraphClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	// apply restates the live claim templates, which Kubernetes refuses to
 	// change, and the StatefulSet only takes the new ones by being recreated —
 	// which ends the pass, so nothing else acts while it is missing.
-	coordinatorSet := resources.CoordinatorStatefulSet(&cluster, replicas.coordinators.applied)
-	dataSet := resources.DataStatefulSet(&cluster, replicas.data.applied)
-	claims, recreating, err := r.reconcileVolumes(ctx, &cluster,
-		claimedRole{replicas.coordinators, coordinatorSet, resources.CoordinatorPodSelector(&cluster)},
-		claimedRole{replicas.data, dataSet, resources.DataPodSelector(&cluster)},
+	coordinatorSet := resources.CoordinatorStatefulSet(cluster, replicas.coordinators.applied)
+	dataSet := resources.DataStatefulSet(cluster, replicas.data.applied)
+	claims, recreating, err := r.reconcileVolumes(ctx, cluster,
+		claimedRole{replicas.coordinators, coordinatorSet, resources.CoordinatorPodSelector(cluster)},
+		claimedRole{replicas.data, dataSet, resources.DataPodSelector(cluster)},
 	)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 	if recreating != "" {
-		if err := r.writeStatus(ctx, &cluster, lastObserved(&cluster),
-			notConvergedCondition(memgraphcomv1alpha1.ReasonVolumeExpansionInProgress, recreating),
-		); err != nil {
-			return ctrl.Result{}, err
-		}
+		setStatus(cluster, lastObserved(cluster),
+			notConvergedCondition(memgraphcomv1alpha1.ReasonVolumeExpansionInProgress, recreating))
 		return ctrl.Result{RequeueAfter: requeueWhilePending}, nil
 	}
 	volumes.KeepLiveSizes(coordinatorSet, replicas.coordinators.statefulSet)
@@ -249,35 +271,35 @@ func (r *MemgraphClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	// The external objects follow the data pods the operator runs, not the
 	// count it declares: a retiring instance keeps serving clients until its pod
 	// is shed, and the pass that sheds the pod is the one that drops its way in.
-	external := r.desiredExternal(&cluster, replicas.data.applied)
-	monitoring := r.desiredMonitoring(&cluster, replicas)
+	external := r.desiredExternal(cluster, replicas.data.applied)
+	monitoring := r.desiredMonitoring(cluster, replicas)
 	desired := make([]client.Object, 0, 2*workloadObjectsPerRole+len(external)+len(monitoring))
 	desired = append(desired,
-		resources.CoordinatorHeadlessService(&cluster),
-		resources.DataHeadlessService(&cluster),
+		resources.CoordinatorHeadlessService(cluster),
+		resources.DataHeadlessService(cluster),
 		// The flag files go before the StatefulSets that mount them, so a pod
 		// the apply creates finds its file already there.
-		resources.CoordinatorFlagsConfigMap(&cluster),
-		resources.DataFlagsConfigMap(&cluster),
+		resources.CoordinatorFlagsConfigMap(cluster),
+		resources.DataFlagsConfigMap(cluster),
 		coordinatorSet,
 		dataSet,
 	)
 	desired = append(desired, external...)
 	desired = append(desired, monitoring...)
-	applied, err := r.applyDesired(ctx, &cluster, desired...)
+	applied, err := r.applyDesired(ctx, cluster, desired...)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	if err := r.pruneExternal(ctx, &cluster, external); err != nil {
+	if err := r.pruneExternal(ctx, cluster, external); err != nil {
 		return ctrl.Result{}, err
 	}
-	if err := r.pruneMonitoring(ctx, &cluster, monitoring); err != nil {
+	if err := r.pruneMonitoring(ctx, cluster, monitoring); err != nil {
 		return ctrl.Result{}, err
 	}
 
-	log.Info("Applied desired workload objects for MemgraphCluster", "memgraphcluster", req.NamespacedName)
+	log.Info("Applied desired workload objects for MemgraphCluster", "memgraphcluster", client.ObjectKeyFromObject(cluster))
 
-	exposure, err := r.observeExternalAccess(ctx, &cluster)
+	exposure, err := r.observeExternalAccess(ctx, cluster)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -286,7 +308,7 @@ func (r *MemgraphClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	// gate need each pod's readiness, the gate also whether a restart is under
 	// way to tolerate the pod it took down, and the restart itself needs the
 	// same view further down.
-	roles, err := r.observeRollout(ctx, &cluster, replicas, applied)
+	roles, err := r.observeRollout(ctx, cluster, replicas, applied)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -300,12 +322,10 @@ func (r *MemgraphClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	// Each pod's settings are read once for the whole pass: the license here
 	// and the run-time settings further down plan against the same read.
 	reads := podSettings{}
-	license := r.reconcileLicense(ctx, reads, &cluster, replicas, roles)
-	if err := r.writeStatus(ctx, &cluster, lastObserved(&cluster), license); err != nil {
-		return ctrl.Result{}, err
-	}
+	license := r.reconcileLicense(ctx, reads, cluster, replicas, roles)
+	setStatus(cluster, lastObserved(cluster), license)
 
-	return r.reconcileRegistration(ctx, reads, &cluster, replicas, exposure, roles, claims)
+	return r.reconcileRegistration(ctx, reads, cluster, replicas, exposure, roles, claims)
 }
 
 // desiredExternal is every external object the spec asks for: the Services in
@@ -672,12 +692,9 @@ func (r *MemgraphClusterReconciler) applyDesired(
 		if err != nil {
 			applyErr := fmt.Errorf("applying %T %s: %w", obj, obj.GetName(), err)
 			msg := truncateMessage(applyErr.Error())
-			if statusErr := r.writeStatus(ctx, cluster, lastObserved(cluster),
+			setStatus(cluster, lastObserved(cluster),
 				notReadyCondition(memgraphcomv1alpha1.ReasonApplyFailed, msg),
-				notConvergedCondition(memgraphcomv1alpha1.ReasonApplyFailed, msg),
-			); statusErr != nil {
-				return nil, errors.Join(applyErr, statusErr)
-			}
+				notConvergedCondition(memgraphcomv1alpha1.ReasonApplyFailed, msg))
 			return nil, applyErr
 		}
 		applied[appliedKey(obj)] = generation
@@ -1278,12 +1295,9 @@ func (r *MemgraphClusterReconciler) reconcileRegistration(
 	if !workloadsReady(replicas, roles) {
 		log.Info("Waited for workload pods to become ready before registration")
 		msg := "Waiting for all workload pods to become ready"
-		if statusErr := r.writeStatus(ctx, cluster, lastObserved(cluster).exposedAt(exposure),
+		setStatus(cluster, lastObserved(cluster).exposedAt(exposure),
 			notReadyCondition(memgraphcomv1alpha1.ReasonWorkloadsNotReady, msg),
-			notConvergedCondition(memgraphcomv1alpha1.ReasonWorkloadsNotReady, msg),
-		); statusErr != nil {
-			return ctrl.Result{}, statusErr
-		}
+			notConvergedCondition(memgraphcomv1alpha1.ReasonWorkloadsNotReady, msg))
 		return ctrl.Result{RequeueAfter: requeueWhilePending}, nil
 	}
 
@@ -1310,12 +1324,9 @@ func (r *MemgraphClusterReconciler) reconcileRegistration(
 			reason, msg = memgraphcomv1alpha1.ReasonNoCoordinatorLeader,
 				"No coordinator reported a leader, so the cluster has no Raft quorum"
 		}
-		if statusErr := r.writeStatus(ctx, cluster, lastObserved(cluster).exposedAt(exposure),
+		setStatus(cluster, lastObserved(cluster).exposedAt(exposure),
 			notReadyCondition(reason, msg),
-			notConvergedCondition(reason, msg),
-		); statusErr != nil {
-			return ctrl.Result{}, statusErr
-		}
+			notConvergedCondition(reason, msg))
 		return ctrl.Result{RequeueAfter: requeueWhilePending}, nil
 	}
 	defer func() {
@@ -1347,21 +1358,15 @@ func (r *MemgraphClusterReconciler) reconcileRegistration(
 				log.Info("Deferred retirement because no surviving data instance is caught up with MAIN")
 				msg := "Waiting for a surviving data instance that is reachable and caught up with MAIN " +
 					"before moving MAIN off the instance being retired"
-				if statusErr := r.writeStatus(ctx, cluster, latest, readyOrNot(latest.main),
-					notConvergedCondition(memgraphcomv1alpha1.ReasonNoCaughtUpSurvivor, msg),
-				); statusErr != nil {
-					return ctrl.Result{}, statusErr
-				}
+				setStatus(cluster, latest, readyOrNot(latest.main),
+					notConvergedCondition(memgraphcomv1alpha1.ReasonNoCaughtUpSurvivor, msg))
 				return ctrl.Result{RequeueAfter: requeueWhilePending}, nil
 			}
 			if err := r.shedRetiredPods(ctx, cluster, topology, replicas); err != nil {
 				return ctrl.Result{}, err
 			}
-			if statusErr := r.writeStatus(ctx, cluster, latest, readyOrNot(latest.main),
-				notConvergedCondition(memgraphcomv1alpha1.ReasonRetirementInProgress, retiring),
-			); statusErr != nil {
-				return ctrl.Result{}, statusErr
-			}
+			setStatus(cluster, latest, readyOrNot(latest.main),
+				notConvergedCondition(memgraphcomv1alpha1.ReasonRetirementInProgress, retiring))
 			// The shrink was applied, not yet observed back: the next pass sees the
 			// lowered count, finds nothing retiring, and reports convergence.
 			return ctrl.Result{RequeueAfter: requeueAfterRegistration}, nil
@@ -1396,18 +1401,16 @@ func (r *MemgraphClusterReconciler) reconcileRegistration(
 		converged := r.convergedCondition(ctx, cluster, topology, exposure, applied, claims)
 
 		if waitFor, ok := exemptCurrentPods(&roles, classes); !ok {
-			return r.waitForFlagClasses(ctx, cluster, latest, converged, waitFor)
+			return waitForFlagClasses(ctx, cluster, latest, converged, waitFor), nil
 		}
 
 		switch decision := rollout.Next(roles.data, roles.coordinators, observed, lag); decision.Action {
 		case rollout.Delete:
-			// Reported before the pod goes, for the reason a rejected apply is: the
-			// next pass has to explain an absence it caused, and a restart nobody
-			// announced looks like the cluster losing a pod on its own.
-			if statusErr := r.writeStatus(ctx, cluster, latest, readyOrNot(latest.main), converged,
-				notUpdatedCondition(decision.Reason, decision.Message)); statusErr != nil {
-				return ctrl.Result{}, statusErr
-			}
+			// Reported even when the delete fails, for the reason a rejected apply
+			// is: the next pass has to explain an absence it caused, and a restart
+			// nobody announced looks like the cluster losing a pod on its own.
+			setStatus(cluster, latest, readyOrNot(latest.main), converged,
+				notUpdatedCondition(decision.Reason, decision.Message))
 			if err := r.restartPod(ctx, cluster, decision); err != nil {
 				return ctrl.Result{}, err
 			}
@@ -1417,10 +1420,8 @@ func (r *MemgraphClusterReconciler) reconcileRegistration(
 
 		case rollout.Wait:
 			log.Info("Deferred the next pod restart", "reason", decision.Message)
-			if statusErr := r.writeStatus(ctx, cluster, latest, readyOrNot(latest.main), converged,
-				notUpdatedCondition(decision.Reason, decision.Message)); statusErr != nil {
-				return ctrl.Result{}, statusErr
-			}
+			setStatus(cluster, latest, readyOrNot(latest.main), converged,
+				notUpdatedCondition(decision.Reason, decision.Message))
 			return ctrl.Result{RequeueAfter: requeueWhilePending}, nil
 		}
 
@@ -1430,10 +1431,7 @@ func (r *MemgraphClusterReconciler) reconcileRegistration(
 		updated := trueCondition(memgraphcomv1alpha1.ConditionUpdated,
 			memgraphcomv1alpha1.ReasonAllPodsUpdated,
 			"All workload pods run the pod template the spec describes")
-		if statusErr := r.writeStatus(ctx, cluster, latest,
-			readyOrNot(latest.main), converged, updated); statusErr != nil {
-			return ctrl.Result{}, statusErr
-		}
+		setStatus(cluster, latest, readyOrNot(latest.main), converged, updated)
 		if !applied.done() || !claims.done() {
 			// A setting is still owed to some pod: a Bolt endpoint lagging its
 			// pod's readiness clears on its own, and a rejection is retried for
@@ -1464,9 +1462,7 @@ func (r *MemgraphClusterReconciler) reconcileRegistration(
 			yielded)
 	}
 	inProgress := notConvergedCondition(reason, message)
-	if statusErr := r.writeStatus(ctx, cluster, latest, readyOrNot(latest.main), inProgress); statusErr != nil {
-		return ctrl.Result{}, statusErr
-	}
+	setStatus(cluster, latest, readyOrNot(latest.main), inProgress)
 
 	// A command the leader rejects is reported on the resource before the error is
 	// returned, for the reason a rejected apply is: the command is retried forever,
@@ -1478,11 +1474,8 @@ func (r *MemgraphClusterReconciler) reconcileRegistration(
 		if err := command.Run(ctx, leader); err != nil {
 			commandErr := fmt.Errorf("executing registration command %q: %w", command, err)
 			msg := truncateMessage(commandErr.Error())
-			if statusErr := r.writeStatus(ctx, cluster, latest, readyOrNot(latest.main),
-				notConvergedCondition(memgraphcomv1alpha1.ReasonRegistrationFailed, msg),
-			); statusErr != nil {
-				return ctrl.Result{}, errors.Join(commandErr, statusErr)
-			}
+			setStatus(cluster, latest, readyOrNot(latest.main),
+				notConvergedCondition(memgraphcomv1alpha1.ReasonRegistrationFailed, msg))
 			return ctrl.Result{}, commandErr
 		}
 		log.Info("Executed registration command", "command", command.String())
@@ -1768,21 +1761,19 @@ func (r *MemgraphClusterReconciler) classifyFlags(
 // nobody can classify yet, and requeues. Restarting them might be a restart
 // for a coordinator setting or a typo, which is what the classification exists
 // to prevent, so the roll waits instead.
-func (r *MemgraphClusterReconciler) waitForFlagClasses(
+func waitForFlagClasses(
 	ctx context.Context,
 	cluster *memgraphcomv1alpha1.MemgraphCluster,
 	latest observation,
 	converged metav1.Condition,
 	keys []string,
-) (ctrl.Result, error) {
+) ctrl.Result {
 	msg := "Waiting for a coordinator leader to say whether " + strings.Join(keys, ", ") +
 		" are startup flags before restarting any pod for them"
 	logf.FromContext(ctx).Info("Deferred the next pod restart", "reason", msg)
-	if err := r.writeStatus(ctx, cluster, latest, readyOrNot(latest.main), converged,
-		notUpdatedCondition(memgraphcomv1alpha1.ReasonFlagsUnclassified, msg)); err != nil {
-		return ctrl.Result{}, err
-	}
-	return ctrl.Result{RequeueAfter: requeueWhilePending}, nil
+	setStatus(cluster, latest, readyOrNot(latest.main), converged,
+		notUpdatedCondition(memgraphcomv1alpha1.ReasonFlagsUnclassified, msg))
+	return ctrl.Result{RequeueAfter: requeueWhilePending}
 }
 
 // showConfig reads SHOW CONFIG from the instance whose answer describes the
@@ -2400,17 +2391,13 @@ func notUpdatedCondition(reason, message string) metav1.Condition {
 	}
 }
 
-// writeStatus patches the status subresource with the pass's observation and the
-// given conditions. It uses the status subresource exclusively — spec is never
-// touched — and skips the patch when nothing changed, so a converged cluster
-// re-observed on every resync does not churn the resource version.
-func (r *MemgraphClusterReconciler) writeStatus(
-	ctx context.Context,
+// setStatus records the pass's observation and the given conditions on the
+// in-memory cluster. Reconcile writes them once the pass ends.
+func setStatus(
 	cluster *memgraphcomv1alpha1.MemgraphCluster,
 	observed observation,
 	conditions ...metav1.Condition,
-) error {
-	base := cluster.DeepCopy()
+) {
 	cluster.Status.Main = observed.main
 	cluster.Status.Coordinators = observed.registeredCoordinators
 	cluster.Status.DataInstances = observed.registeredDataInstances
@@ -2419,13 +2406,6 @@ func (r *MemgraphClusterReconciler) writeStatus(
 		condition.ObservedGeneration = cluster.Generation
 		apimeta.SetStatusCondition(&cluster.Status.Conditions, condition)
 	}
-	if equality.Semantic.DeepEqual(base.Status, cluster.Status) {
-		return nil
-	}
-	if err := r.Status().Patch(ctx, cluster, client.MergeFrom(base)); err != nil {
-		return fmt.Errorf("patching MemgraphCluster status: %w", err)
-	}
-	return nil
 }
 
 // workloadsReady reports whether both role StatefulSets have all their pods
