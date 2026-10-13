@@ -17,7 +17,10 @@ limitations under the License.
 package memgraph
 
 import (
+	"context"
+	"net"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j/db"
@@ -88,5 +91,36 @@ func TestShowConfigParsing(t *testing.T) {
 	want := map[string]string{"log_level": level, "memory_limit": "0"}
 	if diff := cmp.Diff(want, got); diff != "" {
 		t.Errorf("SHOW CONFIG parsing mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestConnectGivesUpOnSilentServer pins that a server which accepts the
+// connection and never answers costs one call timeout per scheme rather than
+// blocking forever: the driver itself bounds only the TCP connect.
+func TestConnectGivesUpOnSilentServer(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = listener.Close() }()
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			// Held open and never written to, until the test ends.
+			defer func() { _ = conn.Close() }()
+		}
+	}()
+
+	const timeout = 200 * time.Millisecond
+	start := time.Now()
+	_, err = boltConnector{timeout: timeout}.Connect(context.Background(), listener.Addr().String(), false)
+	if err == nil {
+		t.Fatal("Connect() succeeded against a server that never answered")
+	}
+	if elapsed := time.Since(start); elapsed > 10*timeout {
+		t.Errorf("Connect() took %v, want about %v per scheme", elapsed, timeout)
 	}
 }

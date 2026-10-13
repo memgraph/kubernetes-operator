@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"time"
 
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j/db"
@@ -30,10 +31,19 @@ import (
 // NewBoltConnector returns the production Connector dialing coordinators over
 // unauthenticated Bolt (Bolt auth is out of scope for v1alpha1).
 func NewBoltConnector() Connector {
-	return boltConnector{}
+	return boltConnector{timeout: callTimeout}
 }
 
-type boltConnector struct{}
+// callTimeout bounds one Bolt round trip: a connect with its handshake, or one
+// query with its results. The driver gives up on a connect after five seconds
+// but reads with no timeout at all, so a Memgraph that accepts a connection and
+// never answers would otherwise hold the reconcile worker, and every cluster
+// queued behind it, for good.
+const callTimeout = 30 * time.Second
+
+type boltConnector struct {
+	timeout time.Duration
+}
 
 // The two URI schemes the connector dials with. bolt+ssc is TLS with the
 // certificate accepted unverified: the operator dials coordinators on pod DNS,
@@ -57,25 +67,34 @@ func dialSchemes(tls bool) []string {
 	return []string{schemePlain, schemeTLS}
 }
 
-func (boltConnector) Connect(ctx context.Context, address string, tls bool) (Client, error) {
+func (b boltConnector) Connect(ctx context.Context, address string, tls bool) (Client, error) {
 	var errs []error
 	for _, scheme := range dialSchemes(tls) {
 		driver, err := neo4j.NewDriverWithContext(scheme+"://"+address, neo4j.NoAuth())
 		if err != nil {
 			return nil, fmt.Errorf("creating bolt driver for %s: %w", address, err)
 		}
-		if err := driver.VerifyConnectivity(ctx); err != nil {
+		if err := b.verify(ctx, driver); err != nil {
 			_ = driver.Close(ctx)
 			errs = append(errs, fmt.Errorf("%s: %w", scheme, err))
 			continue
 		}
-		return &boltClient{driver: driver}, nil
+		return &boltClient{driver: driver, timeout: b.timeout}, nil
 	}
 	return nil, fmt.Errorf("connecting to %s: %w", address, errors.Join(errs...))
 }
 
+// verify opens one connection and completes the Bolt handshake within the
+// call timeout.
+func (b boltConnector) verify(ctx context.Context, driver neo4j.DriverWithContext) error {
+	ctx, cancel := context.WithTimeout(ctx, b.timeout)
+	defer cancel()
+	return driver.VerifyConnectivity(ctx)
+}
+
 type boltClient struct {
-	driver neo4j.DriverWithContext
+	driver  neo4j.DriverWithContext
+	timeout time.Duration
 }
 
 func (c *boltClient) ShowInstances(ctx context.Context) ([]Instance, error) {
@@ -217,11 +236,15 @@ func (c *boltClient) run(ctx context.Context, query string) ([]*db.Record, error
 	session := c.driver.NewSession(ctx, neo4j.SessionConfig{})
 	defer func() { _ = session.Close(ctx) }()
 
-	result, err := session.Run(ctx, query, nil)
+	// The deadline covers the query and its results; the session is closed on
+	// the caller's context, so a call that ran out of time still closes.
+	callCtx, cancel := context.WithTimeout(ctx, c.timeout)
+	defer cancel()
+	result, err := session.Run(callCtx, query, nil)
 	if err != nil {
 		return nil, fmt.Errorf("running %q: %w", query, err)
 	}
-	records, err := result.Collect(ctx)
+	records, err := result.Collect(callCtx)
 	if err != nil {
 		return nil, fmt.Errorf("collecting results of %q: %w", query, err)
 	}
