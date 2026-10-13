@@ -37,6 +37,8 @@ import (
 // the key external-dns actually watches is part of what these specs are for.
 const externalDNSAnnotation = "external-dns.alpha.kubernetes.io/hostname"
 
+const remoteWriteURL = "http://vmsingle:8428/api/v1/write"
+
 // These specs exercise the CRD schema itself — defaults, creation-time
 // validation and the CEL transition rules that pin the topology counts. They
 // never reconcile: the API server is the unit under test, which is exactly the
@@ -86,6 +88,18 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 			Expect(k8sClient.Delete(ctx, stored)).To(Succeed())
 		})
 		return stored
+	}
+
+	// rawCluster is a cluster as an unstructured manifest, for the specs the
+	// typed client cannot express: omitempty drops an empty string before it
+	// reaches the API server, and a user can still write one in YAML.
+	rawCluster := func(name string, spec map[string]any) *unstructured.Unstructured {
+		return &unstructured.Unstructured{Object: map[string]any{
+			"apiVersion": memgraphcomv1alpha1.SchemeGroupVersion.String(),
+			"kind":       "MemgraphCluster",
+			"metadata":   map[string]any{"name": name, "namespace": resourceNamespace},
+			"spec":       spec,
+		}}
 	}
 
 	// expectRejected asserts that admission rejected the spec as invalid and
@@ -175,16 +189,11 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 		// "no dynamic provisioning"; both must survive a round trip through the
 		// API server as distinct values.
 		It("should preserve the difference between an unset and an empty storage class", func() {
-			raw := &unstructured.Unstructured{Object: map[string]any{
-				"apiVersion": memgraphcomv1alpha1.SchemeGroupVersion.String(),
-				"kind":       "MemgraphCluster",
-				"metadata":   map[string]any{"name": "valid-empty-storage-class", "namespace": resourceNamespace},
-				"spec": map[string]any{
-					"storage": map[string]any{
-						"data": map[string]any{"libStorageClassName": ""},
-					},
+			raw := rawCluster("valid-empty-storage-class", map[string]any{
+				"storage": map[string]any{
+					"data": map[string]any{"libStorageClassName": ""},
 				},
-			}}
+			})
 			Expect(k8sClient.Create(ctx, raw)).To(Succeed())
 			DeferCleanup(func() { Expect(k8sClient.Delete(ctx, raw)).To(Succeed()) })
 
@@ -590,7 +599,7 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 					Monitoring: &memgraphcomv1alpha1.MonitoringSpec{
 						VMAgentRemote: &memgraphcomv1alpha1.VMAgentRemoteSpec{
 							RemoteWrite: memgraphcomv1alpha1.RemoteWriteSpec{
-								URL:       "http://vmsingle:8428/api/v1/write",
+								URL:       remoteWriteURL,
 								BasicAuth: &memgraphcomv1alpha1.BasicAuthSecretSpec{},
 							},
 						},
@@ -601,7 +610,7 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 				memgraphcomv1alpha1.MemgraphClusterSpec{
 					Monitoring: &memgraphcomv1alpha1.MonitoringSpec{
 						VMAgentRemote: &memgraphcomv1alpha1.VMAgentRemoteSpec{
-							RemoteWrite:    memgraphcomv1alpha1.RemoteWriteSpec{URL: "http://vmsingle:8428/api/v1/write"},
+							RemoteWrite:    memgraphcomv1alpha1.RemoteWriteSpec{URL: remoteWriteURL},
 							ExternalLabels: map[string]string{"cluster-name": "production"},
 						},
 					},
@@ -650,7 +659,50 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 				memgraphcomv1alpha1.MemgraphClusterSpec{
 					SecurityContext: &memgraphcomv1alpha1.PodSecurityContextSpec{RunAsUser: ptr.To(int64(-1))},
 				},
-				"should be greater than or equal to 0"),
+				"should be greater than or equal to 1"),
+			// The Memgraph container sets runAsNonRoot, so the kubelet would
+			// refuse to start it as root.
+			Entry("root as the uid", "invalid-root-uid",
+				memgraphcomv1alpha1.MemgraphClusterSpec{
+					SecurityContext: &memgraphcomv1alpha1.PodSecurityContextSpec{RunAsUser: ptr.To(int64(0))},
+				},
+				"should be greater than or equal to 1"),
+			Entry("a zero lib claim", "invalid-zero-lib-size",
+				memgraphcomv1alpha1.MemgraphClusterSpec{
+					Storage: memgraphcomv1alpha1.StorageSpec{
+						Data: memgraphcomv1alpha1.RoleStorageSpec{LibPVCSize: ptr.To(resource.MustParse("0"))},
+					},
+				},
+				"libPVCSize must be greater than zero"),
+			Entry("a negative core dumps claim", "invalid-negative-core-dumps-size",
+				memgraphcomv1alpha1.MemgraphClusterSpec{
+					CoreDumps: memgraphcomv1alpha1.CoreDumpsSpec{
+						Data: &memgraphcomv1alpha1.RoleCoreDumpsSpec{Size: ptr.To(resource.MustParse("-1Gi"))},
+					},
+				},
+				"coreDumps size must be greater than zero"),
+			Entry("an uploader Secret that is not a Secret name", "invalid-uploader-env-from-secret",
+				memgraphcomv1alpha1.MemgraphClusterSpec{
+					CoreDumps: memgraphcomv1alpha1.CoreDumpsSpec{
+						Data: &memgraphcomv1alpha1.RoleCoreDumpsSpec{},
+						Uploader: &memgraphcomv1alpha1.CoreDumpsUploaderSpec{
+							Image:          "amazon/aws-cli:2.33.28",
+							EnvFromSecrets: []string{"Uploader_Credentials"},
+						},
+					},
+				},
+				"spec.coreDumps.uploader.envFromSecrets[0]"),
+			Entry("an empty uploader Secret name", "invalid-uploader-env-from-empty",
+				memgraphcomv1alpha1.MemgraphClusterSpec{
+					CoreDumps: memgraphcomv1alpha1.CoreDumpsSpec{
+						Data: &memgraphcomv1alpha1.RoleCoreDumpsSpec{},
+						Uploader: &memgraphcomv1alpha1.CoreDumpsUploaderSpec{
+							Image:          "amazon/aws-cli:2.33.28",
+							EnvFromSecrets: []string{""},
+						},
+					},
+				},
+				"should be at least 1 chars long"),
 			// The chown target has to be named: a platform-assigned uid is not
 			// known when the pod template is built.
 			Entry("the ownership container beside an identity left to the platform", "invalid-fix-ownership-no-uid",
@@ -907,12 +959,7 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 		// YAML are submitted as a raw manifest instead.
 		DescribeTable("should reject a blanked-out field of a hand-written manifest",
 			func(name, block, field string) {
-				raw := &unstructured.Unstructured{Object: map[string]any{
-					"apiVersion": memgraphcomv1alpha1.SchemeGroupVersion.String(),
-					"kind":       "MemgraphCluster",
-					"metadata":   map[string]any{"name": name, "namespace": resourceNamespace},
-					"spec":       map[string]any{block: map[string]any{field: ""}},
-				}}
+				raw := rawCluster(name, map[string]any{block: map[string]any{field: ""}})
 
 				err := k8sClient.Create(ctx, raw)
 				Expect(err).To(HaveOccurred(), "expected admission to reject the manifest")
@@ -925,6 +972,23 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 			Entry("an empty license key", "invalid-raw-license-key", "secrets", "licenseKey"),
 			Entry("an empty organization key", "invalid-raw-organization-key", "secrets", "organizationKey"),
 		)
+
+		// An empty scrape interval would be stored as written, since a schema
+		// default fills only a missing field, and the builder would then run
+		// vmagent on its own fallback the object never shows.
+		It("should reject a blanked-out vmagent scrape interval", func() {
+			raw := rawCluster("invalid-raw-scrape-interval", map[string]any{
+				"monitoring": map[string]any{"vmagentRemote": map[string]any{
+					"remoteWrite":    map[string]any{"url": remoteWriteURL},
+					"scrapeInterval": "",
+				}},
+			})
+
+			err := k8sClient.Create(ctx, raw)
+			Expect(err).To(HaveOccurred(), "expected admission to reject the manifest")
+			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "expected an Invalid error, got %v", err)
+			Expect(err.Error()).To(ContainSubstring("should be at least 1 chars long"))
+		})
 
 		It("should accept external access with decorations on both roles", func() {
 			stored := createAccepted("valid-external-access", memgraphcomv1alpha1.MemgraphClusterSpec{

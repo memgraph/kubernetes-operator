@@ -557,6 +557,7 @@ type RoleStorageSpec struct {
 	// Memgraph's data directory (snapshots, WAL, and durability metadata). It
 	// can grow on a live cluster and never shrink. With fileLogging on it holds
 	// the role's log files too.
+	// +kubebuilder:validation:XValidation:rule="quantity(string(self)).isGreaterThan(quantity('0'))",message="libPVCSize must be greater than zero"
 	// +kubebuilder:default="10Gi"
 	// +optional
 	LibPVCSize *resource.Quantity `json:"libPVCSize,omitempty"`
@@ -646,6 +647,7 @@ type RoleCoreDumpsSpec struct {
 	// this is per role: a data instance holds the graph, a coordinator holds
 	// Raft state. Size it against the role's memory limit, not its data. It
 	// can grow while the role collects dumps and never shrink.
+	// +kubebuilder:validation:XValidation:rule="quantity(string(self)).isGreaterThan(quantity('0'))",message="coreDumps size must be greater than zero"
 	// +kubebuilder:default="10Gi"
 	// +optional
 	Size *resource.Quantity `json:"size,omitempty"`
@@ -691,6 +693,9 @@ type CoreDumpsUploaderSpec struct {
 	// envFromSecrets names Secrets in the cluster's namespace whose keys become
 	// environment variables of the sidecar. This is how credentials reach it:
 	// by reference, so no secret material ever appears in this resource.
+	// +kubebuilder:validation:items:MinLength=1
+	// +kubebuilder:validation:items:MaxLength=253
+	// +kubebuilder:validation:items:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
 	// +listType=set
 	// +optional
 	EnvFromSecrets []string `json:"envFromSecrets,omitempty"`
@@ -861,8 +866,9 @@ type SysctlInitContainerSpec struct {
 type PodSecurityContextSpec struct {
 	// runAsUser is the uid every container of the pod runs as. Absent, the
 	// pod names none and the image's user (or the platform's assignment)
-	// decides.
-	// +kubebuilder:validation:Minimum=0
+	// decides. It cannot be 0: the Memgraph container sets runAsNonRoot, so
+	// the kubelet would refuse to start it.
+	// +kubebuilder:validation:Minimum=1
 	// +optional
 	RunAsUser *int64 `json:"runAsUser,omitempty"`
 
@@ -1813,6 +1819,7 @@ type VMAgentRemoteSpec struct {
 
 	// scrapeInterval is how often vmagent scrapes every instance, as a
 	// Prometheus duration such as "15s" or "1m".
+	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:Pattern=`^(0|(([0-9]+)y)?(([0-9]+)w)?(([0-9]+)d)?(([0-9]+)h)?(([0-9]+)m)?(([0-9]+)s)?(([0-9]+)ms)?)$`
 	// +kubebuilder:default="15s"
 	// +optional
