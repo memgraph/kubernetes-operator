@@ -30,11 +30,6 @@ import (
 )
 
 const (
-	// Memgraph workload pods run as the non-root memgraph user baked into the
-	// official images.
-	memgraphUserID  int64 = 101
-	memgraphGroupID int64 = 103
-
 	coordinatorComponent = "coordinator"
 	dataComponent        = "data"
 
@@ -606,9 +601,6 @@ func normalizeStorage(spec memgraphcomv1alpha1.RoleStorageSpec) normalizedStorag
 	return n
 }
 
-// normalizeSecurityContext resolves the securityContext block: absent, the
-// identity baked into the Memgraph images; present, exactly what it names,
-// including nothing at all for a platform that assigns the identity itself.
 // normalizeVMAgent resolves the vmagentRemote block's defaults, which mirror
 // its CRD schema defaults so the builder behaves the same on a spec that never
 // passed admission.
@@ -671,12 +663,16 @@ func normalizeVector(block *memgraphcomv1alpha1.VectorRemoteSpec) *normalizedVec
 	return n
 }
 
+// normalizeSecurityContext resolves the securityContext block: absent, its CRD
+// schema default, the identity baked into the Memgraph images; present,
+// exactly what it names, including nothing at all for a platform that assigns
+// the identity itself.
 func normalizeSecurityContext(spec *memgraphcomv1alpha1.PodSecurityContextSpec) normalizedSecurityContext {
 	if spec == nil {
 		return normalizedSecurityContext{
-			runAsUser:  ptr.To(memgraphUserID),
-			runAsGroup: ptr.To(memgraphGroupID),
-			fsGroup:    ptr.To(memgraphGroupID),
+			runAsUser:  ptr.To(memgraphcomv1alpha1.DefaultRunAsUser),
+			runAsGroup: ptr.To(memgraphcomv1alpha1.DefaultRunAsGroup),
+			fsGroup:    ptr.To(memgraphcomv1alpha1.DefaultFSGroup),
 		}
 	}
 	return normalizedSecurityContext{

@@ -134,11 +134,20 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 					Coordinators:    defaultRoleStorage(),
 					Data:            defaultRoleStorage(),
 				},
-				CoreDumps:     defaultCoreDumps(),
+				CoreDumps: defaultCoreDumps(),
+				SecurityContext: &memgraphcomv1alpha1.PodSecurityContextSpec{
+					RunAsUser:  ptr.To(memgraphcomv1alpha1.DefaultRunAsUser),
+					RunAsGroup: ptr.To(memgraphcomv1alpha1.DefaultRunAsGroup),
+					FSGroup:    ptr.To(memgraphcomv1alpha1.DefaultFSGroup),
+				},
 				ClusterDomain: memgraphcomv1alpha1.DefaultClusterDomain,
-				// The readiness probe, resources, labels and the env/args passthrough
-				// have no schema defaults: the probe timings are resolved by the
-				// builders and the rest default to "nothing added".
+				ReadinessProbe: memgraphcomv1alpha1.ReadinessProbeSpec{
+					FailureThreshold: ptr.To(memgraphcomv1alpha1.DefaultProbeFailureThreshold),
+					TimeoutSeconds:   ptr.To(memgraphcomv1alpha1.DefaultProbeTimeoutSeconds),
+					PeriodSeconds:    ptr.To(memgraphcomv1alpha1.DefaultProbePeriodSeconds),
+				},
+				// Resources, labels and the env/args passthrough have no schema
+				// defaults: they default to "nothing added".
 			}), "the CRD schema defaults must match the Go constants the builders fall back to")
 		})
 
@@ -245,8 +254,9 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 
 			Expect(stored.Spec.ClusterDomain).To(Equal("k8s.example.com"))
 			Expect(stored.Spec.ReadinessProbe.FailureThreshold).To(HaveValue(Equal(int32(6))))
-			Expect(stored.Spec.ReadinessProbe.PeriodSeconds).To(BeNil(),
-				"an unset timing stays unset; its default is resolved by the builders, not the schema")
+			Expect(stored.Spec.ReadinessProbe.PeriodSeconds).To(
+				HaveValue(Equal(memgraphcomv1alpha1.DefaultProbePeriodSeconds)),
+				"an unset timing beside a written one is defaulted by the schema")
 			Expect(stored.Spec.ExtraEnv.Data).To(HaveLen(1))
 			Expect(stored.Spec.Flags.Coordinators).To(Equal(map[string]memgraphcomv1alpha1.FlagValue{
 				downTimeoutSetting: "7", globalReadOnly: settingOff, futureSetting: "x",
@@ -355,13 +365,16 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 				"an empty block must round-trip as present, or the container can never be asked for")
 		})
 
-		// The identity block is presence-based and every field in it optional
-		// without a default: an empty block must round-trip as present and
-		// empty, since that is the OpenShift shape.
+		// The identity block is defaulted whole when absent, but no field in it
+		// has a default of its own: an empty block must round-trip as present
+		// and empty, since that is the OpenShift shape.
 		It("should keep an empty security context block present and empty", func() {
 			absent := createAccepted("no-security-context", memgraphcomv1alpha1.MemgraphClusterSpec{})
-			Expect(absent.Spec.SecurityContext).To(BeNil(),
-				"the block is presence-based: no schema default may conjure it")
+			Expect(absent.Spec.SecurityContext).To(HaveValue(Equal(memgraphcomv1alpha1.PodSecurityContextSpec{
+				RunAsUser:  ptr.To(memgraphcomv1alpha1.DefaultRunAsUser),
+				RunAsGroup: ptr.To(memgraphcomv1alpha1.DefaultRunAsGroup),
+				FSGroup:    ptr.To(memgraphcomv1alpha1.DefaultFSGroup),
+			})), "an absent block is defaulted to the Memgraph images' identity")
 
 			present := createAccepted("empty-security-context", memgraphcomv1alpha1.MemgraphClusterSpec{
 				SecurityContext: &memgraphcomv1alpha1.PodSecurityContextSpec{},

@@ -1336,27 +1336,29 @@ spec:
                     type: object
                 type: object
               readinessProbe:
+                default: {}
                 description: |-
                   readinessProbe tunes the readiness probe timings of every pod, the one
                   probe the pods carry.
                 properties:
                   failureThreshold:
+                    default: 20
                     description: |-
                       failureThreshold is how many consecutive failures flip a pod that was
-                      ready to unready. Defaults to 20.
+                      ready to unready.
                     format: int32
                     minimum: 1
                     type: integer
                   periodSeconds:
-                    description: periodSeconds is how often the probe runs. Defaults
-                      to 5.
+                    default: 5
+                    description: periodSeconds is how often the probe runs.
                     format: int32
                     minimum: 1
                     type: integer
                   timeoutSeconds:
-                    description: |-
-                      timeoutSeconds is how long a single probe attempt may take. Defaults to
-                      10.
+                    default: 10
+                    description: timeoutSeconds is how long a single probe attempt
+                      may take.
                     format: int32
                     minimum: 1
                     type: integer
@@ -2783,12 +2785,16 @@ spec:
                   rule: '!has(self.licenseKey) || !has(self.organizationKey) || self.licenseKey
                     != self.organizationKey'
               securityContext:
+                default:
+                  fsGroup: 103
+                  runAsGroup: 103
+                  runAsUser: 101
                 description: |-
                   securityContext is the uid, gid and fsGroup every pod of both roles runs
-                  under. Absent, the operator writes the Memgraph images' 101, 103 and 103;
-                  present, exactly the fields written and no other, so an empty block
-                  leaves all three to the platform, which is what OpenShift's restricted-v2
-                  SCC requires.
+                  under. Absent, it is defaulted to the Memgraph images' 101, 103 and 103;
+                  written, exactly the fields written and no other land on the pod, so an
+                  empty block leaves all three to the platform, which is what OpenShift's
+                  restricted-v2 SCC requires.
                 properties:
                   fsGroup:
                     description: |-

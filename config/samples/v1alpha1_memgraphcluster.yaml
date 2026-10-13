@@ -140,8 +140,8 @@ spec:
   sysctlInitContainer:
     maxMapCount: 524288
   # The identity every pod of both roles runs under, the HA chart's
-  # memgraphUserId and memgraphGroupId. Absent, the operator writes the
-  # Memgraph images' own: runAsUser 101, runAsGroup 103, fsGroup 103. Present,
+  # memgraphUserId and memgraphGroupId. Absent, it is defaulted to the
+  # Memgraph images' own: runAsUser 101, runAsGroup 103, fsGroup 103. Written,
   # exactly the fields written land on the pod and no other, so an empty block
   # names none of the three and leaves them to the platform — what OpenShift's
   # restricted-v2 SCC requires, since it assigns runAsUser and fsGroup from the

@@ -57,6 +57,12 @@ const (
 
 	DefaultMaxMapCount int64 = 524288
 
+	// The identity of the memgraph user baked into the official images, the
+	// securityContext block's default.
+	DefaultRunAsUser  int64 = 101
+	DefaultRunAsGroup int64 = 103
+	DefaultFSGroup    int64 = 103
+
 	DefaultLibPVCSize        = "10Gi"
 	DefaultFileLogging       = true
 	DefaultStorageAccessMode = corev1.ReadWriteOnce
@@ -115,10 +121,10 @@ const (
 	MonitoringPort int32 = 7444
 )
 
-// Readiness probe timing defaults, Go constants mirrored by the doc comments
-// on ReadinessProbeSpec. A readiness probe that has not succeeded yet only keeps
-// the pod unready, so the failure threshold is not a budget anything has to fit
-// in.
+// Readiness probe timing defaults, declared as CRD schema defaults on
+// ReadinessProbeSpec and mirrored here like the defaults above. A readiness
+// probe that has not succeeded yet only keeps the pod unready, so the failure
+// threshold is not a budget anything has to fit in.
 const (
 	DefaultProbeFailureThreshold int32 = 20
 	DefaultProbeTimeoutSeconds   int32 = 10
@@ -665,6 +671,7 @@ type CoreDumpsUploaderSpec struct {
 	// default for it, so a tag belongs here rather than in a separate field.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=383
+	// +required
 	Image string `json:"image"`
 
 	// pullPolicy is the image pull policy of the sidecar.
@@ -839,12 +846,11 @@ type SysctlInitContainerSpec struct {
 // memgraphUserId and memgraphGroupId, reshaped so that a platform assigning
 // the identity itself can be told to.
 //
-// The block is presence-based, and presence means the user owns these three
-// fields. Absent, the operator writes the identity baked into the Memgraph
+// Absent, the block is defaulted to the identity baked into the Memgraph
 // images: uid 101, gid 103 and fsGroup 103, which is what makes a claim
-// writable to the non-root process on a driver that honors fsGroup. Present,
-// exactly the fields written land on the pod and no other: an empty block
-// writes none of the three, which is what OpenShift's restricted-v2 SCC
+// writable to the non-root process on a driver that honors fsGroup. No field
+// inside it has a default, so exactly the fields written land on the pod and
+// no other: an empty block writes none of the three, which is what OpenShift's restricted-v2 SCC
 // wants, since it assigns runAsUser and fsGroup from the namespace's range at
 // admission and rejects a pod naming values outside it. Naming values covers
 // a uid inside that range or a service account granted anyuid. Memgraph
@@ -921,8 +927,8 @@ type FixOwnershipInitContainerSpec struct{}
 //
 // Until the probe first succeeds — which for a data instance is after every
 // database has been recovered — the pod is unready and nothing more, so none of
-// these timings is a budget a recovery has to fit in. Every field defaults to
-// the value named in its doc comment.
+// these timings is a budget a recovery has to fit in. Every field has a CRD
+// schema default, so the stored object shows the timings the pods run with.
 //
 // There is deliberately no liveness and no startup probe. Memgraph recovers its
 // databases before it opens any port, so during recovery nothing distinguishes
@@ -939,19 +945,21 @@ type FixOwnershipInitContainerSpec struct{}
 // which knows the cluster's state, not to the kubelet, which does not.
 type ReadinessProbeSpec struct {
 	// failureThreshold is how many consecutive failures flip a pod that was
-	// ready to unready. Defaults to 20.
+	// ready to unready.
 	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:default=20
 	// +optional
 	FailureThreshold *int32 `json:"failureThreshold,omitempty"`
 
-	// timeoutSeconds is how long a single probe attempt may take. Defaults to
-	// 10.
+	// timeoutSeconds is how long a single probe attempt may take.
 	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:default=10
 	// +optional
 	TimeoutSeconds *int32 `json:"timeoutSeconds,omitempty"`
 
-	// periodSeconds is how often the probe runs. Defaults to 5.
+	// periodSeconds is how often the probe runs.
 	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:default=5
 	// +optional
 	PeriodSeconds *int32 `json:"periodSeconds,omitempty"`
 }
@@ -2043,10 +2051,11 @@ type MemgraphClusterSpec struct {
 	SysctlInitContainer *SysctlInitContainerSpec `json:"sysctlInitContainer,omitempty"`
 
 	// securityContext is the uid, gid and fsGroup every pod of both roles runs
-	// under. Absent, the operator writes the Memgraph images' 101, 103 and 103;
-	// present, exactly the fields written and no other, so an empty block
-	// leaves all three to the platform, which is what OpenShift's restricted-v2
-	// SCC requires.
+	// under. Absent, it is defaulted to the Memgraph images' 101, 103 and 103;
+	// written, exactly the fields written and no other land on the pod, so an
+	// empty block leaves all three to the platform, which is what OpenShift's
+	// restricted-v2 SCC requires.
+	// +kubebuilder:default={runAsUser: 101, runAsGroup: 103, fsGroup: 103}
 	// +optional
 	SecurityContext *PodSecurityContextSpec `json:"securityContext,omitempty"`
 
@@ -2069,6 +2078,7 @@ type MemgraphClusterSpec struct {
 
 	// readinessProbe tunes the readiness probe timings of every pod, the one
 	// probe the pods carry.
+	// +kubebuilder:default={}
 	// +optional
 	ReadinessProbe ReadinessProbeSpec `json:"readinessProbe,omitzero"`
 
