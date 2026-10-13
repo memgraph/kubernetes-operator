@@ -158,6 +158,9 @@ spec:
                           can grow while the role collects dumps and never shrink.
                         pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                         x-kubernetes-int-or-string: true
+                        x-kubernetes-validations:
+                        - message: coreDumps size must be greater than zero
+                          rule: quantity(string(self)).isGreaterThan(quantity('0'))
                     type: object
                     x-kubernetes-validations:
                     - message: 'coreDumps size cannot shrink while the role collects
@@ -184,6 +187,9 @@ spec:
                           can grow while the role collects dumps and never shrink.
                         pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                         x-kubernetes-int-or-string: true
+                        x-kubernetes-validations:
+                        - message: coreDumps size must be greater than zero
+                          rule: quantity(string(self)).isGreaterThan(quantity('0'))
                     type: object
                     x-kubernetes-validations:
                     - message: 'coreDumps size cannot shrink while the role collects
@@ -261,6 +267,9 @@ spec:
                           environment variables of the sidecar. This is how credentials reach it:
                           by reference, so no secret material ever appears in this resource.
                         items:
+                          maxLength: 253
+                          minLength: 1
+                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
                           type: string
                         type: array
                         x-kubernetes-list-type: set
@@ -1327,6 +1336,7 @@ spec:
                         description: |-
                           scrapeInterval is how often vmagent scrapes every instance, as a
                           Prometheus duration such as "15s" or "1m".
+                        minLength: 1
                         pattern: ^(0|(([0-9]+)y)?(([0-9]+)w)?(([0-9]+)d)?(([0-9]+)h)?(([0-9]+)m)?(([0-9]+)s)?(([0-9]+)ms)?)$
                         type: string
                     required:
@@ -2813,9 +2823,10 @@ spec:
                     description: |-
                       runAsUser is the uid every container of the pod runs as. Absent, the
                       pod names none and the image's user (or the platform's assignment)
-                      decides.
+                      decides. It cannot be 0: the Memgraph container sets runAsNonRoot, so
+                      the kubelet would refuse to start it.
                     format: int64
-                    minimum: 0
+                    minimum: 1
                     type: integer
                 type: object
               storage:
@@ -2858,6 +2869,9 @@ spec:
                           the role's log files too.
                         pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                         x-kubernetes-int-or-string: true
+                        x-kubernetes-validations:
+                        - message: libPVCSize must be greater than zero
+                          rule: quantity(string(self)).isGreaterThan(quantity('0'))
                       libStorageAccessMode:
                         default: ReadWriteOnce
                         description: |-
@@ -2934,6 +2948,9 @@ spec:
                           the role's log files too.
                         pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                         x-kubernetes-int-or-string: true
+                        x-kubernetes-validations:
+                        - message: libPVCSize must be greater than zero
+                          rule: quantity(string(self)).isGreaterThan(quantity('0'))
                       libStorageAccessMode:
                         default: ReadWriteOnce
                         description: |-
