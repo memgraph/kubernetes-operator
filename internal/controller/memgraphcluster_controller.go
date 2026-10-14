@@ -237,6 +237,7 @@ func (r *MemgraphClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	cluster.InitializeConditions()
 
 	result, reconcileErr := r.reconcileCluster(ctx, cluster)
+	summarizeReady(cluster)
 
 	if equality.Semantic.DeepEqual(orig.Status, cluster.Status) {
 		return result, reconcileErr
@@ -713,7 +714,7 @@ func (r *MemgraphClusterReconciler) applyDesired(
 			applyErr := fmt.Errorf("applying %T %s: %w", obj, obj.GetName(), err)
 			msg := truncateMessage(applyErr.Error())
 			setStatus(cluster, lastObserved(cluster),
-				notReadyCondition(memgraphcomv1alpha1.ReasonApplyFailed, msg),
+				notServingCondition(memgraphcomv1alpha1.ReasonApplyFailed, msg),
 				notConvergedCondition(memgraphcomv1alpha1.ReasonApplyFailed, msg))
 			return nil, applyErr
 		}
@@ -1333,7 +1334,7 @@ func (r *MemgraphClusterReconciler) reconcileRegistration(
 		log.Info("Waited for workload pods to become ready before registration")
 		msg := "Waiting for all workload pods to become ready"
 		setStatus(cluster, lastObserved(cluster).exposedAt(exposure),
-			notReadyCondition(memgraphcomv1alpha1.ReasonWorkloadsNotReady, msg),
+			notServingCondition(memgraphcomv1alpha1.ReasonWorkloadsNotReady, msg),
 			notConvergedCondition(memgraphcomv1alpha1.ReasonWorkloadsNotReady, msg))
 		return ctrl.Result{RequeueAfter: requeueWhilePending}, nil
 	}
@@ -1362,7 +1363,7 @@ func (r *MemgraphClusterReconciler) reconcileRegistration(
 				"No coordinator reported a leader, so the cluster has no Raft quorum"
 		}
 		setStatus(cluster, lastObserved(cluster).exposedAt(exposure),
-			notReadyCondition(reason, msg),
+			notServingCondition(reason, msg),
 			notConvergedCondition(reason, msg))
 		return ctrl.Result{RequeueAfter: requeueWhilePending}, nil
 	}
@@ -1395,14 +1396,14 @@ func (r *MemgraphClusterReconciler) reconcileRegistration(
 				log.Info("Deferred retirement because no surviving data instance is caught up with MAIN")
 				msg := "Waiting for a surviving data instance that is reachable and caught up with MAIN " +
 					"before moving MAIN off the instance being retired"
-				setStatus(cluster, latest, readyOrNot(latest.main),
+				setStatus(cluster, latest, servingOrNot(latest.main),
 					notConvergedCondition(memgraphcomv1alpha1.ReasonNoCaughtUpSurvivor, msg))
 				return ctrl.Result{RequeueAfter: requeueWhilePending}, nil
 			}
 			if err := r.shedRetiredPods(ctx, cluster, topology, replicas); err != nil {
 				return ctrl.Result{}, err
 			}
-			setStatus(cluster, latest, readyOrNot(latest.main),
+			setStatus(cluster, latest, servingOrNot(latest.main),
 				notConvergedCondition(memgraphcomv1alpha1.ReasonRetirementInProgress, retiring))
 			// The shrink was applied, not yet observed back: the next pass sees the
 			// lowered count, finds nothing retiring, and reports convergence.
@@ -1446,7 +1447,7 @@ func (r *MemgraphClusterReconciler) reconcileRegistration(
 			// Reported even when the delete fails, for the reason a rejected apply
 			// is: the next pass has to explain an absence it caused, and a restart
 			// nobody announced looks like the cluster losing a pod on its own.
-			setStatus(cluster, latest, readyOrNot(latest.main), converged,
+			setStatus(cluster, latest, servingOrNot(latest.main), converged,
 				notUpdatedCondition(decision.Reason, decision.Message))
 			if err := r.restartPod(ctx, cluster, decision); err != nil {
 				return ctrl.Result{}, err
@@ -1457,7 +1458,7 @@ func (r *MemgraphClusterReconciler) reconcileRegistration(
 
 		case rollout.Wait:
 			log.Info("Deferred the next pod restart", "reason", decision.Message)
-			setStatus(cluster, latest, readyOrNot(latest.main), converged,
+			setStatus(cluster, latest, servingOrNot(latest.main), converged,
 				notUpdatedCondition(decision.Reason, decision.Message))
 			return ctrl.Result{RequeueAfter: requeueWhilePending}, nil
 		}
@@ -1468,7 +1469,7 @@ func (r *MemgraphClusterReconciler) reconcileRegistration(
 		updated := trueCondition(memgraphcomv1alpha1.ConditionUpdated,
 			memgraphcomv1alpha1.ReasonAllPodsUpdated,
 			"All workload pods run the pod template the spec describes")
-		setStatus(cluster, latest, readyOrNot(latest.main), converged, updated)
+		setStatus(cluster, latest, servingOrNot(latest.main), converged, updated)
 		if !applied.done() || !claims.done() {
 			// A setting is still owed to some pod: a Bolt endpoint lagging its
 			// pod's readiness clears on its own, and a rejection is retried for
@@ -1480,8 +1481,8 @@ func (r *MemgraphClusterReconciler) reconcileRegistration(
 	}
 
 	// Report the in-progress state before mutating the cluster: a MAIN already
-	// serving stays Ready while a lost registration is restored; a fresh
-	// bootstrap has no MAIN yet, so Ready is False until one is elected. A
+	// serving keeps serving while a lost registration is restored; a fresh
+	// bootstrap has no MAIN yet, so it does not serve until one is elected. A
 	// retirement in flight is named as such — it is the more specific operation,
 	// and the one whose pending members a user wants to see. A pending leadership
 	// yield is more specific still: it is the one step whose outcome nobody can
@@ -1499,19 +1500,19 @@ func (r *MemgraphClusterReconciler) reconcileRegistration(
 			yielded)
 	}
 	inProgress := notConvergedCondition(reason, message)
-	setStatus(cluster, latest, readyOrNot(latest.main), inProgress)
+	setStatus(cluster, latest, servingOrNot(latest.main), inProgress)
 
 	// A command the leader rejects is reported on the resource before the error is
 	// returned, for the reason a rejected apply is: the command is retried forever,
 	// so without it the conditions keep saying registration is in progress while
-	// the rejection only ever reaches the operator's log. Ready is left describing
-	// what the cluster was last observed doing — a MAIN that is serving keeps
-	// serving through a registration the coordinator refuses.
+	// the rejection only ever reaches the operator's log. The serving verdict is
+	// left describing what the cluster was last observed doing — a MAIN that is
+	// serving keeps serving through a registration the coordinator refuses.
 	for _, command := range commands {
 		if err := command.Run(ctx, leader); err != nil {
 			commandErr := fmt.Errorf("executing registration command %q: %w", command, err)
 			msg := truncateMessage(commandErr.Error())
-			setStatus(cluster, latest, readyOrNot(latest.main),
+			setStatus(cluster, latest, servingOrNot(latest.main),
 				notConvergedCondition(memgraphcomv1alpha1.ReasonRegistrationFailed, msg))
 			return ctrl.Result{}, commandErr
 		}
@@ -1808,7 +1809,7 @@ func waitForFlagClasses(
 	msg := "Waiting for a coordinator leader to say whether " + strings.Join(keys, ", ") +
 		" are startup flags before restarting any pod for them"
 	logf.FromContext(ctx).Info("Deferred the next pod restart", "reason", msg)
-	setStatus(cluster, latest, readyOrNot(latest.main), converged,
+	setStatus(cluster, latest, servingOrNot(latest.main), converged,
 		notUpdatedCondition(memgraphcomv1alpha1.ReasonFlagsUnclassified, msg))
 	return ctrl.Result{RequeueAfter: requeueWhilePending}
 }
@@ -2406,15 +2407,106 @@ func observedMain(observed []memgraph.Instance) string {
 	return ""
 }
 
-// readyOrNot builds the Ready condition from whether a MAIN is elected: the
+// conditionServing is a pass's verdict on whether the cluster serves: a data
+// instance is MAIN behind a reachable coordinator leader. Every return that
+// observed the cluster, or failed trying, records it among the conditions like
+// any other, and summarizeReady folds it into Ready and removes it, so it never
+// reaches the API.
+const conditionServing = "Serving"
+
+// reasonMainElected is the serving verdict's reason when a data instance is
+// MAIN. Like the verdict, it never reaches the API.
+const reasonMainElected = "MainElected"
+
+// servingReasons are the reasons a serving verdict can be False with, and so
+// the reasons Ready carries when the cluster does not serve.
+var servingReasons = map[string]bool{
+	memgraphcomv1alpha1.ReasonApplyFailed:            true,
+	memgraphcomv1alpha1.ReasonWorkloadsNotReady:      true,
+	memgraphcomv1alpha1.ReasonCoordinatorUnreachable: true,
+	memgraphcomv1alpha1.ReasonNoCoordinatorLeader:    true,
+	memgraphcomv1alpha1.ReasonNoMainElected:          true,
+}
+
+// servingOrNot builds the serving verdict from whether a MAIN is elected: the
 // cluster serves writes exactly when a data instance is MAIN.
-func readyOrNot(main string) metav1.Condition {
+func servingOrNot(main string) metav1.Condition {
 	if main == "" {
-		return notReadyCondition(memgraphcomv1alpha1.ReasonNoMainElected,
+		return notServingCondition(memgraphcomv1alpha1.ReasonNoMainElected,
 			"No data instance has been promoted to MAIN yet")
 	}
-	return trueCondition(memgraphcomv1alpha1.ConditionReady,
-		memgraphcomv1alpha1.ReasonMainElected, "Data instance "+main+" is MAIN")
+	return trueCondition(conditionServing, reasonMainElected, "Data instance "+main+" is MAIN")
+}
+
+// summarizeReady replaces the pass's serving verdict with the Ready condition
+// it and the other three conditions add up to.
+func summarizeReady(cluster *memgraphcomv1alpha1.MemgraphCluster) {
+	conditions := &cluster.Status.Conditions
+	var serving *metav1.Condition
+	if verdict := apimeta.FindStatusCondition(*conditions, conditionServing); verdict != nil {
+		serving = verdict.DeepCopy()
+		apimeta.RemoveStatusCondition(conditions, conditionServing)
+	}
+	ready := readyCondition(serving, *conditions, cluster.Status.Main, cluster.Generation)
+	ready.ObservedGeneration = cluster.Generation
+	apimeta.SetStatusCondition(conditions, ready)
+}
+
+// readyCondition is Ready from the pass's serving verdict, nil when the pass
+// ended before it observed the cluster, and the conditions the pass leaves:
+// True only when the cluster serves and LicenseApplied, Converged and Updated
+// are True for the current generation, and otherwise the reason of the first
+// of those that is not, in that order. Not serving goes first because it is
+// what clients feel; the license next because an expired one is what stops
+// the cluster converging at all.
+//
+// A pass that did not observe the cluster keeps the previous Ready when that
+// said the cluster was not serving, or was not decided: nothing since has
+// shown otherwise. Otherwise the cluster served at the last observation, and
+// Ready follows the other conditions, which such a pass can still change.
+func readyCondition(
+	serving *metav1.Condition,
+	conditions []metav1.Condition,
+	main string,
+	generation int64,
+) metav1.Condition {
+	previous := apimeta.FindStatusCondition(conditions, memgraphcomv1alpha1.ConditionReady)
+	switch {
+	case serving == nil && previous != nil && previous.Status != metav1.ConditionTrue &&
+		(servingReasons[previous.Reason] || previous.Reason == memgraphcomv1alpha1.ReasonReconciling):
+		return *previous
+	case serving != nil && serving.Status != metav1.ConditionTrue:
+		return metav1.Condition{
+			Type: memgraphcomv1alpha1.ConditionReady, Status: serving.Status,
+			Reason: serving.Reason, Message: serving.Message,
+		}
+	}
+	for _, condType := range []string{
+		memgraphcomv1alpha1.ConditionLicenseApplied,
+		memgraphcomv1alpha1.ConditionConverged,
+		memgraphcomv1alpha1.ConditionUpdated,
+	} {
+		condition := apimeta.FindStatusCondition(conditions, condType)
+		switch {
+		case condition == nil || condition.ObservedGeneration != generation:
+			return metav1.Condition{
+				Type: memgraphcomv1alpha1.ConditionReady, Status: metav1.ConditionUnknown,
+				Reason:  memgraphcomv1alpha1.ReasonReconciling,
+				Message: condType + " has not been decided for the current spec yet",
+			}
+		case condition.Status != metav1.ConditionTrue:
+			message := condition.Message
+			if message == "" {
+				message = "not decided yet"
+			}
+			return metav1.Condition{
+				Type: memgraphcomv1alpha1.ConditionReady, Status: condition.Status,
+				Reason: condition.Reason, Message: truncateMessage(condType + ": " + message),
+			}
+		}
+	}
+	return trueCondition(memgraphcomv1alpha1.ConditionReady, memgraphcomv1alpha1.ReasonReconciled,
+		"Data instance "+main+" is MAIN and the cluster runs the spec it declares")
 }
 
 // maxConditionMessage bounds a condition message well under the API's own
@@ -2433,9 +2525,9 @@ func trueCondition(condType, reason, message string) metav1.Condition {
 	return metav1.Condition{Type: condType, Status: metav1.ConditionTrue, Reason: reason, Message: message}
 }
 
-func notReadyCondition(reason, message string) metav1.Condition {
+func notServingCondition(reason, message string) metav1.Condition {
 	return metav1.Condition{
-		Type: memgraphcomv1alpha1.ConditionReady, Status: metav1.ConditionFalse, Reason: reason, Message: message,
+		Type: conditionServing, Status: metav1.ConditionFalse, Reason: reason, Message: message,
 	}
 }
 

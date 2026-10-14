@@ -143,7 +143,7 @@ kubectl get mgc memgraph -n memgraph -o jsonpath='{.status.externalAccess}' | jq
 | `False` | `ApplyFailed` | The exposure cannot be served on this cluster at all; the message says what to install. Waiting does not clear it. |
 | `True` | `AllInstancesRegistered` | Every member is registered at the address in `status.externalAccess`. |
 
-So `kubectl wait --for=condition=Converged` on an exposed cluster means "reachable at the addresses in status", which is what a client outside the cluster wants to wait for. `Ready` is untouched by any of this: a MAIN is serving and in-cluster clients work throughout.
+So `kubectl wait --for=condition=Converged` on an exposed cluster means "reachable at the addresses in status", which is what a client outside the cluster wants to wait for. `Ready` carries the same reason until then, since it summarizes `Converged`, while a MAIN serves and in-cluster clients work throughout (`status.main` names it).
 
 ## Lifecycle
 
