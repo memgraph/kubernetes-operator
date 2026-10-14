@@ -94,7 +94,7 @@ Run-time settings are applied on the pass that finds the cluster registered, bef
 - `Converged=False` with reason **`SettingsPending`** names the ready pods that did not answer. The usual cause is a Bolt endpoint lagging its pod's readiness by a few seconds; the pass retries on a delay. A pod that is not ready is not dialed and not reported — it is the roll's or the kubelet's business, and the flag file has its settings for when it comes up.
 - `Converged=False` with reason **`SettingsRejected`** names the pod, the exact `SET DATABASE SETTING` and Memgraph's error, verbatim: a value the setting's validator refuses (`Boolean value supports only 'false' or 'true'`, `Unsupported log level`), or `Unknown setting name` on a Memgraph that does not have the setting at run time. It is retried every pass and only a changed flag clears it. The operator never escalates to a restart on its own: a value an instance refuses at run time it would refuse at startup too, and crash-loop on.
 
-`Ready` is unaffected by either: a refused log level does not make a MAIN stop serving. `Updated` is the roll's, as before.
+`Ready` carries the same reason, since it summarizes `Converged`, but a refused log level does not make a MAIN stop serving: `status.main` still names it. `Updated` is the roll's, as before.
 
 ## Removing a flag
 

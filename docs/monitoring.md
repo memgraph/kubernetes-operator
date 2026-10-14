@@ -64,7 +64,7 @@ Converged=False  reason=ApplyFailed
   restart the operator
 ```
 
-while `Ready` and everything else about the cluster are unaffected. Installing the CRD later takes an operator restart, which is documented here rather than detected, exactly as for the Gateway API. Dropping the block clears the condition.
+and `Ready` the same reason, while the cluster itself serves as before. Installing the CRD later takes an operator restart, which is documented here rather than detected, exactly as for the Gateway API. Dropping the block clears the condition.
 
 ## `spec.monitoring.grafanaDashboard`
 

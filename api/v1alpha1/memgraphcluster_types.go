@@ -179,16 +179,22 @@ const (
 	RetentionPolicyDelete StorageRetentionPolicy = "Delete"
 )
 
-// Condition types reported on MemgraphCluster status. Both use normal-True
-// polarity: True is the healthy state. Ready answers "is the cluster serving"
-// (a MAIN is elected and reachable); Converged answers "does the cluster match
-// the declared topology" (every declared coordinator and data instance is
-// registered, and both StatefulSets run the declared number of replicas). A
-// cluster can be Ready but not Converged — a MAIN still serves while a lost
-// replica registration is being restored, or while a scale finishes.
+// Condition types reported on MemgraphCluster status. All four use
+// normal-True polarity: True is the healthy state. Converged, Updated and
+// LicenseApplied each answer one question; Ready is their summary, the one
+// condition tools that know nothing about Memgraph read (kstatus, and with it
+// Flux health checks, decides on Ready alone for a custom resource).
 const (
-	// ConditionReady is True when a MAIN data instance is elected and the
-	// coordinator leader is reachable.
+	// ConditionReady is True when the cluster serves and runs its spec: a
+	// data instance is MAIN behind a reachable coordinator leader, and
+	// LicenseApplied, Converged and Updated are all True for the current
+	// generation. Otherwise it carries the reason of the first thing that is
+	// not, in that order: the cluster not serving (NoMainElected,
+	// WorkloadsNotReady, CoordinatorUnreachable, NoCoordinatorLeader,
+	// ApplyFailed), then LicenseApplied, Converged and Updated, with the
+	// message naming the condition the reason came from. A MAIN keeps serving
+	// through most of what makes Ready False — a roll, a scale, a resize — and
+	// status.main names it throughout.
 	ConditionReady = "Ready"
 
 	// ConditionConverged is True when the observed cluster matches the declared
@@ -265,9 +271,8 @@ const (
 	// registered but an exposed one still announces its in-cluster address,
 	// because the LoadBalancer in front of it has not been given an external
 	// address yet. The message names the Service being waited on. Registration
-	// itself is complete and in-cluster clients are served, so Ready is
-	// unaffected; what is missing is the cloud provisioning the operator cannot
-	// hurry. It persisting means the LoadBalancer is not being provisioned at
+	// itself is complete and in-cluster clients are served; what is missing
+	// is the cloud provisioning the operator cannot hurry. It persisting means the LoadBalancer is not being provisioned at
 	// all — no cloud controller or no address pool answers the Service.
 	ReasonExternalAddressPending = "ExternalAddressPending"
 
@@ -395,16 +400,19 @@ const (
 	// clears it.
 	ReasonLicenseRejected = "LicenseRejected"
 
-	// ReasonMainElected is set when a data instance is observed as MAIN.
-	ReasonMainElected = "MainElected"
-
 	// ReasonNoMainElected is set when the cluster is reachable but no data
 	// instance has yet been promoted to MAIN.
 	ReasonNoMainElected = "NoMainElected"
 
 	// ReasonReconciling is set on a condition no pass has decided yet, so
-	// every condition is present from the first status write on.
+	// every condition is present from the first status write on. Ready also
+	// carries it while one of the conditions it summarizes still describes an
+	// earlier generation of the spec.
 	ReasonReconciling = "Reconciling"
+
+	// ReasonReconciled is set on Ready when the cluster serves and every other
+	// condition is True for the current generation.
+	ReasonReconciled = "Reconciled"
 )
 
 // InitializeConditions sets every condition the resource reports to Unknown,

@@ -153,6 +153,21 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			GatewayAPI:        true,
 			ServiceMonitorAPI: true,
 		}
+
+		// The license Secret every cluster reads by default, holding the license
+		// the fake's pods start with, as an install following the README has:
+		// without it LicenseApplied is pending and Ready can never be True.
+		// Specs about the license name Secrets of their own.
+		secret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: memgraphcomv1alpha1.DefaultSecretName, Namespace: resourceNamespace},
+			Data: map[string][]byte{
+				memgraphcomv1alpha1.DefaultLicenseSecretKey:      []byte(startupLicense),
+				memgraphcomv1alpha1.DefaultOrganizationSecretKey: []byte(startupOrganization),
+			},
+		}
+		if err := k8sClient.Create(ctx, secret); !apierrors.IsAlreadyExists(err) {
+			Expect(err).NotTo(HaveOccurred())
+		}
 	})
 
 	reconcileCluster := func(name string) reconcile.Result {
@@ -167,6 +182,20 @@ var _ = Describe("MemgraphCluster Controller", func() {
 	get := func(name string, obj client.Object) {
 		GinkgoHelper()
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: resourceNamespace}, obj)).To(Succeed())
+	}
+
+	// expectServingButNotReady asserts that a MAIN still serves while Ready is
+	// False with the reason of the work left unfinished: Ready summarizes every
+	// other condition, so a serving MAIN alone does not make it True.
+	expectServingButNotReady := func(name, reason string) {
+		GinkgoHelper()
+		cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+		get(name, cluster)
+		Expect(cluster.Status.Main).NotTo(BeEmpty(), "a MAIN keeps serving")
+		ready := apimeta.FindStatusCondition(cluster.Status.Conditions, memgraphcomv1alpha1.ConditionReady)
+		Expect(ready).NotTo(BeNil())
+		Expect(ready.Status).To(Equal(metav1.ConditionFalse))
+		Expect(ready.Reason).To(Equal(reason))
 	}
 
 	// deleteOwned removes the workload objects a reconcile created for the
@@ -1114,8 +1143,7 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			Expect(converged.Reason).To(Equal(memgraphcomv1alpha1.ReasonNoCaughtUpSurvivor))
 			// The retiring MAIN is still MAIN, and still serving: a paused scale-down
 			// costs availability nothing, which is what makes waiting the better trade.
-			Expect(apimeta.IsStatusConditionTrue(status().Conditions,
-				memgraphcomv1alpha1.ConditionReady)).To(BeTrue())
+			expectServingButNotReady(resourceName, memgraphcomv1alpha1.ReasonNoCaughtUpSurvivor)
 			Expect(status().Main).To(Equal("instance_1"))
 
 			By("holding there for as long as the survivor stays behind")
@@ -1204,8 +1232,7 @@ var _ = Describe("MemgraphCluster Controller", func() {
 
 			s := status()
 			Expect(s.Main).To(Equal("instance_1"))
-			Expect(apimeta.IsStatusConditionTrue(s.Conditions, memgraphcomv1alpha1.ConditionReady)).To(BeTrue(),
-				"the cluster serves from the restored MAIN")
+			expectServingButNotReady(resourceName, memgraphcomv1alpha1.ReasonRegistrationFailed)
 			converged := convergedCondition()
 			Expect(converged.Status).To(Equal(metav1.ConditionFalse))
 			Expect(converged.Reason).To(Equal(memgraphcomv1alpha1.ReasonRegistrationFailed))
@@ -1469,9 +1496,7 @@ var _ = Describe("MemgraphCluster Controller", func() {
 
 			s := status()
 			Expect(s.Main).To(Equal("instance_0"), "the last observed MAIN survives a rejected command")
-			ready := condition(memgraphcomv1alpha1.ConditionReady)
-			Expect(ready.Status).To(Equal(metav1.ConditionTrue),
-				"a cluster with a MAIN keeps serving while a registration is refused")
+			expectServingButNotReady(resourceName, memgraphcomv1alpha1.ReasonRegistrationFailed)
 			converged := condition(memgraphcomv1alpha1.ConditionConverged)
 			Expect(converged.Status).To(Equal(metav1.ConditionFalse))
 			Expect(converged.Reason).To(Equal(memgraphcomv1alpha1.ReasonRegistrationFailed))
@@ -1494,13 +1519,13 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			Expect(s.DataInstances).To(Equal(int32(2)))
 			ready := condition(memgraphcomv1alpha1.ConditionReady)
 			Expect(ready.Status).To(Equal(metav1.ConditionTrue))
-			Expect(ready.Reason).To(Equal(memgraphcomv1alpha1.ReasonMainElected))
+			Expect(ready.Reason).To(Equal(memgraphcomv1alpha1.ReasonReconciled))
 			converged := condition(memgraphcomv1alpha1.ConditionConverged)
 			Expect(converged.Status).To(Equal(metav1.ConditionTrue))
 			Expect(converged.Reason).To(Equal(memgraphcomv1alpha1.ReasonAllInstancesRegistered))
 		})
 
-		It("should stay ready but drop convergence while a lost registration is restored", func() {
+		It("should keep serving but drop readiness and convergence while a lost registration is restored", func() {
 			fake.setInstances(convergedCluster())
 			reconcileCluster(resourceName)
 			markWorkloadsReady(resourceName)
@@ -1518,9 +1543,7 @@ var _ = Describe("MemgraphCluster Controller", func() {
 
 			s := status()
 			Expect(s.Main).To(Equal("instance_0"), "the serving MAIN is unchanged")
-			ready := condition(memgraphcomv1alpha1.ConditionReady)
-			Expect(ready.Status).To(Equal(metav1.ConditionTrue),
-				"a cluster with a MAIN still serves while a replica is re-registered")
+			expectServingButNotReady(resourceName, memgraphcomv1alpha1.ReasonRegistrationInProgress)
 			converged := condition(memgraphcomv1alpha1.ConditionConverged)
 			Expect(converged.Status).To(Equal(metav1.ConditionFalse))
 			Expect(converged.Reason).To(Equal(memgraphcomv1alpha1.ReasonRegistrationInProgress))
@@ -2556,8 +2579,7 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			Expect(converged.Message).To(ContainSubstring(`SET DATABASE SETTING "log.to_stderr" TO "1"`))
 			Expect(converged.Message).To(ContainSubstring("Boolean value supports only"))
 			Expect(result.RequeueAfter).To(Equal(requeueWhilePending))
-			Expect(condition(memgraphcomv1alpha1.ConditionReady).Status).To(Equal(metav1.ConditionTrue),
-				"a refused setting does not make the cluster unready")
+			expectServingButNotReady(resourceName, memgraphcomv1alpha1.ReasonSettingsRejected)
 
 			By("clearing once the flag is fixed")
 			setFlags(memgraphcomv1alpha1.FlagsSpec{Data: map[string]memgraphcomv1alpha1.FlagValue{
@@ -3549,7 +3571,7 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			Expect(converged.Message).To(ContainSubstring("coordinators: " + futureSetting))
 			Expect(coordinatorSets()).To(BeEmpty(), "nothing is written for a key Memgraph does not have")
 			Expect(result.RequeueAfter).To(Equal(requeueWhilePending))
-			Expect(condition(memgraphcomv1alpha1.ConditionReady).Status).To(Equal(metav1.ConditionTrue))
+			expectServingButNotReady(resourceName, memgraphcomv1alpha1.ReasonUnknownFlags)
 
 			setSettings(map[string]memgraphcomv1alpha1.FlagValue{globalReadOnly: settingOn})
 			reconcileCluster(resourceName)
@@ -3728,8 +3750,7 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			Expect(announced(secondInstance)).To(Equal(podAddress(dataSuffix, 1)))
 
 			s := status()
-			Expect(apimeta.IsStatusConditionTrue(s.Conditions, memgraphcomv1alpha1.ConditionReady)).To(BeTrue(),
-				"in-cluster clients are served while the LoadBalancers are provisioned")
+			expectServingButNotReady(resourceName, memgraphcomv1alpha1.ReasonExternalAddressPending)
 			converged := convergedCondition()
 			Expect(converged).NotTo(BeNil())
 			Expect(converged.Status).To(Equal(metav1.ConditionFalse))
@@ -4192,8 +4213,7 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			Expect(externalNames(&gatewayv1.GatewayList{})).To(BeEmpty(), "nothing is built for an API the cluster lacks")
 			Expect(serviceType(dataService(0))).To(Equal(corev1.ServiceTypeClusterIP))
 			Expect(announced(firstInstance)).To(Equal(podAddress(dataSuffix)))
-			Expect(apimeta.IsStatusConditionTrue(status().Conditions, memgraphcomv1alpha1.ConditionReady)).To(BeTrue(),
-				"the cluster still serves in-cluster")
+			expectServingButNotReady(resourceName, memgraphcomv1alpha1.ReasonApplyFailed)
 			converged := convergedCondition()
 			Expect(converged.Status).To(Equal(metav1.ConditionFalse))
 			Expect(converged.Reason).To(Equal(memgraphcomv1alpha1.ReasonApplyFailed))
@@ -4328,8 +4348,7 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			bootstrapped()
 
 			Expect(serviceMonitors()).To(BeEmpty(), "nothing is built for a kind the cluster lacks")
-			Expect(apimeta.IsStatusConditionTrue(status().Conditions, memgraphcomv1alpha1.ConditionReady)).To(BeTrue(),
-				"the cluster still serves")
+			expectServingButNotReady(resourceName, memgraphcomv1alpha1.ReasonApplyFailed)
 			converged := convergedCondition()
 			Expect(converged.Status).To(Equal(metav1.ConditionFalse))
 			Expect(converged.Reason).To(Equal(memgraphcomv1alpha1.ReasonApplyFailed))
@@ -4777,5 +4796,102 @@ var _ = Describe("Pod watch", func() {
 
 		Expect(memgraphPodChanged.Create(event.CreateEvent{Object: pod("a", corev1.ConditionFalse)})).To(BeTrue())
 		Expect(memgraphPodChanged.Delete(event.DeleteEvent{Object: pod("a", corev1.ConditionTrue)})).To(BeTrue())
+	})
+})
+
+// Ready is the summary tools that know nothing about Memgraph read, so its
+// precedence is the contract: not serving first, then LicenseApplied,
+// Converged and Updated, and True only when every one of them is True for the
+// current generation.
+var _ = Describe("Ready", func() {
+	const generation int64 = 4
+
+	cond := func(condType string, status metav1.ConditionStatus, reason string) metav1.Condition {
+		return metav1.Condition{
+			Type: condType, Status: status, Reason: reason, Message: reason + " message",
+			ObservedGeneration: generation,
+		}
+	}
+	allTrue := func() []metav1.Condition {
+		return []metav1.Condition{
+			cond(memgraphcomv1alpha1.ConditionLicenseApplied, metav1.ConditionTrue,
+				memgraphcomv1alpha1.ReasonLicenseMatchesSecret),
+			cond(memgraphcomv1alpha1.ConditionConverged, metav1.ConditionTrue,
+				memgraphcomv1alpha1.ReasonAllInstancesRegistered),
+			cond(memgraphcomv1alpha1.ConditionUpdated, metav1.ConditionTrue, memgraphcomv1alpha1.ReasonAllPodsUpdated),
+		}
+	}
+	with := func(conditions []metav1.Condition, replacements ...metav1.Condition) []metav1.Condition {
+		for _, replacement := range replacements {
+			apimeta.SetStatusCondition(&conditions, replacement)
+		}
+		return conditions
+	}
+	serving := servingOrNot("instance_0")
+
+	It("should be True only when the cluster serves and every other condition is True", func() {
+		ready := readyCondition(&serving, allTrue(), "instance_0", generation)
+		Expect(ready.Status).To(Equal(metav1.ConditionTrue))
+		Expect(ready.Reason).To(Equal(memgraphcomv1alpha1.ReasonReconciled))
+		Expect(ready.Message).To(ContainSubstring("instance_0"))
+	})
+
+	It("should put a cluster that does not serve ahead of everything else", func() {
+		notServing := servingOrNot("")
+		conditions := with(allTrue(), cond(memgraphcomv1alpha1.ConditionLicenseApplied, metav1.ConditionFalse,
+			memgraphcomv1alpha1.ReasonLicenseRejected))
+
+		ready := readyCondition(&notServing, conditions, "", generation)
+		Expect(ready.Status).To(Equal(metav1.ConditionFalse))
+		Expect(ready.Reason).To(Equal(memgraphcomv1alpha1.ReasonNoMainElected))
+	})
+
+	It("should borrow the first unfinished condition's reason, license before membership before the roll", func() {
+		conditions := with(allTrue(),
+			cond(memgraphcomv1alpha1.ConditionConverged, metav1.ConditionFalse,
+				memgraphcomv1alpha1.ReasonRetirementInProgress),
+			cond(memgraphcomv1alpha1.ConditionUpdated, metav1.ConditionFalse,
+				memgraphcomv1alpha1.ReasonRollingRestartInProgress))
+
+		ready := readyCondition(&serving, conditions, "instance_0", generation)
+		Expect(ready.Status).To(Equal(metav1.ConditionFalse))
+		Expect(ready.Reason).To(Equal(memgraphcomv1alpha1.ReasonRetirementInProgress))
+		Expect(ready.Message).To(Equal("Converged: RetirementInProgress message"),
+			"the message names the condition the reason came from")
+
+		conditions = with(conditions, cond(memgraphcomv1alpha1.ConditionLicenseApplied, metav1.ConditionFalse,
+			memgraphcomv1alpha1.ReasonLicensePending))
+		Expect(readyCondition(&serving, conditions, "instance_0", generation).Reason).To(
+			Equal(memgraphcomv1alpha1.ReasonLicensePending))
+	})
+
+	It("should not take a True decided for an earlier spec as True for this one", func() {
+		stale := cond(memgraphcomv1alpha1.ConditionUpdated, metav1.ConditionTrue, memgraphcomv1alpha1.ReasonAllPodsUpdated)
+		stale.ObservedGeneration = generation - 1
+
+		ready := readyCondition(&serving, with(allTrue(), stale), "instance_0", generation)
+		Expect(ready.Status).To(Equal(metav1.ConditionUnknown))
+		Expect(ready.Reason).To(Equal(memgraphcomv1alpha1.ReasonReconciling))
+		Expect(ready.Message).To(ContainSubstring(memgraphcomv1alpha1.ConditionUpdated))
+	})
+
+	// A pass that ends before it observes the cluster, waiting on its own
+	// StatefulSet shrink for one, has no serving verdict.
+	It("should keep a not-serving Ready through a pass that did not observe the cluster", func() {
+		previous := cond(memgraphcomv1alpha1.ConditionReady, metav1.ConditionFalse,
+			memgraphcomv1alpha1.ReasonCoordinatorUnreachable)
+
+		ready := readyCondition(nil, with(allTrue(), previous), "instance_0", generation)
+		Expect(ready.Status).To(Equal(metav1.ConditionFalse))
+		Expect(ready.Reason).To(Equal(memgraphcomv1alpha1.ReasonCoordinatorUnreachable))
+	})
+
+	It("should follow the other conditions through such a pass when the cluster served", func() {
+		previous := cond(memgraphcomv1alpha1.ConditionReady, metav1.ConditionFalse,
+			memgraphcomv1alpha1.ReasonRollingRestartInProgress)
+
+		ready := readyCondition(nil, with(allTrue(), previous), "instance_0", generation)
+		Expect(ready.Status).To(Equal(metav1.ConditionTrue))
+		Expect(ready.Reason).To(Equal(memgraphcomv1alpha1.ReasonReconciled))
 	})
 })

@@ -83,15 +83,15 @@ memgraph   3              2      instance_0   True    True        4m12s
 ```
 
 - **`MAIN`** is the data instance the coordinators elected as MAIN — the one that accepts writes. It is observed, not decided by the operator, so it changes on failover.
-- **`READY`** is True once a MAIN is elected, i.e. the cluster serves writes.
+- **`READY`** is True once the cluster both serves and runs its spec: a MAIN is elected, and `Converged`, `Updated` and `LicenseApplied` are all True. Otherwise its reason says what is unfinished, the cluster not serving first; a MAIN keeps serving through a roll, a scale or a resize, so `MAIN` is what says whether writes are accepted.
 - **`CONVERGED`** is True once every declared coordinator and data instance is registered and reported healthy, and both StatefulSets run the declared number of replicas.
 
 `kubectl get mgc -n memgraph -o wide` adds how many of each role's declared members the cluster actually has registered (`REGISTERED-COORDINATORS`, `REGISTERED-DATA`), which is what a scale is watched through.
 
-To block a script or a GitOps step on the cluster being usable:
+To block a script or a GitOps step on the cluster being done (Flux and other tools built on kstatus read the same condition):
 
 ```sh
-kubectl wait --namespace memgraph --for=condition=Converged \
+kubectl wait --namespace memgraph --for=condition=Ready \
   memgraphcluster/memgraph --timeout=10m
 ```
 
