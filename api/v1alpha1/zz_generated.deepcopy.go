@@ -89,11 +89,6 @@ func (in *CoreDumpsSpec) DeepCopyInto(out *CoreDumpsSpec) {
 		*out = new(string)
 		**out = **in
 	}
-	if in.ConfigureCorePattern != nil {
-		in, out := &in.ConfigureCorePattern, &out.ConfigureCorePattern
-		*out = new(bool)
-		**out = **in
-	}
 	if in.Uploader != nil {
 		in, out := &in.Uploader, &out.Uploader
 		*out = new(CoreDumpsUploaderSpec)
@@ -925,11 +920,6 @@ func (in *RoleStorageSpec) DeepCopyInto(out *RoleStorageSpec) {
 	if in.LibStorageClassName != nil {
 		in, out := &in.LibStorageClassName, &out.LibStorageClassName
 		*out = new(string)
-		**out = **in
-	}
-	if in.FileLogging != nil {
-		in, out := &in.FileLogging, &out.FileLogging
-		*out = new(bool)
 		**out = **in
 	}
 }

@@ -22,7 +22,7 @@ Three properties of the operator make restore possible, and all three are delibe
 
 ## Taking a backup
 
-Back up the `lib-storage` claims; the core-dump claims hold nothing a restore needs. With `storage.<role>.fileLogging` on (the default) a `lib-storage` claim also holds Memgraph's log files under `logs/`, which ride along in the snapshot and are harmless on restore. Two things distinguish a database cluster from a stateless workload:
+Back up the `lib-storage` claims; the core-dump claims hold nothing a restore needs. With `storage.<role>.logFile: LibClaim` (the default) a `lib-storage` claim also holds Memgraph's log files under `logs/`, which ride along in the snapshot and are harmless on restore. Two things distinguish a database cluster from a stateless workload:
 
 - **Consistency across members.** Snapshot all `lib-storage` claims of the cluster as one group, at one instant, so the coordinators' view of the cluster and the data instances' storage agree. With Stork that is a `GroupVolumeSnapshot` selecting `app.kubernetes.io/instance=<cluster>`; Velero and Kasten have their own grouping. Snapshots taken one claim at a time, seconds apart, can disagree about which instance was MAIN and how far each replica had caught up.
 - **Application consistency.** A snapshot is crash-consistent: Memgraph recovers from it as it would from a power loss, replaying the WAL since its last own snapshot. Running `CREATE SNAPSHOT;` on the MAIN just before the volume snapshot (a Stork pre-exec `Rule`, a Velero pre-hook) shortens that replay to seconds. It is an optimization, not a requirement.

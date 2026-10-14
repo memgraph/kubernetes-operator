@@ -111,7 +111,7 @@ the signature; the operator's default is INFO, so set `log-level: TRACE` in `spe
    StatefulSet's `status.updateRevision`; `kubectl get controllerrevisions` shows the args each
    revision carried and when it was created.
 4. Memgraph's own logs persist on the `lib-storage` claim at
-   `/var/lib/memgraph/logs/memgraph_<date>.log` (with `fileLogging` on, the default), so they
+   `/var/lib/memgraph/logs/memgraph_<date>.log` (with `logFile: LibClaim`, the default), so they
    survive the pod being recreated. Look there for
    `Name or service not known` (DNS), `Replica <name> up to date` (the catch-up the roll waits
    for), and `PromoteToMainReq` / `DemoteMainToReplicaReq` (coordinator-driven failovers).

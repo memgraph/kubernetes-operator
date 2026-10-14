@@ -587,10 +587,9 @@ func normalizeStorage(spec memgraphcomv1alpha1.RoleStorageSpec) normalizedStorag
 		libSize:       resource.MustParse(memgraphcomv1alpha1.DefaultLibPVCSize),
 		libAccessMode: spec.LibStorageAccessMode,
 		libClass:      spec.LibStorageClassName,
-		fileLogging:   memgraphcomv1alpha1.DefaultFileLogging,
-	}
-	if spec.FileLogging != nil {
-		n.fileLogging = *spec.FileLogging
+		// Anything but None is the default, LibClaim, so a spec that never
+		// passed admission logs where an admitted one does.
+		fileLogging: spec.LogFile != memgraphcomv1alpha1.LogFileNone,
 	}
 	if spec.LibPVCSize != nil {
 		n.libSize = *spec.LibPVCSize
@@ -705,17 +704,15 @@ func normalizeCoreDumps(
 	role *memgraphcomv1alpha1.RoleCoreDumpsSpec,
 ) normalizedCoreDumps {
 	n := normalizedCoreDumps{
-		enabled:          role != nil,
-		size:             resource.MustParse(memgraphcomv1alpha1.DefaultCoreDumpsSize),
-		class:            shared.StorageClassName,
-		configurePattern: memgraphcomv1alpha1.DefaultConfigureCorePattern,
+		enabled: role != nil,
+		size:    resource.MustParse(memgraphcomv1alpha1.DefaultCoreDumpsSize),
+		class:   shared.StorageClassName,
+		// Anything but Node is the default, Operator.
+		configurePattern: shared.CorePattern != memgraphcomv1alpha1.CorePatternNode,
 		uploader:         shared.Uploader,
 	}
 	if role != nil && role.Size != nil {
 		n.size = *role.Size
-	}
-	if shared.ConfigureCorePattern != nil {
-		n.configurePattern = *shared.ConfigureCorePattern
 	}
 	return n
 }

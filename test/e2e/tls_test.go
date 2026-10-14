@@ -110,9 +110,9 @@ spec:
     name: %s
   storage:
     coordinators:
-      fileLogging: false
+      logFile: None
     data:
-      fileLogging: false
+      logFile: None
   resources:
     coordinators:
       requests:

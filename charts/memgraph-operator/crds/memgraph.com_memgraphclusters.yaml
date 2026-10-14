@@ -122,22 +122,6 @@ spec:
                   coreDumps collects crash dumps of the roles whose blocks are present onto
                   a volume of their own.
                 properties:
-                  configureCorePattern:
-                    default: true
-                    description: |-
-                      configureCorePattern lets the operator point the kernel at
-                      /var/core/memgraph by running a privileged init container that writes
-                      /proc/sys/kernel/core_pattern. It uses the cluster's own Memgraph image,
-                      so no second image has to be pulled.
-
-                      It is cluster-wide rather than per role for two reasons: core_pattern is a
-                      property of the **node**, so it applies to every process that crashes
-                      there regardless of which role asked for it, and what really decides this
-                      is whether the namespace tolerates a privileged container at all.
-                      PodSecurity "restricted" does not — set this to false there, or wherever
-                      the platform manages core_pattern itself, and the operator only provisions
-                      and mounts the volumes, trusting the node to already point at them.
-                    type: boolean
                   coordinators:
                     description: |-
                       coordinators, when present, makes every coordinator pod collect dumps
@@ -170,6 +154,26 @@ spec:
                       rule: has(self.size) == has(oldSelf.size) && (!has(self.size)
                         || quantity(string(self.size)).compareTo(quantity(string(oldSelf.size)))
                         >= 0)
+                  corePattern:
+                    default: Operator
+                    description: |-
+                      corePattern is who points the kernel at /var/core/memgraph. Operator,
+                      the default, has the operator run a privileged init container that
+                      writes /proc/sys/kernel/core_pattern, on the cluster's own Memgraph
+                      image so no second image has to be pulled. Node leaves it to the node
+                      or the platform: the operator only provisions and mounts the volumes,
+                      trusting the node to already point at them.
+
+                      It is cluster-wide rather than per role for two reasons: core_pattern is a
+                      property of the **node**, so it applies to every process that crashes
+                      there regardless of which role asked for it, and what really decides this
+                      is whether the namespace tolerates a privileged container at all.
+                      PodSecurity "restricted" does not — set Node there, or wherever the
+                      platform manages core_pattern itself.
+                    enum:
+                    - Operator
+                    - Node
+                    type: string
                   data:
                     description: |-
                       data, when present, makes every data instance pod collect dumps onto a
@@ -2842,23 +2846,6 @@ spec:
                     description: coordinators configures the storage of every coordinator
                       pod.
                     properties:
-                      fileLogging:
-                        default: true
-                        description: |-
-                          fileLogging decides whether Memgraph writes log files. With it on, every
-                          pod of the role logs to /var/lib/memgraph/logs/memgraph_<date>.log on the
-                          lib storage claim, so the logs survive the pod and count toward
-                          libPVCSize: size the claim for snapshots, WAL and log-retention-days of
-                          logs, or lower log-level or log-retention-days in flags. With it off the
-                          operator passes an empty --log-file, so stderr and `kubectl logs` (plus
-                          whatever collects them, such as monitoring.vectorRemote) are the only
-                          log sink.
-
-                          It changes on a live cluster with a rolling restart. Turning it off
-                          leaves the log files already written where they are: Memgraph only
-                          prunes old log files while it writes them, and the operator never
-                          deletes storage.
-                        type: boolean
                       libPVCSize:
                         anyOf:
                         - type: integer
@@ -2867,8 +2854,8 @@ spec:
                         description: |-
                           libPVCSize is the requested size of the lib storage claim, which backs
                           Memgraph's data directory (snapshots, WAL, and durability metadata). It
-                          can grow on a live cluster and never shrink. With fileLogging on it holds
-                          the role's log files too.
+                          can grow on a live cluster and never shrink. With logFile LibClaim it
+                          holds the role's log files too.
                         pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                         x-kubernetes-int-or-string: true
                         x-kubernetes-validations:
@@ -2892,6 +2879,26 @@ spec:
                           empty string to disable dynamic provisioning and bind a pre-created
                           PersistentVolume.
                         maxLength: 253
+                        type: string
+                      logFile:
+                        default: LibClaim
+                        description: |-
+                          logFile is where Memgraph writes its log files. LibClaim, the default,
+                          has every pod of the role log to
+                          /var/lib/memgraph/logs/memgraph_<date>.log on the lib storage claim, so
+                          the logs survive the pod and count toward libPVCSize: size the claim for
+                          snapshots, WAL and log-retention-days of logs, or lower log-level or
+                          log-retention-days in flags. None has the operator pass an empty
+                          --log-file, so stderr and `kubectl logs` (plus whatever collects them,
+                          such as monitoring.vectorRemote) are the only log sink.
+
+                          It changes on a live cluster with a rolling restart. Moving to None
+                          leaves the log files already written where they are: Memgraph only
+                          prunes old log files while it writes them, and the operator never
+                          deletes storage.
+                        enum:
+                        - LibClaim
+                        - None
                         type: string
                     type: object
                     x-kubernetes-validations:
@@ -2921,23 +2928,6 @@ spec:
                     description: data configures the storage of every data instance
                       pod.
                     properties:
-                      fileLogging:
-                        default: true
-                        description: |-
-                          fileLogging decides whether Memgraph writes log files. With it on, every
-                          pod of the role logs to /var/lib/memgraph/logs/memgraph_<date>.log on the
-                          lib storage claim, so the logs survive the pod and count toward
-                          libPVCSize: size the claim for snapshots, WAL and log-retention-days of
-                          logs, or lower log-level or log-retention-days in flags. With it off the
-                          operator passes an empty --log-file, so stderr and `kubectl logs` (plus
-                          whatever collects them, such as monitoring.vectorRemote) are the only
-                          log sink.
-
-                          It changes on a live cluster with a rolling restart. Turning it off
-                          leaves the log files already written where they are: Memgraph only
-                          prunes old log files while it writes them, and the operator never
-                          deletes storage.
-                        type: boolean
                       libPVCSize:
                         anyOf:
                         - type: integer
@@ -2946,8 +2936,8 @@ spec:
                         description: |-
                           libPVCSize is the requested size of the lib storage claim, which backs
                           Memgraph's data directory (snapshots, WAL, and durability metadata). It
-                          can grow on a live cluster and never shrink. With fileLogging on it holds
-                          the role's log files too.
+                          can grow on a live cluster and never shrink. With logFile LibClaim it
+                          holds the role's log files too.
                         pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                         x-kubernetes-int-or-string: true
                         x-kubernetes-validations:
@@ -2971,6 +2961,26 @@ spec:
                           empty string to disable dynamic provisioning and bind a pre-created
                           PersistentVolume.
                         maxLength: 253
+                        type: string
+                      logFile:
+                        default: LibClaim
+                        description: |-
+                          logFile is where Memgraph writes its log files. LibClaim, the default,
+                          has every pod of the role log to
+                          /var/lib/memgraph/logs/memgraph_<date>.log on the lib storage claim, so
+                          the logs survive the pod and count toward libPVCSize: size the claim for
+                          snapshots, WAL and log-retention-days of logs, or lower log-level or
+                          log-retention-days in flags. None has the operator pass an empty
+                          --log-file, so stderr and `kubectl logs` (plus whatever collects them,
+                          such as monitoring.vectorRemote) are the only log sink.
+
+                          It changes on a live cluster with a rolling restart. Moving to None
+                          leaves the log files already written where they are: Memgraph only
+                          prunes old log files while it writes them, and the operator never
+                          deletes storage.
+                        enum:
+                        - LibClaim
+                        - None
                         type: string
                     type: object
                     x-kubernetes-validations:
