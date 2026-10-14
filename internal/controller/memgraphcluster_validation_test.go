@@ -49,7 +49,7 @@ func defaultRoleStorage() memgraphcomv1alpha1.RoleStorageSpec {
 	return memgraphcomv1alpha1.RoleStorageSpec{
 		LibPVCSize:           ptr.To(resource.MustParse(memgraphcomv1alpha1.DefaultLibPVCSize)),
 		LibStorageAccessMode: memgraphcomv1alpha1.DefaultStorageAccessMode,
-		FileLogging:          ptr.To(memgraphcomv1alpha1.DefaultFileLogging),
+		LogFile:              memgraphcomv1alpha1.DefaultLogFile,
 	}
 }
 
@@ -58,7 +58,7 @@ func defaultRoleStorage() memgraphcomv1alpha1.RoleStorageSpec {
 // the cluster-wide toggle is filled in.
 func defaultCoreDumps() memgraphcomv1alpha1.CoreDumpsSpec {
 	return memgraphcomv1alpha1.CoreDumpsSpec{
-		ConfigureCorePattern: ptr.To(memgraphcomv1alpha1.DefaultConfigureCorePattern),
+		CorePattern: memgraphcomv1alpha1.DefaultCorePattern,
 	}
 }
 
@@ -179,7 +179,7 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 			Expect(stored.Spec.Secrets.LicenseKey).To(Equal(memgraphcomv1alpha1.DefaultLicenseSecretKey))
 			Expect(stored.Spec.Secrets.OrganizationKey).To(Equal(memgraphcomv1alpha1.DefaultOrganizationSecretKey))
 			Expect(stored.Spec.Storage.Data.LibPVCSize).To(Equal(ptr.To(resource.MustParse("100Gi"))))
-			Expect(stored.Spec.Storage.Data.FileLogging).To(HaveValue(BeTrue()))
+			Expect(stored.Spec.Storage.Data.LogFile).To(Equal(memgraphcomv1alpha1.LogFileLibClaim))
 			Expect(stored.Spec.Storage.RetentionPolicy).To(Equal(memgraphcomv1alpha1.DefaultStorageRetention))
 			Expect(stored.Spec.Storage.Coordinators).To(Equal(defaultRoleStorage()))
 		})
@@ -421,7 +421,7 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 			Expect(dumps.Data).To(HaveValue(Equal(memgraphcomv1alpha1.RoleCoreDumpsSpec{
 				Size: ptr.To(resource.MustParse("200Gi")),
 			})))
-			Expect(dumps.ConfigureCorePattern).To(HaveValue(BeTrue()))
+			Expect(dumps.CorePattern).To(Equal(memgraphcomv1alpha1.CorePatternOperator))
 			Expect(dumps.Uploader.PullPolicy).To(Equal(memgraphcomv1alpha1.DefaultImagePullPolicy))
 			// Whether a role collects at all is its block being present: the
 			// coordinators wrote none, and no schema default may conjure one.
@@ -694,6 +694,18 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 					},
 				},
 				"coreDumps size must be greater than zero"),
+			Entry("a log file location the operator does not know", "invalid-log-file",
+				memgraphcomv1alpha1.MemgraphClusterSpec{
+					Storage: memgraphcomv1alpha1.StorageSpec{
+						Data: memgraphcomv1alpha1.RoleStorageSpec{LogFile: "EmptyDir"},
+					},
+				},
+				`Unsupported value: "EmptyDir"`),
+			Entry("a core pattern owner the operator does not know", "invalid-core-pattern",
+				memgraphcomv1alpha1.MemgraphClusterSpec{
+					CoreDumps: memgraphcomv1alpha1.CoreDumpsSpec{CorePattern: "DaemonSet"},
+				},
+				`Unsupported value: "DaemonSet"`),
 			Entry("an uploader Secret that is not a Secret name", "invalid-uploader-env-from-secret",
 				memgraphcomv1alpha1.MemgraphClusterSpec{
 					CoreDumps: memgraphcomv1alpha1.CoreDumpsSpec{
@@ -1313,7 +1325,7 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 
 			Expect(update("core-dumps-unchanged", func(c *memgraphcomv1alpha1.MemgraphCluster) {
 				c.Spec.Image.Tag = customImageTag
-				c.Spec.CoreDumps.ConfigureCorePattern = ptr.To(false)
+				c.Spec.CoreDumps.CorePattern = memgraphcomv1alpha1.CorePatternNode
 			})).To(Succeed())
 		})
 
@@ -1397,14 +1409,14 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 			Entry("turning file logging off", "claims-file-logging-off",
 				memgraphcomv1alpha1.MemgraphClusterSpec{},
 				func(c *memgraphcomv1alpha1.MemgraphCluster) {
-					c.Spec.Storage.Data.FileLogging = ptr.To(false)
+					c.Spec.Storage.Data.LogFile = memgraphcomv1alpha1.LogFileNone
 				}),
 			Entry("turning file logging on", "claims-file-logging-on",
 				memgraphcomv1alpha1.MemgraphClusterSpec{Storage: memgraphcomv1alpha1.StorageSpec{
-					Coordinators: memgraphcomv1alpha1.RoleStorageSpec{FileLogging: ptr.To(false)},
+					Coordinators: memgraphcomv1alpha1.RoleStorageSpec{LogFile: memgraphcomv1alpha1.LogFileNone},
 				}},
 				func(c *memgraphcomv1alpha1.MemgraphCluster) {
-					c.Spec.Storage.Coordinators.FileLogging = ptr.To(true)
+					c.Spec.Storage.Coordinators.LogFile = memgraphcomv1alpha1.LogFileLibClaim
 				}),
 			// A role without a block has no size to edit, so the class is the one
 			// core dumps knob that backs no claim here.

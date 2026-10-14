@@ -52,8 +52,8 @@ const (
 	AWSRegionSecretKey      = "AWS_REGION"
 	AWSEndpointURLSecretKey = "AWS_ENDPOINT_URL"
 
-	DefaultCoreDumpsSize        = "10Gi"
-	DefaultConfigureCorePattern = true
+	DefaultCoreDumpsSize = "10Gi"
+	DefaultCorePattern   = CorePatternOperator
 
 	DefaultMaxMapCount int64 = 524288
 
@@ -64,7 +64,7 @@ const (
 	DefaultFSGroup    int64 = 103
 
 	DefaultLibPVCSize        = "10Gi"
-	DefaultFileLogging       = true
+	DefaultLogFile           = LogFileLibClaim
 	DefaultStorageAccessMode = corev1.ReadWriteOnce
 	DefaultStorageRetention  = RetentionPolicyRetain
 
@@ -177,6 +177,39 @@ const (
 	// PVCs: all of them when the MemgraphCluster is deleted, and a retiring
 	// pod's when a replica count is lowered. The data is not recoverable.
 	RetentionPolicyDelete StorageRetentionPolicy = "Delete"
+)
+
+// LogFileLocation is where every pod of a role writes Memgraph's log files.
+// It is an enum rather than a switch because the answers have changed before:
+// the log files had a claim of their own until they moved onto the lib claim.
+// +kubebuilder:validation:Enum=LibClaim;None
+type LogFileLocation string
+
+const (
+	// LogFileLibClaim writes the log files to /var/lib/memgraph/logs on the lib
+	// storage claim, so they survive the pod and count toward libPVCSize.
+	LogFileLibClaim LogFileLocation = "LibClaim"
+
+	// LogFileNone writes no log file: stderr, and whatever collects it, is the
+	// only log sink.
+	LogFileNone LogFileLocation = "None"
+)
+
+// CorePatternOwner is who points the node's kernel.core_pattern at the core
+// dumps volume. It is an enum rather than a switch because who sets a node
+// property is a question with more answers than two, a per-node DaemonSet
+// among them.
+// +kubebuilder:validation:Enum=Operator;Node
+type CorePatternOwner string
+
+const (
+	// CorePatternOperator has the operator set it, from a privileged init
+	// container in every pod of a role that collects dumps.
+	CorePatternOperator CorePatternOwner = "Operator"
+
+	// CorePatternNode leaves it to the node or the platform: the operator only
+	// provisions and mounts the volumes, trusting the node to point at them.
+	CorePatternNode CorePatternOwner = "Node"
 )
 
 // Condition types reported on MemgraphCluster status. All four use
@@ -557,8 +590,8 @@ type AWSCredentialsSpec struct {
 // claim template changes the pods' volumes, which the StatefulSet controller
 // only repairs in ascending ordinal order, MAIN first, which deadlocks the
 // rolling restart. A size given in other units is not a change: quantities are
-// compared as quantities. fileLogging is not part of a claim template and
-// changes freely.
+// compared as quantities. logFile is not part of a claim template and changes
+// freely.
 //
 // The has() guards keep every rule evaluable against the block's empty object
 // default, which the API server checks before nested field defaults apply.
@@ -569,8 +602,8 @@ type AWSCredentialsSpec struct {
 type RoleStorageSpec struct {
 	// libPVCSize is the requested size of the lib storage claim, which backs
 	// Memgraph's data directory (snapshots, WAL, and durability metadata). It
-	// can grow on a live cluster and never shrink. With fileLogging on it holds
-	// the role's log files too.
+	// can grow on a live cluster and never shrink. With logFile LibClaim it
+	// holds the role's log files too.
 	// +kubebuilder:validation:XValidation:rule="quantity(string(self)).isGreaterThan(quantity('0'))",message="libPVCSize must be greater than zero"
 	// +kubebuilder:default="10Gi"
 	// +optional
@@ -591,22 +624,22 @@ type RoleStorageSpec struct {
 	// +optional
 	LibStorageClassName *string `json:"libStorageClassName,omitempty"`
 
-	// fileLogging decides whether Memgraph writes log files. With it on, every
-	// pod of the role logs to /var/lib/memgraph/logs/memgraph_<date>.log on the
-	// lib storage claim, so the logs survive the pod and count toward
-	// libPVCSize: size the claim for snapshots, WAL and log-retention-days of
-	// logs, or lower log-level or log-retention-days in flags. With it off the
-	// operator passes an empty --log-file, so stderr and `kubectl logs` (plus
-	// whatever collects them, such as monitoring.vectorRemote) are the only
-	// log sink.
+	// logFile is where Memgraph writes its log files. LibClaim, the default,
+	// has every pod of the role log to
+	// /var/lib/memgraph/logs/memgraph_<date>.log on the lib storage claim, so
+	// the logs survive the pod and count toward libPVCSize: size the claim for
+	// snapshots, WAL and log-retention-days of logs, or lower log-level or
+	// log-retention-days in flags. None has the operator pass an empty
+	// --log-file, so stderr and `kubectl logs` (plus whatever collects them,
+	// such as monitoring.vectorRemote) are the only log sink.
 	//
-	// It changes on a live cluster with a rolling restart. Turning it off
+	// It changes on a live cluster with a rolling restart. Moving to None
 	// leaves the log files already written where they are: Memgraph only
 	// prunes old log files while it writes them, and the operator never
 	// deletes storage.
-	// +kubebuilder:default=true
+	// +kubebuilder:default=LibClaim
 	// +optional
-	FileLogging *bool `json:"fileLogging,omitempty"`
+	LogFile LogFileLocation `json:"logFile,omitempty"`
 }
 
 // StorageSpec configures persistence for both roles plus what happens to a
@@ -782,21 +815,22 @@ type CoreDumpsSpec struct {
 	// +optional
 	StorageClassName *string `json:"storageClassName,omitempty"`
 
-	// configureCorePattern lets the operator point the kernel at
-	// /var/core/memgraph by running a privileged init container that writes
-	// /proc/sys/kernel/core_pattern. It uses the cluster's own Memgraph image,
-	// so no second image has to be pulled.
+	// corePattern is who points the kernel at /var/core/memgraph. Operator,
+	// the default, has the operator run a privileged init container that
+	// writes /proc/sys/kernel/core_pattern, on the cluster's own Memgraph
+	// image so no second image has to be pulled. Node leaves it to the node
+	// or the platform: the operator only provisions and mounts the volumes,
+	// trusting the node to already point at them.
 	//
 	// It is cluster-wide rather than per role for two reasons: core_pattern is a
 	// property of the **node**, so it applies to every process that crashes
 	// there regardless of which role asked for it, and what really decides this
 	// is whether the namespace tolerates a privileged container at all.
-	// PodSecurity "restricted" does not — set this to false there, or wherever
-	// the platform manages core_pattern itself, and the operator only provisions
-	// and mounts the volumes, trusting the node to already point at them.
-	// +kubebuilder:default=true
+	// PodSecurity "restricted" does not — set Node there, or wherever the
+	// platform manages core_pattern itself.
+	// +kubebuilder:default=Operator
 	// +optional
-	ConfigureCorePattern *bool `json:"configureCorePattern,omitempty"`
+	CorePattern CorePatternOwner `json:"corePattern,omitempty"`
 
 	// uploader is an optional sidecar that ships collected dumps off the volume
 	// — to object storage, a debug host, wherever. Any image and destination

@@ -42,7 +42,7 @@ spec:
     # after themselves.
     retentionPolicy: Retain
     # Each pod of a role gets a lib claim: Memgraph's data directory and, with
-    # fileLogging on, its log files under /var/lib/memgraph/logs. Size it for
+    # logFile LibClaim, its log files under /var/lib/memgraph/logs. Size it for
     # snapshots, WAL and log-retention-days of logs (see flags below). The
     # storage class names have no default and are commented out on purpose:
     # left unset, each claim uses the cluster's default StorageClass, while the
@@ -53,30 +53,29 @@ spec:
     # StatefulSet volumeClaimTemplates, which Kubernetes treats as immutable, so
     # admission refuses changing them on a live cluster: delete the
     # MemgraphCluster (the claims are retained) and recreate it with the new
-    # values. Setting fileLogging to false passes an empty --log-file, leaving
-    # stderr (and so `kubectl logs`) as the only log sink; it changes on a live
-    # cluster with a rolling restart, and turning it off leaves the log files
-    # already written in place.
+    # values. Setting logFile to None passes an empty --log-file, leaving stderr
+    # (and so `kubectl logs`) as the only log sink; it changes on a live cluster
+    # with a rolling restart, and moving to None leaves the log files already
+    # written in place.
     coordinators:
       libPVCSize: 10Gi
       libStorageAccessMode: ReadWriteOnce
       # libStorageClassName: standard
-      fileLogging: true
+      logFile: LibClaim
     data:
       libPVCSize: 10Gi
       libStorageAccessMode: ReadWriteOnce
       # libStorageClassName: standard
-      fileLogging: true
+      logFile: LibClaim
   # A role collects core dumps when its block below is present. That provisions
   # a second claim per pod, mounts it at /var/core/memgraph — a fixed path, since
   # only the kernel writes it and only the uploader reads it, and the operator
-  # points both at it — and, unless configureCorePattern is false, runs a
+  # points both at it — and, unless corePattern is Node, runs a
   # privileged init container that sets the node's core pattern. Two things that
   # catch people: core_pattern is a property of the node, so it applies to
   # everything that crashes there, and the privileged init container is rejected
-  # in a namespace running PodSecurity "restricted". Set configureCorePattern:
-  # false there and have the platform point core_pattern at that directory
-  # itself. Whether a role collects dumps is decided when the cluster is
+  # in a namespace running PodSecurity "restricted". Set corePattern: Node
+  # there and have the platform point core_pattern at that directory itself. Whether a role collects dumps is decided when the cluster is
   # created: the claim is a StatefulSet volumeClaimTemplate, which Kubernetes
   # forbids adding or removing in place, so adding or removing a role's block on
   # a live cluster is rejected. To change it, delete the MemgraphCluster (the
@@ -93,7 +92,7 @@ spec:
     # size: 10Gi
     # The rest is one decision for the cluster, so it is stated once.
     # storageClassName: standard
-    # configureCorePattern: true
+    # corePattern: Operator
     # An optional sidecar that ships the dumps somewhere durable, joining the
     # pods of every role that collects them. The operator mounts the dumps into
     # it read-only, passes the directory as CORE_DUMPS_DIR, mounts a writable
@@ -136,7 +135,7 @@ spec:
   # and the value its docs recommend up to 64 GB of RAM; larger nodes want about
   # one map area per 128 KB of memory. Unlike the chart, the block is off when
   # absent: leave it out in a namespace running PodSecurity "restricted" (as
-  # with configureCorePattern above) or on nodes the platform tunes itself.
+  # with corePattern above) or on nodes the platform tunes itself.
   sysctlInitContainer:
     maxMapCount: 524288
   # The identity every pod of both roles runs under, the HA chart's

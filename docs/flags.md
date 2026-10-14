@@ -133,7 +133,7 @@ Admission rejects these keys, in either spelling:
 
 - **`bolt-port`, `management-port`, `coordinator-port`, `bolt-address`, `monitoring-address`, `monitoring-port`, `metrics-port`**: the Services, probes, registered addresses, metrics scrapers and the Vector sidecar reach every instance at the fixed ports and on every interface.
 - **`coordinator-id`, `coordinator-hostname`**: a coordinator's identity, derived from its pod ordinal.
-- **`data-directory`, `log-file`**: both on the lib claim. `log-file` is `/var/lib/memgraph/logs/memgraph.log`, in a directory of its own because Memgraph prunes files older than `log-retention-days` from the log file's directory, and empty when `storage.<role>.fileLogging` is false, which is what keeps the image's own `log_file` default from crash-looping a read-only root filesystem. The log files count toward `libPVCSize`.
+- **`data-directory`, `log-file`**: both on the lib claim. `log-file` is `/var/lib/memgraph/logs/memgraph.log`, in a directory of its own because Memgraph prunes files older than `log-retention-days` from the log file's directory, and empty when `storage.<role>.logFile` is `None`, which is what keeps the image's own `log_file` default from crash-looping a read-only root filesystem. The log files count toward `libPVCSize`.
 - **`bolt-cert-file`, `bolt-key-file`, `cluster-cert-file`, `cluster-key-file`, `cluster-ca-file`**: derived from `spec.tls`, see [TLS](tls.md).
 - **`metrics-format`**: always OpenMetrics, see [monitoring](monitoring.md).
 - **`license-key`, `organization-name`**: the CR carries no secret material; the license comes from the `secrets` block.

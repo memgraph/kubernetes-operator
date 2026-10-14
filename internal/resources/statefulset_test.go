@@ -741,7 +741,7 @@ func TestStatefulSetStorageOverrides(t *testing.T) {
 func TestStatefulSetFileLoggingOff(t *testing.T) {
 	cluster := minimalCluster()
 	cluster.Spec.Storage = memgraphcomv1alpha1.StorageSpec{
-		Coordinators: memgraphcomv1alpha1.RoleStorageSpec{FileLogging: ptr.To(false)},
+		Coordinators: memgraphcomv1alpha1.RoleStorageSpec{LogFile: memgraphcomv1alpha1.LogFileNone},
 		// The data instances keep logging to a file: the knob is per role.
 		Data: memgraphcomv1alpha1.RoleStorageSpec{},
 	}
@@ -852,8 +852,8 @@ func TestStatefulSetCoreDumps(t *testing.T) {
 func TestStatefulSetCoreDumpsWithoutCorePattern(t *testing.T) {
 	cluster := minimalCluster()
 	cluster.Spec.CoreDumps = memgraphcomv1alpha1.CoreDumpsSpec{
-		Data:                 &memgraphcomv1alpha1.RoleCoreDumpsSpec{},
-		ConfigureCorePattern: ptr.To(false),
+		Data:        &memgraphcomv1alpha1.RoleCoreDumpsSpec{},
+		CorePattern: memgraphcomv1alpha1.CorePatternNode,
 	}
 
 	sts := dataStatefulSet(cluster)

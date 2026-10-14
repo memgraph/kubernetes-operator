@@ -176,7 +176,7 @@ OpenShift's default `restricted-v2` SCC assigns every pod's `runAsUser` and `fsG
 - On the cluster, write `securityContext: {}` so the pods name no uid, gid or fsGroup and take the assigned ones. Memgraph needs no particular uid, only to own the data directory it creates, and OpenShift's storage honors `fsGroup`, so `fixOwnershipInitContainer` is neither needed nor admitted there (it runs as root).
 - On the operator chart, drop the manager's own uid and gid: `--set podSecurityContext.runAsUser=null --set podSecurityContext.runAsGroup=null`.
 
-`sysctlInitContainer` and `coreDumps.configureCorePattern` need privileged containers, which `restricted-v2` forbids as well; leave the first out and set the second to `false`.
+`sysctlInitContainer` and `coreDumps.corePattern: Operator` need privileged containers, which `restricted-v2` forbids as well; leave the first out and set the second to `Node`.
 
 ## External access
 

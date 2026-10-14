@@ -88,7 +88,7 @@ spec:
       libStorageClassName: %[6]s
   coreDumps:
     storageClassName: %[6]s
-    configureCorePattern: false
+    corePattern: Node
     coordinators:
       size: 1Gi
     data:
