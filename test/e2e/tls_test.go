@@ -128,7 +128,8 @@ spec:
     serviceMonitor: {}
   tls:
     intraCluster:
-      secretName: %s
+      secretRef:
+        name: %s
 `, tlsClusterName, tlsNamespace, plain.coordinators, plain.dataInstances,
 			example.Spec.Image.Repository, example.Spec.Image.Tag, licenseSecretName, intraSecretName)
 		cmd := exec.Command("kubectl", "apply", "-f", "-")
@@ -174,7 +175,7 @@ spec:
 		By("adding the tls.bolt block")
 		cmd := exec.Command("kubectl", "patch", "memgraphcluster", tlsClusterName,
 			"-n", tlsNamespace, "--type=merge", "-p",
-			fmt.Sprintf(`{"spec":{"tls":{"bolt":{"secretName":"%s"}}}}`, tlsSecretName))
+			fmt.Sprintf(`{"spec":{"tls":{"bolt":{"secretRef":{"name":"%s"}}}}}`, tlsSecretName))
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred(), "the operator must accept the tls.bolt block")
 

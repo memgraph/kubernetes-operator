@@ -467,7 +467,7 @@ var _ = Describe("MemgraphCluster", Ordered, func() {
 		By("adding the vmagentRemote block")
 		cmd = exec.Command("kubectl", "patch", "memgraphcluster", quickstartCluster.name,
 			"-n", clusterNamespace, "--type=merge", "-p",
-			fmt.Sprintf(`{"spec":{"monitoring":{"vmagentRemote":{"remoteWrite":{"url":%q,"basicAuth":{"secretName":%q}},`+
+			fmt.Sprintf(`{"spec":{"monitoring":{"vmagentRemote":{"remoteWrite":{"url":%q,"basicAuth":{"secretRef":{"name":%q}}},`+
 				`"externalLabels":{"cluster":"e2e"}}}}}`, remoteWriteURL, basicAuthSecret))
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred())
@@ -571,7 +571,7 @@ var _ = Describe("MemgraphCluster", Ordered, func() {
 		By("adding the vectorRemote block")
 		cmd = exec.Command("kubectl", "patch", "memgraphcluster", quickstartCluster.name,
 			"-n", clusterNamespace, "--type=merge", "-p",
-			fmt.Sprintf(`{"spec":{"monitoring":{"vectorRemote":{"logsEndpoint":%q,"auth":{"secretName":%q},`+
+			fmt.Sprintf(`{"spec":{"monitoring":{"vectorRemote":{"logsEndpoint":%q,"auth":{"secretRef":{"name":%q}},`+
 				`"extraLabels":{"cluster_id":"e2e"}}}}}`, logsEndpoint, authSecret))
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred())

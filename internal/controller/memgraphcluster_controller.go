@@ -37,6 +37,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	ctrlbuilder "sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -109,6 +110,11 @@ type MemgraphClusterReconciler struct {
 	// Bolt driver.
 	Memgraph memgraph.Connector
 
+	// Recorder records an Event on the cluster for every action the operator
+	// takes on it, the Bolt commands above all, which no Kubernetes audit log
+	// sees.
+	Recorder events.EventRecorder
+
 	// GatewayAPI reports whether the cluster serves the Gateway API kinds the
 	// operator builds, at the version it builds them, as discovered when the
 	// manager started. The Gateway API CRDs belong to whoever installs a
@@ -174,6 +180,7 @@ type MemgraphClusterReconciler struct {
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;patch;delete
 // +kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;patch;delete
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;delete
+// +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 //
 // The Gateway and its TCPRoutes are external objects like the Services above,
 // with the same lifecycle and the same verbs. The rules are granted whether or
@@ -1019,6 +1026,8 @@ func (r *MemgraphClusterReconciler) reconcileVolumes(
 			}
 			log.Info("Patched a PersistentVolumeClaim to the grown storage size",
 				"persistentvolumeclaim", patch.Claim, "size", patch.Size.String())
+			r.event(cluster, pvcs[patch.Claim], EventReasonVolumeExpansionRequested, eventActionExpandVolume,
+				"Requested %s for PersistentVolumeClaim %s", patch.Size.String(), patch.Claim)
 		}
 		outcome.growing = append(outcome.growing, decision.Growing...)
 		outcome.errors = append(outcome.errors, decision.Errors...)
@@ -1037,6 +1046,9 @@ func (r *MemgraphClusterReconciler) reconcileVolumes(
 			}
 			log.Info("Deleted a StatefulSet with its pods and claims orphaned, to recreate it with grown claim templates",
 				"statefulset", live.Name)
+			r.event(cluster, live, EventReasonStatefulSetOrphaned, eventActionRecreate,
+				"Deleted StatefulSet %s with its pods and claims orphaned, to recreate it with grown claim templates",
+				live.Name)
 			return outcome, fmt.Sprintf("Recreating StatefulSet %s with the grown claim sizes; "+
 				"its pods and claims are kept", live.Name), nil
 		}
@@ -1452,6 +1464,8 @@ func (r *MemgraphClusterReconciler) reconcileRegistration(
 			if err := r.restartPod(ctx, cluster, decision); err != nil {
 				return ctrl.Result{}, err
 			}
+			r.event(cluster, podRef(cluster, decision.Pod.Name), EventReasonPodRestarted, eventActionRestart,
+				"Deleted pod %s to restart it: %s", decision.Pod.Name, decision.Message)
 			log.Info("Deleted a workload pod to restart it onto the current pod template",
 				"pod", decision.Pod.Name, "reason", decision.Message)
 			return ctrl.Result{RequeueAfter: requeueWhilePending}, nil
@@ -1508,8 +1522,9 @@ func (r *MemgraphClusterReconciler) reconcileRegistration(
 	// the rejection only ever reaches the operator's log. The serving verdict is
 	// left describing what the cluster was last observed doing — a MAIN that is
 	// serving keeps serving through a registration the coordinator refuses.
+	recorded := recordingClient{Client: leader, r: r, cluster: cluster, leader: yieldedLeader(commands)}
 	for _, command := range commands {
-		if err := command.Run(ctx, leader); err != nil {
+		if err := command.Run(ctx, recorded); err != nil {
 			commandErr := fmt.Errorf("executing registration command %q: %w", command, err)
 			msg := truncateMessage(commandErr.Error())
 			setStatus(cluster, latest, servingOrNot(latest.main),
@@ -1662,10 +1677,14 @@ func (r *MemgraphClusterReconciler) reconcileCoordinatorSettings(
 	observed := classes.coordinatorSettings
 	for _, change := range settings.Diff(desired, observed) {
 		if err := leader.SetCoordinatorSetting(ctx, change.Setting, change.Value); err != nil {
-			return settingsOutcome{rejected: []string{fmt.Sprintf(
-				"the coordinators rejected SET COORDINATOR SETTING %q TO %q: %v", change.Setting, change.Value, err)}}
+			rejected := fmt.Sprintf(
+				"the coordinators rejected SET COORDINATOR SETTING %q TO %q: %v", change.Setting, change.Value, err)
+			r.warning(cluster, nil, EventReasonSettingRejected, eventActionSetSetting, "%s", rejected)
+			return settingsOutcome{rejected: []string{rejected}}
 		}
 		log.Info("Applied coordinator setting", "setting", change.Setting, "value", change.Value)
+		r.event(cluster, nil, EventReasonCoordinatorSettingApplied, eventActionSetSetting,
+			"Ran SET COORDINATOR SETTING %q TO %q", change.Setting, change.Value)
 	}
 	return settingsOutcome{}
 }
@@ -1717,7 +1736,7 @@ func (r *MemgraphClusterReconciler) reconcileSettings(
 			if !ready[endpoint.Pod] {
 				continue
 			}
-			changes, err := r.applySettings(ctx, reads, endpoint, func(observed map[string]string) []settings.Change {
+			changes, err := r.applySettings(ctx, cluster, reads, endpoint, func(observed map[string]string) []settings.Change {
 				return settings.Plan(role.flags, observed)
 			}, runTimeSetting)
 			for _, change := range changes {
@@ -1991,7 +2010,7 @@ func (r *MemgraphClusterReconciler) reconcileAWSCredentials(
 		if !ready[endpoint.Pod] {
 			continue
 		}
-		changes, err := r.applySettings(ctx, reads, endpoint, func(observed map[string]string) []settings.Change {
+		changes, err := r.applySettings(ctx, cluster, reads, endpoint, func(observed map[string]string) []settings.Change {
 			return settings.Diff(desired, observed)
 		}, secretSetting)
 		for _, change := range changes {
@@ -2111,6 +2130,7 @@ func (r *MemgraphClusterReconciler) readInstance(
 // leave the value out; any other error is a pod that could not be reached.
 func (r *MemgraphClusterReconciler) applySettings(
 	ctx context.Context,
+	cluster *memgraphcomv1alpha1.MemgraphCluster,
 	reads podSettings,
 	endpoint resources.Endpoint,
 	plan func(observed map[string]string) []settings.Change,
@@ -2136,17 +2156,21 @@ func (r *MemgraphClusterReconciler) applySettings(
 	var applied []settings.Change
 	for _, change := range changes {
 		if err := conn.SetSetting(ctx, change.Setting, change.Value); err != nil {
+			r.warning(cluster, podRef(cluster, endpoint.Pod), EventReasonSettingRejected, eventActionSetSetting,
+				"Pod %s rejected %s: %v", endpoint.Pod, describe(change), err)
 			return applied, &settingRejected{command: describe(change), err: err}
 		}
+		r.event(cluster, podRef(cluster, endpoint.Pod), EventReasonSettingApplied, eventActionSetSetting,
+			"Ran %s on pod %s", describe(change), endpoint.Pod)
 		observed[change.Setting] = change.Value
 		applied = append(applied, change)
 	}
 	return applied, nil
 }
 
-// runTimeSetting and secretSetting describe a refused SET: the first with its
-// value, which comes from the spec, the second without, since it comes from a
-// Secret.
+// runTimeSetting and secretSetting describe a SET for an Event, and a refused
+// one for the condition too: the first with its value, which comes from the
+// spec, the second without, since it comes from a Secret.
 func runTimeSetting(change settings.Change) string {
 	return fmt.Sprintf("SET DATABASE SETTING %q TO %q", change.Setting, change.Value)
 }
@@ -2201,7 +2225,7 @@ func (r *MemgraphClusterReconciler) reconcileLicense(
 			if !ready[endpoint.Pod] {
 				continue
 			}
-			changes, err := r.applySettings(ctx, reads, endpoint, func(observed map[string]string) []settings.Change {
+			changes, err := r.applySettings(ctx, cluster, reads, endpoint, func(observed map[string]string) []settings.Change {
 				return settings.License(license, organization, observed)
 			}, secretSetting)
 			for _, change := range changes {
@@ -2342,6 +2366,9 @@ func (r *MemgraphClusterReconciler) shedRetiredPods(
 			written.uid, written.generation)
 		log.Info("Shrank a StatefulSet to the declared replica count",
 			"statefulset", role.replicas.name, "replicas", role.replicas.declared)
+		r.event(cluster, nil, EventReasonStatefulSetShrunk, eventActionScaleDown,
+			"Shrank StatefulSet %s to %d replicas, shedding the pods of members that left the cluster",
+			role.replicas.name, role.replicas.declared)
 	}
 	return nil
 }

@@ -8,7 +8,8 @@
 spec:
   tls:
     bolt:
-      secretName: bolt-tls   # a kubernetes.io/tls Secret in the cluster's namespace
+      secretRef:
+        name: bolt-tls   # a kubernetes.io/tls Secret in the cluster's namespace
 ```
 
 The block is presence-based, like `externalAccess` and `monitoring`: present, both roles serve Bolt on 7687 over TLS; absent, in plaintext. There is no `enabled` field and no key-name knobs.
@@ -87,7 +88,8 @@ The one party the roll affects is the operator. Coordinators roll last, so after
 spec:
   tls:
     intraCluster:
-      secretName: intra-cluster-tls   # tls.crt, tls.key and ca.crt, in the cluster's namespace
+      secretRef:
+        name: intra-cluster-tls   # tls.crt, tls.key and ca.crt, in the cluster's namespace
 ```
 
 Present, every member talks to every other member over mutual TLS: replication between data instances, the management RPC the coordinators drive the instances with, and Raft between the coordinators. Every pod of both roles mounts the Secret read-only at `/etc/memgraph/intra_cluster_tls` and runs with `--cluster-cert-file`, `--cluster-key-file` and `--cluster-ca-file`; Memgraph refuses to start with only some of the three, so the operator always passes all of them.
@@ -133,7 +135,7 @@ policy) and recreate it with the new setting
 
 The reason is the roll. Intra-cluster TLS is all-or-nothing per process, and a member with it cannot talk to a member without it. The operator replaces pods one at a time, data instances first, and waits for replication to catch up before every step. Turning the mode on would restart one replica into TLS, the still-plaintext MAIN could no longer replicate to it, lag would never converge, and the next pod would never be restarted. Turning it off deadlocks the same way, and the coordinators partition the same way under Raft. The procedure that works is the one the message gives: delete the resource, keep the claims, recreate it with the block. Decide at creation.
 
-Changing `secretName` inside the block is allowed and rolls the cluster normally, because every member speaks TLS throughout. The two Secrets must satisfy each other during the roll: a restarted member presents the new leaf to members still on the old one and verifies their old leaf against the new `ca.crt`. Same CA, new leaf, is the ordinary case and always fine. A CA cut-over needs `ca.crt` in **both** Secrets to be a bundle holding the old and the new CA, or the roll stalls at the first restarted pod. The operator cannot detect a mismatch ahead of time; a stalled roll is recovered by fixing the bundle in the Secret and, until Memgraph reloads on its own, running `RELOAD INTRA_CLUSTER TLS` on the pods not yet restarted.
+Pointing `secretRef` at another Secret is allowed and rolls the cluster normally, because every member speaks TLS throughout. The two Secrets must satisfy each other during the roll: a restarted member presents the new leaf to members still on the old one and verifies their old leaf against the new `ca.crt`. Same CA, new leaf, is the ordinary case and always fine. A CA cut-over needs `ca.crt` in **both** Secrets to be a bundle holding the old and the new CA, or the roll stalls at the first restarted pod. The operator cannot detect a mismatch ahead of time; a stalled roll is recovered by fixing the bundle in the Secret and, until Memgraph reloads on its own, running `RELOAD INTRA_CLUSTER TLS` on the pods not yet restarted.
 
 ### Renewing
 
@@ -143,7 +145,7 @@ As for Bolt: the mount has no `subPath`, so an in-place update to the Secret rea
 RELOAD INTRA_CLUSTER TLS;
 ```
 
-issued on every instance, until Memgraph extends the per-handshake reload to them. Nothing restarts, and a `secretName` change is the roll, not the renewal.
+issued on every instance, until Memgraph extends the per-handshake reload to them. Nothing restarts, and a `secretRef` change is the roll, not the renewal.
 
 ### What the operator itself does
 

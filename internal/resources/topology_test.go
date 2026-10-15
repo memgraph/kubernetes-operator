@@ -411,7 +411,7 @@ func TestCoordinatorEndpoints(t *testing.T) {
 func TestDataEndpoints(t *testing.T) {
 	cluster := minimalCluster()
 	cluster.Spec.TLS = &memgraphcomv1alpha1.TLSSpec{
-		Bolt: &memgraphcomv1alpha1.BoltTLSSpec{SecretName: boltTLSSecretName},
+		Bolt: &memgraphcomv1alpha1.BoltTLSSpec{SecretRef: memgraphcomv1alpha1.SecretReference{Name: boltTLSSecretName}},
 	}
 
 	want := make([]resources.Endpoint, 0, 3)

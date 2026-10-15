@@ -55,7 +55,7 @@ func vectorCluster() *memgraphcomv1alpha1.MemgraphCluster {
 				PullPolicy: corev1.PullAlways,
 			},
 			LogsEndpoint: logsEndpoint,
-			Auth:         &memgraphcomv1alpha1.BasicAuthSecretSpec{SecretName: logsAuthSecret},
+			Auth:         &memgraphcomv1alpha1.BasicAuthSecretSpec{SecretRef: memgraphcomv1alpha1.SecretReference{Name: logsAuthSecret}},
 			ExtraLabels:  map[string]string{"cluster_id": "production", "role": "overridden"},
 			Resources: corev1.ResourceRequirements{
 				Requests: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("64Mi")},
@@ -169,7 +169,7 @@ func TestVectorConfigMapUnauthenticated(t *testing.T) {
 func TestVectorConfigMapBoltTLS(t *testing.T) {
 	cluster := vectorCluster()
 	cluster.Spec.TLS = &memgraphcomv1alpha1.TLSSpec{
-		Bolt: &memgraphcomv1alpha1.BoltTLSSpec{SecretName: boltTLSSecretName},
+		Bolt: &memgraphcomv1alpha1.BoltTLSSpec{SecretRef: memgraphcomv1alpha1.SecretReference{Name: boltTLSSecretName}},
 	}
 
 	want := expectedVectorConfigMap()

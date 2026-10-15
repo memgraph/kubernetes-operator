@@ -261,7 +261,7 @@ func TestUsesGrafanaDashboard(t *testing.T) {
 func TestServiceMonitorBoltTLS(t *testing.T) {
 	cluster := monitoredCluster()
 	cluster.Spec.TLS = &memgraphcomv1alpha1.TLSSpec{
-		Bolt: &memgraphcomv1alpha1.BoltTLSSpec{SecretName: boltTLSSecretName},
+		Bolt: &memgraphcomv1alpha1.BoltTLSSpec{SecretRef: memgraphcomv1alpha1.SecretReference{Name: boltTLSSecretName}},
 	}
 
 	want := expectedServiceMonitor()

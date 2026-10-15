@@ -253,6 +253,7 @@ func main() {
 		Scheme:                   mgr.GetScheme(),
 		APIReader:                mgr.GetAPIReader(),
 		Memgraph:                 memgraph.NewBoltConnector(),
+		Recorder:                 mgr.GetEventRecorder("memgraph-operator"),
 		GatewayAPI:               gatewayAPI,
 		GatewayAPIMissing:        gatewayAPIMissing,
 		ServiceMonitorAPI:        serviceMonitorAPI,
