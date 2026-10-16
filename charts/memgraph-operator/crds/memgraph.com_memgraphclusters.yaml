@@ -77,18 +77,25 @@ spec:
                   AWS integration (LOAD PARQUET and the other S3 readers). Absent, the
                   operator sets none of them.
                 properties:
-                  secretName:
+                  secretRef:
                     description: |-
-                      secretName names a Secret in the cluster's namespace holding the access
+                      secretRef names a Secret in the cluster's namespace holding the access
                       key under AWS_ACCESS_KEY_ID, the secret key under AWS_SECRET_ACCESS_KEY,
                       the region under AWS_REGION and the endpoint URL under
                       AWS_ENDPOINT_URL.
-                    maxLength: 253
-                    minLength: 1
-                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
-                    type: string
+                    properties:
+                      name:
+                        description: name is the name of the Secret in the cluster's
+                          namespace.
+                        maxLength: 253
+                        minLength: 1
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                        type: string
+                    required:
+                    - name
+                    type: object
                 required:
-                - secretName
+                - secretRef
                 type: object
               clusterDomain:
                 default: cluster.local
@@ -1051,16 +1058,23 @@ spec:
                           auth names the Secret Vector authenticates to the endpoint with. Absent,
                           the endpoint is pushed to unauthenticated.
                         properties:
-                          secretName:
+                          secretRef:
                             description: |-
-                              secretName is the name of the Secret in the cluster's namespace holding
-                              the keys "username" and "password".
-                            maxLength: 253
-                            minLength: 1
-                            pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
-                            type: string
+                              secretRef names a Secret in the cluster's namespace holding the keys
+                              "username" and "password".
+                            properties:
+                              name:
+                                description: name is the name of the Secret in the
+                                  cluster's namespace.
+                                maxLength: 253
+                                minLength: 1
+                                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                                type: string
+                            required:
+                            - name
+                            type: object
                         required:
-                        - secretName
+                        - secretRef
                         type: object
                       extraLabels:
                         additionalProperties:
@@ -1254,16 +1268,23 @@ spec:
                               basicAuth names the Secret vmagent authenticates to the endpoint with.
                               Absent, the endpoint is written to unauthenticated.
                             properties:
-                              secretName:
+                              secretRef:
                                 description: |-
-                                  secretName is the name of the Secret in the cluster's namespace holding
-                                  the keys "username" and "password".
-                                maxLength: 253
-                                minLength: 1
-                                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
-                                type: string
+                                  secretRef names a Secret in the cluster's namespace holding the keys
+                                  "username" and "password".
+                                properties:
+                                  name:
+                                    description: name is the name of the Secret in
+                                      the cluster's namespace.
+                                    maxLength: 253
+                                    minLength: 1
+                                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                                    type: string
+                                required:
+                                - name
+                                type: object
                             required:
-                            - secretName
+                            - secretRef
                             type: object
                           url:
                             description: |-
@@ -3059,19 +3080,26 @@ spec:
                       bolt serves Bolt and the metrics endpoint over TLS on both roles, from
                       the certificate in the named Secret.
                     properties:
-                      secretName:
+                      secretRef:
                         description: |-
-                          secretName names a Secret in the cluster's namespace holding the
+                          secretRef names a Secret in the cluster's namespace holding the
                           certificate under tls.crt and the private key under tls.key — the shape
                           of a kubernetes.io/tls Secret, which kubectl create secret tls and a
                           cert-manager Certificate both produce. Both roles mount it read-only and
                           serve Bolt and metrics with it.
-                        maxLength: 253
-                        minLength: 1
-                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
-                        type: string
+                        properties:
+                          name:
+                            description: name is the name of the Secret in the cluster's
+                              namespace.
+                            maxLength: 253
+                            minLength: 1
+                            pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                            type: string
+                        required:
+                        - name
+                        type: object
                     required:
-                    - secretName
+                    - secretRef
                     type: object
                   intraCluster:
                     description: |-
@@ -3079,19 +3107,26 @@ spec:
                       the certificate and CA in the named Secret. It cannot be added to or
                       removed from a live cluster; see IntraClusterTLSSpec.
                     properties:
-                      secretName:
+                      secretRef:
                         description: |-
-                          secretName names a Secret in the cluster's namespace holding the
+                          secretRef names a Secret in the cluster's namespace holding the
                           certificate under tls.crt, the private key under tls.key and the CA to
                           verify peers against under ca.crt — what a cert-manager Certificate
                           issued by a private CA writes. Every pod of both roles mounts it
                           read-only.
-                        maxLength: 253
-                        minLength: 1
-                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
-                        type: string
+                        properties:
+                          name:
+                            description: name is the name of the Secret in the cluster's
+                              namespace.
+                            maxLength: 253
+                            minLength: 1
+                            pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                            type: string
+                        required:
+                        - name
+                        type: object
                     required:
-                    - secretName
+                    - secretRef
                     type: object
                 type: object
               userContainers:

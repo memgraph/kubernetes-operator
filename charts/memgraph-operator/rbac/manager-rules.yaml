@@ -67,6 +67,13 @@
   - patch
   - watch
 - apiGroups:
+  - events.k8s.io
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+- apiGroups:
   - gateway.networking.k8s.io
   resources:
   - gateways

@@ -56,7 +56,7 @@ func vmagentCluster() *memgraphcomv1alpha1.MemgraphCluster {
 			},
 			RemoteWrite: memgraphcomv1alpha1.RemoteWriteSpec{
 				URL:       remoteWriteURL,
-				BasicAuth: &memgraphcomv1alpha1.BasicAuthSecretSpec{SecretName: basicAuthSecret},
+				BasicAuth: &memgraphcomv1alpha1.BasicAuthSecretSpec{SecretRef: memgraphcomv1alpha1.SecretReference{Name: basicAuthSecret}},
 			},
 			ScrapeInterval: "30s",
 			ExternalLabels: map[string]string{"cluster": "production", "team": "platform"},
@@ -154,7 +154,7 @@ scrape_configs:
 func TestVMAgentConfigMapBoltTLS(t *testing.T) {
 	cluster := vmagentCluster()
 	cluster.Spec.TLS = &memgraphcomv1alpha1.TLSSpec{
-		Bolt: &memgraphcomv1alpha1.BoltTLSSpec{SecretName: boltTLSSecretName},
+		Bolt: &memgraphcomv1alpha1.BoltTLSSpec{SecretRef: memgraphcomv1alpha1.SecretReference{Name: boltTLSSecretName}},
 	}
 
 	want := expectedVMAgentConfigMap()

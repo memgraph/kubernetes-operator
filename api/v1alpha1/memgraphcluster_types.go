@@ -530,6 +530,20 @@ type SecretsSpec struct {
 	OrganizationKey string `json:"organizationKey,omitempty"`
 }
 
+// SecretReference names a Secret the cluster's pods consume. It is a struct
+// rather than a bare name so that a field qualifying the reference, such as a
+// namespace, can be added later without breaking a stored object. Today the
+// Secret must live in the cluster's namespace: a pod mounts and reads into its
+// environment only Secrets of its own namespace.
+type SecretReference struct {
+	// name is the name of the Secret in the cluster's namespace.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
+	// +required
+	Name string `json:"name"`
+}
+
 // AWSCredentialsSpec references an existing Kubernetes Secret holding the AWS
 // configuration of the data instances, all four values under fixed keys:
 // AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION and AWS_ENDPOINT_URL.
@@ -551,15 +565,12 @@ type SecretsSpec struct {
 // values until SET DATABASE SETTING clears them, for example
 // SET DATABASE SETTING "aws.access_key" TO "".
 type AWSCredentialsSpec struct {
-	// secretName names a Secret in the cluster's namespace holding the access
+	// secretRef names a Secret in the cluster's namespace holding the access
 	// key under AWS_ACCESS_KEY_ID, the secret key under AWS_SECRET_ACCESS_KEY,
 	// the region under AWS_REGION and the endpoint URL under
 	// AWS_ENDPOINT_URL.
-	// +kubebuilder:validation:MinLength=1
-	// +kubebuilder:validation:MaxLength=253
-	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
 	// +required
-	SecretName string `json:"secretName"`
+	SecretRef SecretReference `json:"secretRef"`
 }
 
 // RoleStorageSpec configures the PersistentVolumeClaim every pod of a role
@@ -1725,13 +1736,10 @@ type VMAgentImageSpec struct {
 // reach it through environment variables, which Vector interpolates into its
 // configuration.
 type BasicAuthSecretSpec struct {
-	// secretName is the name of the Secret in the cluster's namespace holding
-	// the keys "username" and "password".
-	// +kubebuilder:validation:MinLength=1
-	// +kubebuilder:validation:MaxLength=253
-	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
+	// secretRef names a Secret in the cluster's namespace holding the keys
+	// "username" and "password".
 	// +required
-	SecretName string `json:"secretName"`
+	SecretRef SecretReference `json:"secretRef"`
 }
 
 // RemoteWriteSpec is where vmagent ships what it scrapes.
@@ -1956,16 +1964,13 @@ type MonitoringSpec struct {
 // every instance. Pointing at a differently named Secret is a pod-template
 // change and rolls the cluster instead.
 type BoltTLSSpec struct {
-	// secretName names a Secret in the cluster's namespace holding the
+	// secretRef names a Secret in the cluster's namespace holding the
 	// certificate under tls.crt and the private key under tls.key — the shape
 	// of a kubernetes.io/tls Secret, which kubectl create secret tls and a
 	// cert-manager Certificate both produce. Both roles mount it read-only and
 	// serve Bolt and metrics with it.
-	// +kubebuilder:validation:MinLength=1
-	// +kubebuilder:validation:MaxLength=253
-	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
 	// +required
-	SecretName string `json:"secretName"`
+	SecretRef SecretReference `json:"secretRef"`
 }
 
 // IntraClusterTLSSpec makes the members of the cluster talk to each other
@@ -1987,7 +1992,7 @@ type BoltTLSSpec struct {
 // the still-plaintext MAIN can no longer replicate to it, and lag never
 // converges. Adding or removing the block on a live cluster is therefore
 // refused at admission (the rule lives on the spec, where both the old and
-// the new tls block are in view). Changing secretName inside the block is
+// the new tls block are in view). Pointing secretRef at another Secret is
 // allowed and rolls the cluster; both Secrets must then chain to a CA the
 // other side trusts, so a CA cut-over needs ca.crt in both to be a bundle of
 // the old and the new CA.
@@ -1996,16 +2001,13 @@ type BoltTLSSpec struct {
 // in-place update reaches every pod's files, Raft picks them up on its own
 // and the rest on RELOAD INTRA_CLUSTER TLS, issued on every instance.
 type IntraClusterTLSSpec struct {
-	// secretName names a Secret in the cluster's namespace holding the
+	// secretRef names a Secret in the cluster's namespace holding the
 	// certificate under tls.crt, the private key under tls.key and the CA to
 	// verify peers against under ca.crt — what a cert-manager Certificate
 	// issued by a private CA writes. Every pod of both roles mounts it
 	// read-only.
-	// +kubebuilder:validation:MinLength=1
-	// +kubebuilder:validation:MaxLength=253
-	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
 	// +required
-	SecretName string `json:"secretName"`
+	SecretRef SecretReference `json:"secretRef"`
 }
 
 // TLSSpec holds the cluster's TLS modes, each an optional presence-based block

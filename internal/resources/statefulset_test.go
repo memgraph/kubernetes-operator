@@ -1712,7 +1712,7 @@ func TestStatefulSetExtraEnv(t *testing.T) {
 func TestStatefulSetAWSCredentials(t *testing.T) {
 	const secretName = "aws-s3-credentials"
 	cluster := minimalCluster()
-	cluster.Spec.AWSCredentials = &memgraphcomv1alpha1.AWSCredentialsSpec{SecretName: secretName}
+	cluster.Spec.AWSCredentials = &memgraphcomv1alpha1.AWSCredentialsSpec{SecretRef: memgraphcomv1alpha1.SecretReference{Name: secretName}}
 
 	fromSecret := func(name, key string) corev1.EnvVar {
 		return corev1.EnvVar{
@@ -1770,7 +1770,7 @@ func TestStatefulSetAWSCredentials(t *testing.T) {
 func TestStatefulSetBoltTLS(t *testing.T) {
 	cluster := minimalCluster()
 	cluster.Spec.TLS = &memgraphcomv1alpha1.TLSSpec{
-		Bolt: &memgraphcomv1alpha1.BoltTLSSpec{SecretName: boltTLSSecretName},
+		Bolt: &memgraphcomv1alpha1.BoltTLSSpec{SecretRef: memgraphcomv1alpha1.SecretReference{Name: boltTLSSecretName}},
 	}
 
 	wantVolumes := func(component string) []corev1.Volume {
@@ -1832,7 +1832,7 @@ func TestStatefulSetBoltTLS(t *testing.T) {
 func TestStatefulSetFlagFileComesFirst(t *testing.T) {
 	cluster := minimalCluster()
 	cluster.Spec.TLS = &memgraphcomv1alpha1.TLSSpec{
-		Bolt: &memgraphcomv1alpha1.BoltTLSSpec{SecretName: boltTLSSecretName},
+		Bolt: &memgraphcomv1alpha1.BoltTLSSpec{SecretRef: memgraphcomv1alpha1.SecretReference{Name: boltTLSSecretName}},
 	}
 
 	for _, tc := range []struct {
@@ -1862,7 +1862,7 @@ func TestStatefulSetFlagFileComesFirst(t *testing.T) {
 func TestStatefulSetIntraClusterTLS(t *testing.T) {
 	cluster := minimalCluster()
 	cluster.Spec.TLS = &memgraphcomv1alpha1.TLSSpec{
-		IntraCluster: &memgraphcomv1alpha1.IntraClusterTLSSpec{SecretName: intraTLSSecretName},
+		IntraCluster: &memgraphcomv1alpha1.IntraClusterTLSSpec{SecretRef: memgraphcomv1alpha1.SecretReference{Name: intraTLSSecretName}},
 	}
 
 	wantVolumes := func(component string) []corev1.Volume {
@@ -1921,8 +1921,8 @@ func TestStatefulSetIntraClusterTLS(t *testing.T) {
 func TestStatefulSetBothTLSModes(t *testing.T) {
 	cluster := minimalCluster()
 	cluster.Spec.TLS = &memgraphcomv1alpha1.TLSSpec{
-		Bolt:         &memgraphcomv1alpha1.BoltTLSSpec{SecretName: boltTLSSecretName},
-		IntraCluster: &memgraphcomv1alpha1.IntraClusterTLSSpec{SecretName: intraTLSSecretName},
+		Bolt:         &memgraphcomv1alpha1.BoltTLSSpec{SecretRef: memgraphcomv1alpha1.SecretReference{Name: boltTLSSecretName}},
+		IntraCluster: &memgraphcomv1alpha1.IntraClusterTLSSpec{SecretRef: memgraphcomv1alpha1.SecretReference{Name: intraTLSSecretName}},
 	}
 
 	podSpec := dataStatefulSet(cluster).Spec.Template.Spec

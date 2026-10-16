@@ -618,7 +618,7 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 						},
 					},
 				},
-				"spec.monitoring.vmagentRemote.remoteWrite.basicAuth.secretName"),
+				"spec.monitoring.vmagentRemote.remoteWrite.basicAuth.secretRef.name"),
 			Entry("an external label that is not a Prometheus label name", "invalid-vmagent-external-label",
 				memgraphcomv1alpha1.MemgraphClusterSpec{
 					Monitoring: &memgraphcomv1alpha1.MonitoringSpec{
@@ -652,7 +652,7 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 						},
 					},
 				},
-				"spec.monitoring.vectorRemote.auth.secretName"),
+				"spec.monitoring.vectorRemote.auth.secretRef.name"),
 			Entry("a Vector extra label that is not a label name", "invalid-vector-extra-label",
 				memgraphcomv1alpha1.MemgraphClusterSpec{
 					Monitoring: &memgraphcomv1alpha1.MonitoringSpec{
@@ -835,7 +835,7 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 				memgraphcomv1alpha1.MemgraphClusterSpec{
 					AWSCredentials: &memgraphcomv1alpha1.AWSCredentialsSpec{},
 				},
-				"spec.awsCredentials.secretName"),
+				"spec.awsCredentials.secretRef.name"),
 			Entry("an env var shadowing the pod's own identity", "invalid-env-pod-name",
 				memgraphcomv1alpha1.MemgraphClusterSpec{
 					ExtraEnv: memgraphcomv1alpha1.ExtraEnvSpec{
@@ -1172,7 +1172,7 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 
 			withIntraCluster := memgraphcomv1alpha1.MemgraphClusterSpec{
 				TLS: &memgraphcomv1alpha1.TLSSpec{
-					IntraCluster: &memgraphcomv1alpha1.IntraClusterTLSSpec{SecretName: intraSecret},
+					IntraCluster: &memgraphcomv1alpha1.IntraClusterTLSSpec{SecretRef: memgraphcomv1alpha1.SecretReference{Name: intraSecret}},
 				},
 			}
 
@@ -1180,7 +1180,7 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 				createAccepted("intra-add-no-tls", memgraphcomv1alpha1.MemgraphClusterSpec{})
 				expectRejectedUpdate("intra-add-no-tls", func(c *memgraphcomv1alpha1.MemgraphCluster) {
 					c.Spec.TLS = &memgraphcomv1alpha1.TLSSpec{
-						IntraCluster: &memgraphcomv1alpha1.IntraClusterTLSSpec{SecretName: intraSecret},
+						IntraCluster: &memgraphcomv1alpha1.IntraClusterTLSSpec{SecretRef: memgraphcomv1alpha1.SecretReference{Name: intraSecret}},
 					}
 				}, pinMessage)
 			})
@@ -1188,11 +1188,11 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 			It("should reject adding the block beside an existing bolt block", func() {
 				createAccepted("intra-add-beside-bolt", memgraphcomv1alpha1.MemgraphClusterSpec{
 					TLS: &memgraphcomv1alpha1.TLSSpec{
-						Bolt: &memgraphcomv1alpha1.BoltTLSSpec{SecretName: boltSecret},
+						Bolt: &memgraphcomv1alpha1.BoltTLSSpec{SecretRef: memgraphcomv1alpha1.SecretReference{Name: boltSecret}},
 					},
 				})
 				expectRejectedUpdate("intra-add-beside-bolt", func(c *memgraphcomv1alpha1.MemgraphCluster) {
-					c.Spec.TLS.IntraCluster = &memgraphcomv1alpha1.IntraClusterTLSSpec{SecretName: intraSecret}
+					c.Spec.TLS.IntraCluster = &memgraphcomv1alpha1.IntraClusterTLSSpec{SecretRef: memgraphcomv1alpha1.SecretReference{Name: intraSecret}}
 				}, pinMessage)
 			})
 
@@ -1213,8 +1213,8 @@ var _ = Describe("MemgraphCluster CRD validation", func() {
 			It("should accept a different Secret, and bolt coming and going", func() {
 				createAccepted("intra-secret-change", withIntraCluster)
 				Expect(update("intra-secret-change", func(c *memgraphcomv1alpha1.MemgraphCluster) {
-					c.Spec.TLS.IntraCluster.SecretName = "intra-cluster-tls-2027"
-					c.Spec.TLS.Bolt = &memgraphcomv1alpha1.BoltTLSSpec{SecretName: boltSecret}
+					c.Spec.TLS.IntraCluster.SecretRef.Name = "intra-cluster-tls-2027"
+					c.Spec.TLS.Bolt = &memgraphcomv1alpha1.BoltTLSSpec{SecretRef: memgraphcomv1alpha1.SecretReference{Name: boltSecret}}
 				})).To(Succeed())
 				Expect(update("intra-secret-change", func(c *memgraphcomv1alpha1.MemgraphCluster) {
 					c.Spec.TLS.Bolt = nil

@@ -156,7 +156,8 @@ kubectl create secret generic aws-s3-credentials \
 ```yaml
 spec:
   awsCredentials:
-    secretName: aws-s3-credentials
+    secretRef:
+      name: aws-s3-credentials
 ```
 
 | Secret key | Flag | Setting |

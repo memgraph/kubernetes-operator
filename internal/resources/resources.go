@@ -447,13 +447,13 @@ func normalize(spec memgraphcomv1alpha1.MemgraphClusterSpec) normalizedSpec {
 		n.monitoring.vector = normalizeVector(spec.Monitoring.VectorRemote)
 	}
 	if spec.TLS != nil && spec.TLS.Bolt != nil {
-		n.boltTLSSecret = spec.TLS.Bolt.SecretName
+		n.boltTLSSecret = spec.TLS.Bolt.SecretRef.Name
 	}
 	if spec.TLS != nil && spec.TLS.IntraCluster != nil {
-		n.intraClusterTLSSecret = spec.TLS.IntraCluster.SecretName
+		n.intraClusterTLSSecret = spec.TLS.IntraCluster.SecretRef.Name
 	}
 	if spec.AWSCredentials != nil {
-		n.awsCredentialsSecret = spec.AWSCredentials.SecretName
+		n.awsCredentialsSecret = spec.AWSCredentials.SecretRef.Name
 	}
 	if rule := spec.Scheduling.PodAntiAffinity; rule != nil {
 		n.podAntiAffinity = &normalizedPodAntiAffinity{
@@ -629,7 +629,7 @@ func normalizeVMAgent(block *memgraphcomv1alpha1.VMAgentRemoteSpec) *normalizedV
 		resources:      block.Resources,
 	}
 	if block.RemoteWrite.BasicAuth != nil {
-		n.basicAuthSecret = block.RemoteWrite.BasicAuth.SecretName
+		n.basicAuthSecret = block.RemoteWrite.BasicAuth.SecretRef.Name
 	}
 	return n
 }
@@ -657,7 +657,7 @@ func normalizeVector(block *memgraphcomv1alpha1.VectorRemoteSpec) *normalizedVec
 		resources:    block.Resources,
 	}
 	if block.Auth != nil {
-		n.authSecret = block.Auth.SecretName
+		n.authSecret = block.Auth.SecretRef.Name
 	}
 	return n
 }

@@ -96,7 +96,8 @@ spec:
       remoteWrite:
         url: http://vmsingle.monitoring.svc.cluster.local:8428/api/v1/write
         basicAuth:                        # optional
-          secretName: monitoring-basic-auth
+          secretRef:
+            name: monitoring-basic-auth
       scrapeInterval: 15s                 # the default
       externalLabels:                     # optional; how the remote tells clusters apart
         cluster: production
@@ -117,7 +118,7 @@ Changing `remoteWrite.url`, the image or the credentials Secret is a pod-templat
 
 ### Credentials
 
-`basicAuth.secretName` names a Secret in the cluster's namespace with the keys **`username`** and **`password`** — the keys of a `kubernetes.io/basic-auth` Secret, which is what the chart's `usernameKey` and `passwordKey` default to; here they are fixed, for the reason the TLS Secrets' keys are. Create it with
+`basicAuth.secretRef` names a Secret in the cluster's namespace with the keys **`username`** and **`password`** — the keys of a `kubernetes.io/basic-auth` Secret, which is what the chart's `usernameKey` and `passwordKey` default to; here they are fixed, for the reason the TLS Secrets' keys are. Create it with
 
 ```sh
 kubectl create secret generic monitoring-basic-auth --namespace <cluster namespace> \
@@ -141,7 +142,8 @@ spec:
     vectorRemote:
       logsEndpoint: http://victoria-logs.monitoring.svc.cluster.local:9428/insert
       auth:                               # optional
-        secretName: logs-basic-auth
+        secretRef:
+          name: logs-basic-auth
       extraLabels:                        # optional; how the remote tells clusters apart
         cluster_id: production
       image:                              # optional; defaults to timberio/vector at the pinned tag
@@ -162,7 +164,7 @@ How it works:
 
 ### Credentials
 
-`auth.secretName` names a Secret in the cluster's namespace with the keys **`username`** and **`password`**, as for the [vmagent](#credentials). Both reach Vector through environment variables it interpolates into its configuration (`${LOGS_USERNAME}`, `${LOGS_PASSWORD}`), so neither is on a command line or in the ConfigMap; a rotated Secret takes effect when the pod next restarts, which a roll of your choosing provides. The operator never reads the Secret.
+`auth.secretRef` names a Secret in the cluster's namespace with the keys **`username`** and **`password`**, as for the [vmagent](#credentials). Both reach Vector through environment variables it interpolates into its configuration (`${LOGS_USERNAME}`, `${LOGS_PASSWORD}`), so neither is on a command line or in the ConfigMap; a rotated Secret takes effect when the pod next restarts, which a roll of your choosing provides. The operator never reads the Secret.
 
 ### What is not a knob
 
