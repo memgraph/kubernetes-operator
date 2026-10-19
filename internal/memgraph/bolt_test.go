@@ -18,11 +18,14 @@ package memgraph
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net"
 	"testing"
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j/db"
 )
 
@@ -43,6 +46,65 @@ func TestDialSchemes(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if diff := cmp.Diff(tt.want, dialSchemes(tt.tls)); diff != "" {
 				t.Errorf("dialSchemes(%t) mismatch (-want +got):\n%s", tt.tls, diff)
+			}
+		})
+	}
+}
+
+// TestDialCredentials pins the order the connector logs in with: the system
+// user when the pass carries its password, then no credentials, which is what
+// still reaches an instance that has no system user (Memgraph before 3.15, or
+// a pod not yet restarted to mount the hash). Without a password the system
+// user is never tried.
+func TestDialCredentials(t *testing.T) {
+	const password = "s3cret"
+	asTokens := func(creds []credentials) []map[string]any {
+		tokens := make([]map[string]any, 0, len(creds))
+		for _, c := range creds {
+			tokens = append(tokens, c.token.Tokens)
+		}
+		return tokens
+	}
+	none := neo4j.NoAuth().Tokens
+
+	if diff := cmp.Diff([]map[string]any{none}, asTokens(dialCredentials(context.Background()))); diff != "" {
+		t.Errorf("dialCredentials() without a password mismatch (-want +got):\n%s", diff)
+	}
+
+	ctx := WithSystemUserPassword(context.Background(), password)
+	if got := SystemUserPassword(ctx); got != password {
+		t.Errorf("SystemUserPassword() = %q, want the password the context was given", got)
+	}
+	want := []map[string]any{neo4j.BasicAuth(SystemUserName, password, "").Tokens, none}
+	if diff := cmp.Diff(want, asTokens(dialCredentials(ctx))); diff != "" {
+		t.Errorf("dialCredentials() with a password mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestIsAuthenticationFailure pins what moves the connector on to the next
+// credentials: Memgraph refusing them, however the driver wraps the error.
+// Anything else — the connection failing, the session limit — is not worth
+// another login and moves on to the next scheme instead.
+func TestIsAuthenticationFailure(t *testing.T) {
+	refused := &neo4j.Neo4jError{Code: "Memgraph.ClientError.Security.Unauthenticated", Msg: "Authentication failure"}
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "credentials refused", err: refused, want: true},
+		{name: "credentials refused, wrapped", err: fmt.Errorf("verifying connectivity: %w", refused), want: true},
+		{
+			name: "session limit",
+			err:  &neo4j.Neo4jError{Code: "Memgraph.ClientError.Statement.SessionLimitReached"},
+			want: false,
+		},
+		{name: "connection failed", err: errors.New("dial tcp: connection refused"), want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isAuthenticationFailure(tt.err); got != tt.want {
+				t.Errorf("isAuthenticationFailure(%v) = %t, want %t", tt.err, got, tt.want)
 			}
 		})
 	}

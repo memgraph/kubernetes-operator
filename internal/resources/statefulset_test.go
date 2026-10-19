@@ -63,12 +63,18 @@ const (
 	flagsPath   = "/etc/memgraph-flags"
 	flagFile    = flagsPath + "/memgraph.flags"
 
+	// The system user's hash Secret every pod mounts, and where.
+	systemUserVolume = "system-user"
+	systemUserPath   = "/etc/memgraph/system-user"
+
 	// defaultFlagsAnnotation is the flags annotation of a role without
-	// spec.flags: the one startup-only default, log_retention_days, with the
-	// digest of its value (the first sixteen hex characters of sha256("35")).
-	// The two run-time defaults, log_level and also_log_to_stderr, are not
-	// part of it.
-	defaultFlagsAnnotation = "log_retention_days=9f14025af0065b30\n"
+	// spec.flags: the two startup-only defaults, log_retention_days and the
+	// system user's hash file, with the digest of each value (the first
+	// sixteen hex characters of sha256("35") and of
+	// sha256("/etc/memgraph/system-user/hash")). The two run-time defaults,
+	// log_level and also_log_to_stderr, are not part of it.
+	defaultFlagsAnnotation = "log_retention_days=9f14025af0065b30\n" +
+		"system_user_internal_hash_file=5f8283945eb61fe9\n"
 
 	// The Bolt TLS Secret a fixture names, and the volume the builder mounts
 	// it as.
@@ -346,6 +352,7 @@ func expectedVolumeMounts() []corev1.VolumeMount {
 	return []corev1.VolumeMount{
 		{Name: libVolume, MountPath: libPath},
 		{Name: flagsVolume, MountPath: flagsPath, ReadOnly: true},
+		{Name: systemUserVolume, MountPath: systemUserPath, ReadOnly: true},
 		{Name: tmpVolume, MountPath: "/tmp"},
 	}
 }
@@ -383,8 +390,10 @@ func expectedCoordinatorArgs(logDestination string, extra ...string) []string {
 	return append([]string{memgraphName}, expectedArgs(logDestination, extra...)...)
 }
 
-// expectedVolumes covers the role's flag file and the ephemeral scratch
-// volume: lib storage is provisioned through a volumeClaimTemplate.
+// expectedVolumes covers the role's flag file, the system user's hash and the
+// ephemeral scratch volume: lib storage is provisioned through a
+// volumeClaimTemplate. The hash volume is required, so a pod never starts
+// without it.
 func expectedVolumes(component string) []corev1.Volume {
 	return []corev1.Volume{
 		{
@@ -392,6 +401,15 @@ func expectedVolumes(component string) []corev1.Volume {
 			VolumeSource: corev1.VolumeSource{
 				ConfigMap: &corev1.ConfigMapVolumeSource{
 					LocalObjectReference: corev1.LocalObjectReference{Name: clusterName + "-" + component + "-flags"},
+				},
+			},
+		},
+		{
+			Name: systemUserVolume,
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: clusterName + "-system-user-hash",
+					Items:      []corev1.KeyToPath{{Key: "hash", Path: "hash"}},
 				},
 			},
 		},
@@ -1194,8 +1212,8 @@ func TestStatefulSetExtraVolumeWithoutMount(t *testing.T) {
 	}}
 
 	podSpec := coordinatorStatefulSet(cluster).Spec.Template.Spec
-	if len(podSpec.Volumes) != 3 {
-		t.Errorf("volumes = %v, want the scratch volume alongside flags and tmp", podSpec.Volumes)
+	if len(podSpec.Volumes) != 4 {
+		t.Errorf("volumes = %v, want the scratch volume alongside flags, the system user's hash and tmp", podSpec.Volumes)
 	}
 	if diff := cmp.Diff(expectedVolumeMounts(), podSpec.Containers[0].VolumeMounts); diff != "" {
 		t.Errorf("volume mounts mismatch (-want +got):\n%s", diff)
@@ -1931,7 +1949,7 @@ func TestStatefulSetBothTLSModes(t *testing.T) {
 	for _, volume := range podSpec.Volumes {
 		volumes = append(volumes, volume.Name)
 	}
-	if diff := cmp.Diff([]string{flagsVolume, tmpVolume, boltTLSVolume, intraTLSVolume}, volumes); diff != "" {
+	if diff := cmp.Diff([]string{flagsVolume, systemUserVolume, tmpVolume, boltTLSVolume, intraTLSVolume}, volumes); diff != "" {
 		t.Errorf("volume order mismatch (-want +got):\n%s", diff)
 	}
 
