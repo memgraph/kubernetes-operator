@@ -125,7 +125,7 @@ kubectl create secret generic monitoring-basic-auth --namespace <cluster namespa
   --type=kubernetes.io/basic-auth --from-literal=username=... --from-literal=password=...
 ```
 
-The password is mounted into the vmagent pod read-only and vmagent reads it from the file, re-reading it every second, so a rotated password takes effect with no restart and is never on the command line (the chart's vmagent takes it through `$(MONITORING_PASSWORD)`, where `ps` shows it). The username is not the secret part: it reaches vmagent through an environment variable from the same Secret, and a changed username rolls the pod. The operator never reads the Secret: it holds no Secret permissions at all.
+The password is mounted into the vmagent pod read-only and vmagent reads it from the file, re-reading it every second, so a rotated password takes effect with no restart and is never on the command line (the chart's vmagent takes it through `$(MONITORING_PASSWORD)`, where `ps` shows it). The username is not the secret part: it reaches vmagent through an environment variable from the same Secret, so a changed username takes effect when the vmagent pod next restarts (`kubectl rollout restart deployment/<cluster>-vmagent`); pointing `secretRef` at another Secret rolls the pod. The operator never reads this Secret: the kubelet hands its keys to the vmagent container.
 
 ### What is not a knob
 
@@ -170,7 +170,7 @@ How it works:
 
 - **`data` and `coordinators`**, the chart's per-role switches: the sidecar runs on both roles, because a coordinator's log is where a failover decision is explained.
 - **`websocketPort`**: the sidecar dials Memgraph's default, which the operator leaves alone.
-- **The scrape scheme**, which follows `spec.tls.bolt`.
+- **The websocket scheme** (`ws` or `wss`), which follows `spec.tls.bolt`.
 - **`namespace`** on anything, for the reason the ServiceMonitor has none.
 - **The chart's `grafanaDashboard`** for logs: see below.
 

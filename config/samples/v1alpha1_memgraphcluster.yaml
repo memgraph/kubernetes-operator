@@ -305,8 +305,8 @@ spec:
   #   query-execution-timeout-sec, storage-snapshot-interval, timezone, ...;
   #   the table is in docs/flags.md) is applied to every instance with
   #   SET DATABASE SETTING the moment you change it. No pod restarts.
-  # - Any other flag is read at startup only, so changing it rolls both
-  #   roles' pods in the usual order: data instances first, MAIN last of them,
+  # - Any other flag is read at startup only, so changing it rolls that
+  #   role's pods in the usual order: data instances first, MAIN last of them,
   #   then the coordinators with the Raft leader last.
   # - A coordinator setting under coordinators (enabled_reads_on_main,
   #   instance_down_timeout_sec, ...; whatever SHOW COORDINATOR SETTINGS
@@ -319,7 +319,7 @@ spec:
   # The operator's own logging defaults (log-level INFO, also-log-to-stderr
   # true, log-retention-days 35) may be overridden here. The ports, listen
   # addresses, coordinator identity, data directory, log file, TLS files,
-  # metrics format and the two AWS credential flags may not: admission rejects
+  # metrics format, the license flags and the four AWS flags may not: admission rejects
   # them.
   flags:
     coordinators:

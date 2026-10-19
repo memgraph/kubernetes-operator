@@ -35,7 +35,7 @@ spec:
     - "*.memgraph-data.memgraph.svc.cluster.local"
 ```
 
-Every pod of both roles mounts the Secret read-only at `/etc/memgraph/ssl`, with the two keys projected by name, and runs with `--bolt-cert-file=/etc/memgraph/ssl/tls.crt --bolt-key-file=/etc/memgraph/ssl/tls.key`. A Secret carrying more keys mounts fine; one missing either key, or a Secret that does not exist, keeps the pod from starting, which is reported the way a missing license Secret is: the pod stays pending and the cluster unconverged.
+Every pod of both roles mounts the Secret read-only at `/etc/memgraph/ssl`, with the two keys projected by name, and runs with `--bolt-cert-file=/etc/memgraph/ssl/tls.crt --bolt-key-file=/etc/memgraph/ssl/tls.key`. A Secret carrying more keys mounts fine; one missing either key, or a Secret that does not exist, keeps the pod from starting: it stays in `ContainerCreating`, `Ready` and `Converged` report `WorkloadsNotReady`, and a roll stalls at that pod. The operator never reads the TLS Secrets, so nothing names the Secret on the resource.
 
 One Secret serves every pod of both roles. A StatefulSet has one pod template, so the HA chart's per-instance Secrets cannot be expressed, and per-pod certificates would buy nothing: a Bolt certificate carries as many names as its clients dial, and no client tells one member from another by certificate.
 
@@ -54,10 +54,11 @@ A client's dial then looks like this with the Neo4j drivers: `neo4j+s://` verifi
 
 ## What the operator derives from the block
 
-Three things follow from the block. None is a knob.
+Four things follow from the block. None is a knob.
 
-- **The operator's own dials.** The controller speaks to the coordinators over pod DNS. With the block set it dials TLS and does not verify the certificate. Verifying would force every Bolt certificate to carry a CA and the pod-DNS wildcards, ruling out the ordinary case of a public-CA certificate issued for the external hostname alone, and it would buy nothing while Bolt is unauthenticated: anyone positioned to impersonate a coordinator to the operator can send the same commands to the real one. The trigger for revisiting this is Bolt auth in the operator, when an impostor could harvest credentials.
+- **The operator's own dials.** The controller speaks Bolt to every pod of both roles over pod DNS: to the coordinators for registration, and to each pod for run-time settings and the license. With the block set it dials TLS and does not verify the certificate. Verifying would force every Bolt certificate to carry a CA and the pod-DNS wildcards, ruling out the ordinary case of a public-CA certificate issued for the external hostname alone, and it would buy nothing while Bolt is unauthenticated: anyone positioned to impersonate a coordinator to the operator can send the same commands to the real one. The trigger for revisiting this is Bolt auth in the operator, when an impostor could harvest credentials.
 - **The ServiceMonitor.** Memgraph serves the metrics endpoint from the Bolt server context, so the moment the block is set, 9091 speaks TLS with the same certificate. A `spec.monitoring.serviceMonitor` therefore switches its endpoint to `scheme: https` with `tlsConfig.insecureSkipVerify: true`. Prometheus scrapes pod IPs from the headless Services' endpoints, which no user-facing certificate names, so a verified scrape would need a `serverName` in the SANs on top of a CA the ServiceMonitor can reference; that is the same burden the operator's dials decline, for the same reason. A ServiceMonitor or scrape config of your own must make the same switch.
+- **The remote-monitoring sidecars.** The monitoring websocket shares the Bolt TLS context, so the Vector sidecar of `spec.monitoring.vectorRemote` dials `wss://`, and the vmagent of `spec.monitoring.vmagentRemote` scrapes over `https`, both without verifying, for the same reason.
 - **Probes are untouched.** The only probe either role carries is a TCP-socket readiness check, which completes the TCP handshake and closes without speaking TLS.
 
 ## Renewing the certificate
@@ -80,7 +81,7 @@ A certificate nobody renews expires, and the cluster stops serving verifying cli
 
 Both are allowed and both are an ordinary roll: the block changes the pod template, so `Updated` goes False and the operator restarts the pods in its usual order, data instances first, the MAIN last of its role, then coordinators, the Raft leader last. Members never speak Bolt to each other, so the cluster itself does not care which pods have rolled.
 
-The one party the roll affects is the operator. Coordinators roll last, so after the block is added every coordinator still speaks plaintext for the whole data-instance phase while the spec says TLS, and the reverse when the block is removed. The operator dials the mode the spec asks for and, if that fails, retries once in the other mode, so the roll proceeds; the cost is one failed connection per not-yet-rolled coordinator per pass, and it self-corrects when the roll completes. Clients see the change pod by pod: a client pinned to one address must switch modes when that pod rolls, and a routing driver reconnects as the routing table moves.
+The one party the roll affects is the operator. Coordinators roll last, so after the block is added every coordinator still speaks plaintext for the whole data-instance phase while the spec says TLS, and the reverse when the block is removed. The operator dials the mode the spec asks for and, if that fails, retries once in the other mode, so the roll proceeds; the cost is one failed connection per not-yet-rolled pod it dials, per pass, and it self-corrects when the roll completes. Clients see the change pod by pod: a client pinned to one address must switch modes when that pod rolls, and a routing driver reconnects as the routing table moves.
 
 ## `spec.tls.intraCluster`
 

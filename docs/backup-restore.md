@@ -40,6 +40,10 @@ The sequence, in this order:
    metadata:
      name: lib-storage-memgraph-data-0      # the template name, the cluster, the role, the ordinal
      namespace: memgraph                    # the cluster's namespace
+     labels:                                # the labels the operator selects its claims by;
+       app.kubernetes.io/name: memgraph     # without them a later storage resize skips the claim
+       app.kubernetes.io/instance: memgraph # the cluster
+       app.kubernetes.io/component: data    # or coordinator
    spec:
      storageClassName: <spec.storage.data.libStorageClassName>
      accessModes: [<spec.storage.data.libStorageAccessMode>]   # ReadWriteOnce by default

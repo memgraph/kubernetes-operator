@@ -25,7 +25,9 @@ The sizes that grow are `storage.<role>.libPVCSize` and `coreDumps.<role>.size` 
 ```
 Waiting for lib-storage-memgraph-data-0 (pod memgraph-data-0), ... to reach the declared size. The storage driver
 reports lib-storage-memgraph-data-0: ... "Change in disk property of VM of size 'Standard_A2_v2' is not supported." ...
-``` A claim nothing mounts — retained from a scale-down — counts as grown once its volume has; its filesystem grows when a pod next mounts it. A resize the provider accepted and then gave up on, which the claim reports as `ControllerResizeInfeasible` or `NodeResizeInfeasible`, is `VolumeExpansionFailed` with the claim's error; retrying it is the provider's business.
+```
+
+A claim nothing mounts — retained from a scale-down — counts as grown once its volume has; its filesystem grows when a pod next mounts it. A resize the provider accepted and then gave up on, which the claim reports as `ControllerResizeInfeasible` or `NodeResizeInfeasible`, is `VolumeExpansionFailed` with the claim's error; retrying it is the provider's business.
 
 ## Drivers that cannot grow a volume in use
 

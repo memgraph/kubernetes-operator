@@ -152,7 +152,7 @@ So `kubectl wait --for=condition=Converged` on an exposed cluster means "reachab
 - **Switching type.** Change `type` and, when leaving Gateway mode, remove the `gateway` block in the same edit; admission rejects a `gateway` block with `type: LoadBalancer`. The Services flip type in place, the objects the other mode owned are deleted, and every member passes through its pod address until the new way in has an address. Clients briefly see in-cluster addresses in their routing table during that window.
 - **Removing the block.** The Services, Gateway and routes are deleted, and every member is moved back to its pod address. Nothing is left behind, and nothing has to be undone by hand.
 
-The external objects carry an owner reference to the `MemgraphCluster`, so deleting the cluster removes them through garbage collection like everything else. Removing them while the cluster stays is the one thing garbage collection cannot do, which is why the operator's ClusterRole has `delete` on Services, Gateways and TCPRoutes. It never deletes a headless Service or a StatefulSet.
+The external objects carry an owner reference to the `MemgraphCluster`, so deleting the cluster removes them through garbage collection like everything else. Removing them while the cluster stays is the one thing garbage collection cannot do, which is why the operator's ClusterRole has `delete` on Services, Gateways and TCPRoutes. Pruning touches only objects labelled `memgraph.com/external-access: "true"`; it never deletes a headless Service.
 
 ## Connecting from outside
 
@@ -164,7 +164,7 @@ neo4j://203.0.113.10:7687
 
 A `bolt://` connection straight to a data instance's address also works, but then it is your client, not the routing table, that has to know which instance is MAIN.
 
-TLS is not part of external access yet: the addresses announced are plain Bolt, so treat the network path accordingly. Bolt authentication is likewise still to come.
+External access carries whatever Bolt the pods serve: the LoadBalancers and the Gateway's TCP listeners pass the bytes through. With [`spec.tls.bolt`](tls.md) set, the announced addresses speak TLS end to end, so connect with `neo4j+s://` (the external hostname or IP in the certificate's SANs) or `neo4j+ssc://`; without it they are plain Bolt, so treat the network path accordingly. Bolt authentication is still to come.
 
 ## Not in scope
 

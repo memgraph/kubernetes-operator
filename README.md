@@ -12,7 +12,7 @@ The operator replaces the `memgraph-high-availability` Helm chart's fire-and-for
 
 From an empty cluster to a registered, MAIN-elected Memgraph HA cluster.
 
-**You need:** a Kubernetes cluster (v1.25 or newer — the CRD uses CEL validation), `kubectl`, `helm` v3, and a Memgraph enterprise license, which high availability requires. Three coordinators and two data instances need five schedulable pods and ten PersistentVolumeClaims of 1Gi each.
+**You need:** a Kubernetes cluster (v1.29 or newer — the CRD's CEL validation rules compare quantities, which the API server cannot compile before 1.29), `kubectl`, `helm` v3, and a Memgraph enterprise license, which high availability requires. Three coordinators and two data instances need five schedulable pods and five PersistentVolumeClaims of 10Gi each.
 
 ### 1. Install the operator
 
@@ -142,7 +142,7 @@ memgraph-data-0.memgraph-data.memgraph.svc.cluster.local:7687
 
 To load large CSV files, put them on a shared volume every data instance mounts, so the import works on whichever instance is the MAIN — see [Importing data](docs/importing-data.md).
 
-To reach the cluster from outside Kubernetes, expose it with `spec.externalAccess` — see [External access](#external-access) below. To point a local client such as [Memgraph Lab](https://memgraph.com/docs/data-visualization) at the cluster while evaluating, forwarding a port is enough:
+To reach the cluster from outside Kubernetes, expose it with `spec.externalAccess` — see [External access](#external-access) below. To point a local client such as [Memgraph Lab](https://memgraph.com/docs/memgraph-lab) at the cluster while evaluating, forwarding a port is enough:
 
 ```sh
 kubectl port-forward -n memgraph pod/memgraph-data-0 7687:7687
@@ -232,7 +232,7 @@ The MVP is deliberately "provision, bootstrap, observe". It does:
 - **expose the cluster outside Kubernetes**, through LoadBalancers or a Gateway API Gateway, and keep the routing table pointing at the addresses clients reach it through (see [External access](#external-access));
 - **serve OpenMetrics** from every instance on port 9091, declared on the pods and the headless Services and pinned to that format, so a Prometheus you already run scrapes the cluster with a ServiceMonitor, PodMonitor or scrape config of your own — and, on request, create the ServiceMonitor for a Prometheus Operator and the "Memgraph OpenMetrics" dashboard ConfigMap for a Grafana sidecar, or run the vmagent that pushes every instance's metrics to the VictoriaMetrics Memgraph runs and the Vector sidecars that push every instance's logs to its VictoriaLogs, so Memgraph can monitor the cluster without reaching into your network (any Prometheus remote-write and any Loki endpoint work), with `spec.monitoring` (see [`docs/monitoring.md`](docs/monitoring.md));
 - **serve Bolt and the metrics endpoint over TLS** from a `kubernetes.io/tls` Secret you name in `spec.tls.bolt`, on both roles, with the operator's own dials and the ServiceMonitor following suit, and **authenticate the members to each other over mutual TLS** from a Secret with `ca.crt` you name in `spec.tls.intraCluster`, decided at creation (see [`docs/tls.md`](docs/tls.md));
-- **keep the pods of a role on distinct nodes**, softly by default, as hard as `required` with scope `role` (the HA chart's `parity`) or `cluster` (its `unique`) on request, and pass a node selector, tolerations, topology spread constraints and a priority class through per role with `spec.scheduling` (see [`docs/scheduling.md`](docs/scheduling.md));
+- **keep the pods of a role on distinct nodes** when `spec.scheduling.podAntiAffinity` is present, softly for an empty block, as hard as `required` with scope `role` (the HA chart's `parity`) or `cluster` (its `unique`) on request, and pass a node selector, tolerations, topology spread constraints and a priority class through per role with `spec.scheduling` (see [`docs/scheduling.md`](docs/scheduling.md));
 - report the observed MAIN, the registered member counts, the external addresses, and the readiness and convergence conditions on the resource's status, and record an Event on it for every action it takes: each Bolt command Memgraph accepts or refuses, each setting it writes, each pod it restarts (see [`docs/events.md`](docs/events.md)).
 
 Scaling is one edit, and `Converged` tells you when it is finished:
@@ -250,16 +250,15 @@ Both counts have a floor the schema enforces at creation and on every update: `c
 
 What it does not do yet:
 
-- **Failover.** The operator promotes a MAIN only when the cluster has none: once at bootstrap, and once more when it demotes an instance that is retiring. It never overrides a MAIN that is staying — leadership belongs to the Raft coordinators, so two control systems never fight over which instance is MAIN.
-- **Other day-2 operations**: orchestrated or rolling version upgrades, storage-mode changes, and a backup feature of its own — volume-snapshot backup and restore work through the claims' names and the retention policy without one, see [`docs/backup-restore.md`](docs/backup-restore.md).
+- **Failover.** The operator promotes a MAIN only when the cluster has none: at bootstrap, after a handover that was interrupted, and when it demotes an instance that is retiring. It never overrides a MAIN that is staying — leadership belongs to the Raft coordinators, so two control systems never fight over which instance is MAIN.
+- **Other day-2 operations**: the steps around a version upgrade (a new `image.tag` is rolled one pod at a time in the in-service upgrade order, but the operator takes no backup and runs no version-specific migration), storage-mode changes, and a backup feature of its own — volume-snapshot backup and restore work through the claims' names and the retention policy without one, see [`docs/backup-restore.md`](docs/backup-restore.md).
 - **Deleting storage**: the operator owns no finalizer and runs no cleanup of its own — deleting a volume is left entirely to the StatefulSet's own retention policy.
-- **Liveness or startup probes.** Pods carry a readiness probe only. Memgraph opens no port until every database is recovered, so a liveness check could only ever kill a recovery that outlived a guessed budget — and a recovery longer than the guess would never finish, because every kill starts it over. A recovering data instance shows `0/1` until it is done and is restarted by nothing but its own exit; restarting a running instance is the [rolling restart](#what-v1alpha1-does-and-does-not-do)'s job, which knows the cluster's state.
+- **Liveness or startup probes.** Pods carry a readiness probe only. Memgraph opens no port until every database is recovered, so a liveness check could only ever kill a recovery that outlived a guessed budget — and a recovery longer than the guess would never finish, because every kill starts it over. A recovering data instance shows `0/1` until it is done and is restarted by nothing but its own exit; restarting a running instance is the [rolling restart](docs/rolling-restart-pacing.md)'s job, which knows the cluster's state.
 - **NodePort or ingress exposure**, a declared hostname without external-dns, or attaching to a Gateway you already run — see [what external access leaves out](docs/external-access.md#not-in-scope).
-- **TLS**, for Bolt or intra-cluster traffic — the addresses external access announces are plain Bolt.
 - **Bolt authentication** — the operator connects to the coordinators unauthenticated, so clusters must not enable auth yet.
 - **The rest of the HA chart's monitoring**: the `mg-exporter` and its JSON format, the logs dashboard ConfigMap, the Kubernetes infrastructure metrics the chart's vmagent can scrape alongside Memgraph's, and monitoring objects placed in another namespace — see [what monitoring leaves out](docs/monitoring.md#not-in-scope). (The operator itself serves controller-runtime metrics; see the [chart README](charts/memgraph-operator/README.md).)
 - **Standalone (non-HA) topology.** The API is shaped to grow one without a breaking change, but v1alpha1 provisions HA clusters only.
-- **Init containers, sidecars, snapshot-restore fields** and the rest of the HA chart's surface — parity roadmap, not MVP.
+- **Snapshot-restore fields** (the chart's per-instance `restoreDataFromSnapshot`, see [`docs/backup-restore.md`](docs/backup-restore.md#what-the-charts-restore-knobs-became)) and the rest of the HA chart's surface — parity roadmap, not MVP.
 
 ## Relationship to the memgraph-high-availability chart
 

@@ -7,7 +7,7 @@ kubectl describe mgc my-cluster        # the Events section at the bottom
 kubectl events --for mgc/my-cluster    # the same, as a list
 ```
 
-Events are recorded through the `events.k8s.io/v1` API. Each carries a reason, an action and a note. Where the action touched a pod, a claim or a StatefulSet, that object is the Event's `related` object, so `kubectl describe` on it shows the Event too.
+Events are recorded through the `events.k8s.io/v1` API. Each carries a reason, an action and a note. Every Event's subject is the `MemgraphCluster`. Where the action touched a pod, a claim or a StatefulSet (`PodRestarted`, `SettingApplied` and `SettingRejected` on a pod, `VolumeExpansionRequested`, `StatefulSetOrphaned`), that object is recorded as the Event's `related` object, visible with `kubectl get events.events.k8s.io -o yaml`; `kubectl describe` on that object does not list it.
 
 ## Reasons
 

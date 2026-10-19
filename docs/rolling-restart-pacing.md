@@ -98,7 +98,8 @@ the signature; the operator's default is INFO, so set `log-level: TRACE` in `spe
 ## Diagnosing a slow or apparently stuck roll
 
 1. The `Updated` condition names the gate: `WorkloadsNotReady`, `WaitingForCatchUp`,
-   `NoCaughtUpSurvivor`, or `RollingRestartInProgress` with the pod being restarted.
+   `NoCaughtUpSurvivor`, `NoMainElected`, `NoCoordinatorLeader`, `FlagsUnclassified`, or
+   `RollingRestartInProgress` with the pod being restarted.
 
    ```sh
    kubectl get mgc <name> -n <ns> -o jsonpath='{range .status.conditions[*]}{.type}{"\t"}{.reason}{"\t"}{.message}{"\n"}{end}'

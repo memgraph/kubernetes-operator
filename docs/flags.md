@@ -27,7 +27,7 @@ kubectl exec memgraph-data-0 -c memgraph -- bash -c 'echo "SHOW DATABASE SETTING
 
 # A startup-only flag: the operator rolls the pods, data instances first, MAIN last of them.
 kubectl patch mgc memgraph --type=merge -p '{"spec":{"flags":{"data":{"storage-gc-cycle-sec":"60"}}}}'
-kubectl get mgc memgraph -w   # Updated=False while the roll runs, True once every pod is on the new template
+kubectl wait --for=condition=Updated mgc/memgraph --timeout=30m   # Updated=False while the roll runs, True once every pod is on the new template
 ```
 
 A merge patch merges the map key by key: a key it names is set, a key it leaves out is kept, and a key set to `null` is removed, as in `{"spec":{"flags":{"data":{"storage-gc-cycle-sec":null}}}}`. `kubectl get mgc memgraph -o jsonpath='{.status.conditions}'` shows whether the operator is still owed a setting (`Converged=False`, reasons below), and the rendered flag file is readable at any time:
@@ -85,7 +85,7 @@ The flags this covers, with the setting each maps to, as of Memgraph 3.13.0:
 
 The table lives in the operator (`internal/settings`) and is checked against Memgraph's source on an image bump. On an older Memgraph that does not yet know a setting at run time, the `SET` is refused and reported as below; the flag file still carries the value for the next restart.
 
-Every other flag is read at startup only. A change to one changes the pod template — through an annotation hashing the startup-only flags, so a run-time change leaves the template untouched — and the operator rolls both roles' pods in the usual order: data instances before coordinators, the MAIN last of its role, the Raft leader last of its, each step gated on replication lag. An edit that changes both kinds does both: the run-time values land on every pod at once, and the roll carries the rest.
+Every other flag is read at startup only. A change to one changes the pod template — through an annotation hashing the startup-only flags, so a run-time change leaves the template untouched — and the operator rolls that role's pods in the usual order: data instances with the MAIN last, coordinators with the Raft leader last, the data steps gated on replication catch-up. An edit that changes both kinds does both: the run-time values land on every pod at once, and the roll carries the rest.
 
 ## What the resource reports
 
@@ -94,13 +94,13 @@ Run-time settings are applied on the pass that finds the cluster registered, bef
 - `Converged=False` with reason **`SettingsPending`** names the ready pods that did not answer. The usual cause is a Bolt endpoint lagging its pod's readiness by a few seconds; the pass retries on a delay. A pod that is not ready is not dialed and not reported — it is the roll's or the kubelet's business, and the flag file has its settings for when it comes up.
 - `Converged=False` with reason **`SettingsRejected`** names the pod, the exact `SET DATABASE SETTING` and Memgraph's error, verbatim: a value the setting's validator refuses (`Boolean value supports only 'false' or 'true'`, `Unsupported log level`), or `Unknown setting name` on a Memgraph that does not have the setting at run time. It is retried every pass and only a changed flag clears it. The operator never escalates to a restart on its own: a value an instance refuses at run time it would refuse at startup too, and crash-loop on.
 
-`Ready` carries the same reason, since it summarizes `Converged`, but a refused log level does not make a MAIN stop serving: `status.main` still names it. `Updated` is the roll's, as before.
+`Ready` carries the same reason unless the cluster is not serving or `LicenseApplied` is False, since it summarizes them in that order before `Converged`, but a refused log level does not make a MAIN stop serving: `status.main` still names it. `Updated` is the roll's, as before.
 
 ## Removing a flag
 
 Removing a key removes its line from the flag file and issues no `SET`. For a startup-only flag that is a template change like any other, and the roll brings every pod onto Memgraph's default. For a run-time flag the running instances keep their current value until they next restart without the flag — and for the few settings Memgraph persists across restarts (`timezone`, `storage-gc-aggressive`, `hops-limit-partial-results`, `storage-omit-vector-index-properties-on-return`, `bolt-server-name-for-init`, `file-download-conn-timeout-sec`, the three slow-query log settings), even then: Memgraph restores the last value it was set to whenever the flag is not given explicitly, and has no way to reset one to its default. Set the default by hand with `SET DATABASE SETTING`, or write it into the map, if you need it back before the core offers a reset.
 
-One exception, by design: a flag the operator has a default for (`log-level`, `also-log-to-stderr`, `log-retention-days`) goes back to that default when you remove your override, because the flag file then says so and the operator keeps the running instances in line with the file.
+One exception, by design: a flag the operator has a default for (`log-level`, `also-log-to-stderr`, `log-retention-days`) goes back to that default when you remove your override, because the flag file then says so: `log-level` and `also-log-to-stderr` are set back on the running instances, and `log-retention-days`, a startup-only flag, rolls the pods.
 
 ## Coordinator settings
 
