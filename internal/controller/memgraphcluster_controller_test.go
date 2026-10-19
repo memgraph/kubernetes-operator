@@ -2374,7 +2374,7 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			Expect(len(converged.Message)).To(BeNumerically("<=", 1024))
 			Expect(converged.Message).To(ContainSubstring("The storage driver reports ..."))
 			Expect(converged.Message).To(HaveSuffix("RESPONSE 409: 409 Conflict ERROR CODE: OperationNotAllowed " +
-				"Change in disk property of VM of size 'Standard_A2_v2' is not supported.; see docs/storage-resize.md"))
+				"Change in disk property of VM of size 'Standard_A2_v2' is not supported."))
 		})
 	})
 
