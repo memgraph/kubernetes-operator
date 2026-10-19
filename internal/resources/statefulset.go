@@ -448,7 +448,7 @@ func uploaderSidecar(coreDumps normalizedCoreDumps) corev1.Container {
 }
 
 // volumeMounts are the Memgraph container's mounts: lib storage, the role's
-// flag file, the scratch directory the read-only root filesystem needs, the
+// flag file, the system user's hash, the scratch directory the read-only root filesystem needs, the
 // core dumps directory when the role collects dumps, the Bolt and
 // intra-cluster certificates when the cluster has those modes, and last the
 // role's own extra mounts.
@@ -456,6 +456,7 @@ func volumeMounts(spec normalizedSpec, role normalizedRole) []corev1.VolumeMount
 	mounts := []corev1.VolumeMount{
 		{Name: libVolumeName, MountPath: libMountPath},
 		{Name: flagsVolumeName, MountPath: flagsMountPath, ReadOnly: true},
+		systemUserVolumeMount(),
 		{Name: tmpVolumeName, MountPath: tmpMountPath},
 	}
 	if role.coreDumps.enabled {
@@ -473,8 +474,8 @@ func volumeMounts(spec normalizedSpec, role normalizedRole) []corev1.VolumeMount
 	return append(mounts, role.extraMounts...)
 }
 
-// podVolumes is the role's flag file, the scratch directory the read-only root
-// filesystem needs, the certificate Secrets of the TLS modes the cluster has,
+// podVolumes is the role's flag file, the system user's hash, the scratch
+// directory the read-only root filesystem needs, the certificate Secrets of the TLS modes the cluster has,
 // plus the role's extra volumes. Everything persistent comes from
 // volumeClaimTemplates instead.
 //
@@ -488,8 +489,8 @@ func podVolumes(
 	role normalizedRole,
 	flagsConfigMap string,
 ) []corev1.Volume {
-	volumes := make([]corev1.Volume, 0, 4+len(role.extraVolumes))
-	volumes = append(volumes, flagsVolume(flagsConfigMap), corev1.Volume{
+	volumes := make([]corev1.Volume, 0, 5+len(role.extraVolumes))
+	volumes = append(volumes, flagsVolume(flagsConfigMap), systemUserVolume(cluster), corev1.Volume{
 		Name: tmpVolumeName, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
 	})
 	if spec.boltTLSSecret != "" {

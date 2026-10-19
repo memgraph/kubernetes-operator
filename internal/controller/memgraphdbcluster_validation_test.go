@@ -951,6 +951,13 @@ var _ = Describe("MemgraphDBCluster CRD validation", func() {
 					Flags: memgraphcomv1alpha1.FlagsSpec{Coordinators: map[string]memgraphcomv1alpha1.FlagValue{"license-key": "hunter2"}},
 				},
 				"the license (license-key, organization-name)"),
+			// The operator points Memgraph at the system user's hash; a user
+			// setting the flag would lock the operator out or turn it off.
+			Entry("a flag naming the system user's hash file", "invalid-flags-system-user",
+				memgraphcomv1alpha1.MemgraphDBClusterSpec{
+					Flags: memgraphcomv1alpha1.FlagsSpec{Data: map[string]memgraphcomv1alpha1.FlagValue{"system-user-internal-hash-file": ""}},
+				},
+				"the system user's hash file"),
 			// Two spellings of one flag would be two lines for one flag, with
 			// gflags silently taking whichever came last.
 			Entry("two keys spelling the same flag", "invalid-flags-duplicate",

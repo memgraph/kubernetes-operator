@@ -836,11 +836,12 @@ spec:
                       rule: self.all(k, k.matches('^[A-Za-z][A-Za-z0-9_-]*$'))
                     - message: 'flags must not set a port, a listen address, the coordinator
                         identity, the data directory, the log file, a TLS file, the
-                        metrics format, the license (license-key, organization-name)
-                        or the AWS configuration (aws-access-key, aws-secret-key,
-                        aws-region, aws-endpoint-url): the operator derives the former,
-                        and the latter come from the secrets and awsCredentials blocks'
-                      rule: self.all(k, !k.replace('-', '_').matches('^(bolt_port|management_port|coordinator_port|coordinator_id|coordinator_hostname|data_directory|log_file|bolt_cert_file|bolt_key_file|cluster_cert_file|cluster_key_file|cluster_ca_file|metrics_format|metrics_port|monitoring_port|bolt_address|monitoring_address|aws_access_key|aws_secret_key|aws_region|aws_endpoint_url|license_key|organization_name)$'))
+                        metrics format, the system user''s hash file, the license
+                        (license-key, organization-name) or the AWS configuration
+                        (aws-access-key, aws-secret-key, aws-region, aws-endpoint-url):
+                        the operator derives the former, and the latter come from
+                        the secrets and awsCredentials blocks'
+                      rule: self.all(k, !k.replace('-', '_').matches('^(bolt_port|management_port|coordinator_port|coordinator_id|coordinator_hostname|data_directory|log_file|bolt_cert_file|bolt_key_file|cluster_cert_file|cluster_key_file|cluster_ca_file|metrics_format|metrics_port|monitoring_port|bolt_address|monitoring_address|aws_access_key|aws_secret_key|aws_region|aws_endpoint_url|license_key|organization_name|system_user_internal_hash_file)$'))
                     - message: two keys spell the same flag
                       rule: self.all(k, self.all(j, k == j || k.replace('-', '_')
                         != j.replace('-', '_')))
@@ -874,11 +875,12 @@ spec:
                       rule: self.all(k, k.matches('^[A-Za-z][A-Za-z0-9_-]*$'))
                     - message: 'flags must not set a port, a listen address, the coordinator
                         identity, the data directory, the log file, a TLS file, the
-                        metrics format, the license (license-key, organization-name)
-                        or the AWS configuration (aws-access-key, aws-secret-key,
-                        aws-region, aws-endpoint-url): the operator derives the former,
-                        and the latter come from the secrets and awsCredentials blocks'
-                      rule: self.all(k, !k.replace('-', '_').matches('^(bolt_port|management_port|coordinator_port|coordinator_id|coordinator_hostname|data_directory|log_file|bolt_cert_file|bolt_key_file|cluster_cert_file|cluster_key_file|cluster_ca_file|metrics_format|metrics_port|monitoring_port|bolt_address|monitoring_address|aws_access_key|aws_secret_key|aws_region|aws_endpoint_url|license_key|organization_name)$'))
+                        metrics format, the system user''s hash file, the license
+                        (license-key, organization-name) or the AWS configuration
+                        (aws-access-key, aws-secret-key, aws-region, aws-endpoint-url):
+                        the operator derives the former, and the latter come from
+                        the secrets and awsCredentials blocks'
+                      rule: self.all(k, !k.replace('-', '_').matches('^(bolt_port|management_port|coordinator_port|coordinator_id|coordinator_hostname|data_directory|log_file|bolt_cert_file|bolt_key_file|cluster_cert_file|cluster_key_file|cluster_ca_file|metrics_format|metrics_port|monitoring_port|bolt_address|monitoring_address|aws_access_key|aws_secret_key|aws_region|aws_endpoint_url|license_key|organization_name|system_user_internal_hash_file)$'))
                     - message: two keys spell the same flag
                       rule: self.all(k, self.all(j, k == j || k.replace('-', '_')
                         != j.replace('-', '_')))

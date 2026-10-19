@@ -64,10 +64,12 @@ whether or not the cluster serves those groups; a cluster without them simply ne
 the rules. Leader election adds a Lease and
 Events in the operator's own namespace, and the
 metrics endpoint adds the TokenReview/SubjectAccessReview permissions it authorizes scrapes
-with. Secrets are read-only and only for the license and the AWS credentials: `list`/`watch`
-feed a metadata-only informer that notices a changed license or AWS credentials Secret, and `get`
-reads that one Secret uncached, so a renewal or rotation reaches running pods with
-`SET DATABASE SETTING`. No Secret data is cached, and no Secret is ever written.
+with. Secrets are read for the license and the AWS credentials: `list`/`watch` feed a
+metadata-only informer that notices a changed license or AWS credentials Secret, and `get` reads
+that one Secret uncached, so a renewal or rotation reaches running pods with
+`SET DATABASE SETTING`. No Secret data is cached. The only Secrets written are each cluster's two
+of the `memgraph_internal` system user the operator logs in as: `create` for its generated
+password, `patch` for the bcrypt hash the pods mount. A Secret you name is never written.
 
 ## Values
 
