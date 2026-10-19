@@ -106,10 +106,10 @@ var _ = AfterSuite(func() {
 	cmd := exec.Command("helm", "uninstall", releaseName, "--namespace", namespace, "--wait")
 	_, _ = utils.Run(cmd)
 
-	// Helm never removes CRDs it installed, so the documented uninstall ends
-	// with deleting them explicitly.
+	// The chart keeps its CRD on uninstall, so the documented uninstall ends
+	// with deleting it explicitly.
 	By("uninstalling CRDs")
-	cmd = exec.Command("kubectl", "delete", "-f", chartDir+"/crds", "--ignore-not-found=true")
+	cmd = exec.Command("kubectl", "delete", "crd", "memgraphclusters.memgraph.com", "--ignore-not-found=true")
 	_, _ = utils.Run(cmd)
 
 	By("removing manager namespace")
