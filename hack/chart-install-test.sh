@@ -150,11 +150,11 @@ if [ "${remaining}" -ne 0 ]; then
   exit 1
 fi
 
-# Helm leaves CRDs behind by design, so the documented uninstall removes them
-# explicitly. Both halves are asserted: still present after uninstall, gone
-# after the delete.
+# The chart keeps its CRD on uninstall (helm.sh/resource-policy: keep), so the
+# documented uninstall removes it explicitly. Both halves are asserted: still
+# present after uninstall, gone after the delete.
 "${KUBECTL}" get crd "${CRD_NAME}" >/dev/null
-"${KUBECTL}" delete -f "${CHART_DIR}/crds"
+"${KUBECTL}" delete crd "${CRD_NAME}"
 if "${KUBECTL}" get crd "${CRD_NAME}" >/dev/null 2>&1; then
   echo "FAIL: ${CRD_NAME} survived the CRD deletion" >&2
   exit 1
