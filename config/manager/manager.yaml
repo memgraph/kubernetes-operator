@@ -92,10 +92,10 @@ spec:
         resources:
           limits:
             cpu: 500m
-            memory: 128Mi
+            memory: 2Gi
           requests:
             cpu: 10m
-            memory: 64Mi
+            memory: 2Gi
         volumeMounts: []
       volumes: []
       serviceAccountName: controller-manager

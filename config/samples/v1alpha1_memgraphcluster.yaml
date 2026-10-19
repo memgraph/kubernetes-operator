@@ -279,8 +279,7 @@ spec:
       # podAntiAffinity: {}
       # priorityClassName: system-cluster-critical
     data:
-      nodeSelector:
-        agentpool: resize
+      nodeSelector: {}
         # role: data-node
       tolerations: []
       topologySpreadConstraints: []
