@@ -86,7 +86,7 @@ reads that one Secret uncached, so a renewal or rotation reaches running pods wi
 | `imagePullSecrets` | `[]` | Secrets used to pull the operator image |
 | `replicaCount` | `1` | Controller replicas |
 | `leaderElection.enabled` | `true` | Elect a leader, so a second replica can stand by |
-| `resources` | 10m/64Mi requests, 500m/128Mi limits | Controller container resources |
+| `resources` | 10m/2Gi requests, 500m/2Gi limits | Controller container resources |
 | `metrics.enabled` | `true` | Serve the controller-runtime metrics endpoint and create its Service |
 | `metrics.port` | `8443` | Port the metrics endpoint binds to |
 | `metrics.secure` | `true` | Serve metrics over HTTPS with authenticated, authorized scrapes |
