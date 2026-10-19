@@ -17,8 +17,6 @@ name: Release
 #                and creating the tag and the GitHub release on the commit the
 #                run built. A SemVer prerelease (0.2.0-rc.1) publishes for
 #                real, but never moves :latest.
-#
-# See docs/releasing.md for the procedure and the credentials this needs.
 
 on:
   workflow_dispatch:
@@ -132,7 +130,7 @@ jobs:
           [ -n "${DOCKERHUB_USERNAME}" ] || missing+=(DOCKERHUB_USERNAME)
           [ -n "${DOCKERHUB_TOKEN}" ] || missing+=(DOCKERHUB_TOKEN)
           if [ ${#missing[@]} -gt 0 ]; then
-            echo "::error::Missing repository secrets: ${missing[*]}. See docs/releasing.md for what they are."
+            echo "::error::Missing repository secrets: ${missing[*]}."
             exit 1
           fi
 

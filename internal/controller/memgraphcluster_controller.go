@@ -962,18 +962,16 @@ type volumeOutcome struct {
 func (o volumeOutcome) growingMessage() string {
 	message := "Waiting for " + strings.Join(o.growing, ", ") + " to reach the declared size"
 	if len(o.errors) == 0 {
-		return message + ". This takes about a minute on a storage driver that grows volumes in use; " +
-			"see docs/storage-resize.md if it persists"
+		return message + ". This takes about a minute on a storage driver that grows volumes in use"
 	}
 	message += ". The storage driver reports "
-	const suffix = "; see docs/storage-resize.md"
 	// A driver's error ends with its reason — gRPC's "desc = ...", then the
 	// cloud API's own message — so one too long to fit keeps its tail.
 	report := o.errors[0]
-	if room := maxConditionMessage - len(message) - len(suffix); len(report) > room {
+	if room := maxConditionMessage - len(message); len(report) > room {
 		report = "..." + report[len(report)-max(room-3, 0):]
 	}
-	return message + report + suffix
+	return message + report
 }
 
 func (o volumeOutcome) done() bool {

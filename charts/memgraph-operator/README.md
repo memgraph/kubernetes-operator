@@ -2,8 +2,7 @@
 
 Installs the Memgraph Kubernetes operator: the `MemgraphCluster` CustomResourceDefinition, a
 least-privilege RBAC set, and the controller Deployment. Declaring a cluster is then a single
-resource — see the [repository README](../../README.md) and its
-[`docs/`](../../docs).
+resource — see the [repository README](../../README.md).
 
 The chart lives in the operator repository next to the generated manifests: the CRDs under
 `crds/` and the manager's RBAC rules under `rbac/` are generated from the Go types and the
@@ -23,8 +22,7 @@ The operator watches every namespace, so one release per cluster is enough.
 
 The chart is maintained in `memgraph/kubernetes-operator` and published to that index. `helm search
 repo memgraph/memgraph-operator --versions` lists what is available, and the chart's `appVersion`
-is the operator version an install runs by default. The two version numbers move independently —
-see [`docs/releasing.md`](../../docs/releasing.md).
+is the operator version an install runs by default. The two version numbers move independently.
 
 Installing from a checkout works the same way:
 
