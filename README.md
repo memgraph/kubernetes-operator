@@ -161,7 +161,7 @@ kubectl delete pvc -n memgraph --all
 kubectl delete namespace memgraph
 ```
 
-Uninstall the operator with `helm uninstall memgraph-operator --namespace memgraph-operator-system`. The chart keeps the CRD on uninstall, so `kubectl delete crd memgraphclusters.memgraph.com` once no cluster needs it — see the [chart README](charts/memgraph-operator/README.md) for the values and for upgrading from chart 1.1.0 or earlier.
+Uninstall the operator with `helm uninstall memgraph-operator --namespace memgraph-operator-system`. The chart keeps the CRD on uninstall, so `kubectl delete crd memgraphclusters.memgraph.com` once no cluster needs it — see the [chart README](charts/memgraph-operator/README.md) for the values and for upgrading from a chart that shipped the CRD under `crds/`.
 
 ## Configuration
 
