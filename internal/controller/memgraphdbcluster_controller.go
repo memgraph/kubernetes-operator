@@ -67,12 +67,6 @@ import (
 // manager of the workload objects it provisions.
 const fieldOwner = "memgraph-operator"
 
-// workloadObjectsPerRole is how many objects every cluster gets per role,
-// whatever its spec: a headless Service, a flags ConfigMap and a
-// StatefulSet. Reconcile sizes the list of desired objects with it, before
-// the optional external and monitoring ones are appended.
-const workloadObjectsPerRole = 3
-
 const (
 	// requeueWhilePending is how long to wait before retrying when the
 	// cluster cannot be registered yet — pods not ready, or coordinators not
@@ -312,8 +306,7 @@ func (r *MemgraphDBClusterReconciler) reconcileCluster(
 	// is shed, and the pass that sheds the pod is the one that drops its way in.
 	external := r.desiredExternal(cluster, replicas.data.applied)
 	monitoring := r.desiredMonitoring(cluster, replicas)
-	desired := make([]client.Object, 0, 2*workloadObjectsPerRole+1+len(external)+len(monitoring))
-	desired = append(desired,
+	desired := slices.Concat([]client.Object{
 		resources.CoordinatorHeadlessService(cluster),
 		resources.DataHeadlessService(cluster),
 		// The flag files and the system user's hash go before the StatefulSets
@@ -323,9 +316,7 @@ func (r *MemgraphDBClusterReconciler) reconcileCluster(
 		systemUserHash,
 		coordinatorSet,
 		dataSet,
-	)
-	desired = append(desired, external...)
-	desired = append(desired, monitoring...)
+	}, external, monitoring)
 	applied, err := r.applyDesired(ctx, cluster, desired...)
 	if err != nil {
 		return ctrl.Result{}, err
