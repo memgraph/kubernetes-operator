@@ -68,8 +68,9 @@ with. Secrets are read for the license and the AWS credentials: `list`/`watch` f
 metadata-only informer that notices a changed license or AWS credentials Secret, and `get` reads
 that one Secret uncached, so a renewal or rotation reaches running pods with
 `SET DATABASE SETTING`. No Secret data is cached. The only Secrets written are each cluster's two
-of the `memgraph_internal` system user the operator logs in as: `create` for its generated
-password, `patch` for the bcrypt hash the pods mount. A Secret you name is never written.
+for the `memgraph_internal` system user the operator logs in as: `create` for its generated
+password, which only the operator reads, and `patch` for the bcrypt hash the pods mount, kept
+apart so the password never reaches a Memgraph pod. A Secret you name is never written.
 
 ## Values
 

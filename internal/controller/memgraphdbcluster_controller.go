@@ -197,14 +197,15 @@ type MemgraphDBClusterReconciler struct {
 // ConfigMap but the cache holds only the operator's own.
 // +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch;create;patch;delete
 //
-// Secrets are read for the license and the AWS credentials: a pod reads those
-// Secrets when it starts, so a renewal or a rotation reaches running pods only
-// if the operator reads it too and SETs it. list and watch feed a
-// metadata-only informer that maps a changed Secret to the clusters naming it,
-// and get reads that one Secret uncached; no Secret data is ever cached. The
-// only Secrets written are the two of the system user the operator logs in as
-// (create for its password, patch for the hash the pods mount), never one a
-// user named.
+// Secrets the operator reads: the license and the AWS credentials. Pods read
+// these only when they start, so to get a new value onto running pods the
+// operator reads it itself and SETs it. list and watch only notice that one
+// of these Secrets changed (metadata, never the values); get then reads the
+// value directly, without caching it.
+//
+// Secrets the operator writes: only the system user's two, both its own.
+// create makes the password Secret, patch updates the hash Secret the pods
+// mount. A Secret named in the spec is never written.
 // +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch;create;patch
 
 // Reconcile drives the cluster toward the declared MemgraphDBCluster spec in
