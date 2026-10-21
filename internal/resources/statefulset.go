@@ -300,7 +300,7 @@ func awsCredentials(secret string) ([]corev1.EnvVar, []string) {
 }
 
 // memgraphContainer builds the parts of the Memgraph container shared by both
-// roles: image, license env wiring, the role's extra environment and resources,
+// roles: image, the role's extra environment and resources,
 // storage mounts, and the restricted security context.
 func memgraphContainer(spec normalizedSpec, role normalizedRole) corev1.Container {
 	return corev1.Container{
@@ -308,29 +308,7 @@ func memgraphContainer(spec normalizedSpec, role normalizedRole) corev1.Containe
 		Image:           spec.image,
 		ImagePullPolicy: spec.pullPolicy,
 		Resources:       role.resources,
-		// The license variables come first and the role's extra environment
-		// last; admission rejects an extra variable that repeats one of the
-		// names the operator owns, so the two can never collide.
-		Env: append([]corev1.EnvVar{
-			{
-				Name: memgraphcomv1alpha1.EnvLicense,
-				ValueFrom: &corev1.EnvVarSource{
-					SecretKeyRef: &corev1.SecretKeySelector{
-						LocalObjectReference: corev1.LocalObjectReference{Name: spec.secretName},
-						Key:                  spec.licenseKey,
-					},
-				},
-			},
-			{
-				Name: memgraphcomv1alpha1.EnvOrganization,
-				ValueFrom: &corev1.EnvVarSource{
-					SecretKeyRef: &corev1.SecretKeySelector{
-						LocalObjectReference: corev1.LocalObjectReference{Name: spec.secretName},
-						Key:                  spec.organizationKey,
-					},
-				},
-			},
-		}, role.env...),
+		Env:             role.env,
 		VolumeMounts:    volumeMounts(spec, role),
 		SecurityContext: restrictedSecurityContext(),
 	}
@@ -521,8 +499,8 @@ func volumeMounts(spec normalizedSpec, role normalizedRole) []corev1.VolumeMount
 	mounts := []corev1.VolumeMount{
 		{Name: libVolumeName, MountPath: libMountPath},
 		{Name: flagsVolumeName, MountPath: flagsMountPath, ReadOnly: true},
+		{Name: tmpVolumeName, MountPath: tmpMountPath},
 	}
-	mounts = append(mounts, corev1.VolumeMount{Name: tmpVolumeName, MountPath: tmpMountPath})
 	if role.coreDumps.enabled {
 		mounts = append(mounts,
 			corev1.VolumeMount{Name: coreDumpsVolumeName, MountPath: coreDumpsMountPath})
@@ -546,7 +524,7 @@ func volumeMounts(spec normalizedSpec, role normalizedRole) []corev1.VolumeMount
 // The certificate Secrets are projected by key name: tls.crt and tls.key, the
 // shape of a kubernetes.io/tls Secret, plus ca.crt for the intra-cluster one.
 // A Secret carrying more keys mounts fine, and one missing a key keeps the pod
-// from starting, which is how a missing license Secret is reported too.
+// from starting.
 func podVolumes(
 	cluster *memgraphcomv1alpha1.MemgraphDBCluster,
 	spec normalizedSpec,

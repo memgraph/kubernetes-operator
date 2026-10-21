@@ -17,10 +17,10 @@ limitations under the License.
 package settings
 
 // The run-time settings Memgraph keeps the enterprise license in, as SHOW
-// DATABASE SETTINGS names them. They are not flags: the pod reads the license
-// from its environment at startup, and Memgraph stores whichever valid license
-// it ends up with under these two names, which is also where a SET DATABASE
-// SETTING changes it on a running instance.
+// DATABASE SETTINGS names them. They are not flags, and the pod is not handed
+// the license at startup in any other way: the operator SETs both on every
+// ready instance from the Secret, so these two names are the only place the
+// license lives.
 const (
 	LicenseSetting      = "enterprise.license"
 	OrganizationSetting = "organization.name"

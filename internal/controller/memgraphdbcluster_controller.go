@@ -2206,16 +2206,16 @@ func secretSetting(change settings.Change) string {
 
 // reconcileLicense brings every ready pod's license in line with the Secret
 // the secrets block names and returns the LicenseApplied condition saying how
-// far that got. A pod reads the Secret into its environment only when it
-// starts, so this is what makes a renewal written to the Secret live without
-// a restart: one connection per ready pod of both roles, since a setting is
-// local to the instance that receives it, each read before it is written.
+// far that got. No pod reads the Secret itself, so this is the only way a
+// license reaches an instance, at bootstrap and on renewal alike: one
+// connection per ready pod of both roles, since a setting is local to the
+// instance that receives it, each read before it is written.
 //
 // Nothing here fails the pass, and nothing here restarts a pod. A Secret or
 // key that cannot be read and a pod that does not answer are pending and
 // retried next pass; a SET an instance refuses names the pod and Memgraph's
-// error. A pod that is not ready is skipped: it reads the Secret itself when
-// it starts.
+// error. A pod that is not ready is skipped: it has no Bolt server to answer
+// yet, and turning ready brings the pass that licenses it.
 //
 // The license is secret material: it is sent to Memgraph and compared, and
 // never logged, put in an event or written to status.

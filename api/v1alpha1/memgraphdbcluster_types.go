@@ -134,12 +134,6 @@ const (
 // Names of the environment variables the operator itself sets on the Memgraph
 // container, which extraEnv therefore may not carry.
 const (
-	// EnvLicense holds the enterprise license, wired from the secrets block.
-	EnvLicense = "MEMGRAPH_ENTERPRISE_LICENSE"
-
-	// EnvOrganization holds the organization name, wired from the secrets block.
-	EnvOrganization = "MEMGRAPH_ORGANIZATION_NAME"
-
 	// The EnvAWS variables hold a data instance's AWS configuration, wired
 	// from the awsCredentials block. Memgraph does not read them itself: the
 	// command line hands them to --aws-access-key, --aws-secret-key,

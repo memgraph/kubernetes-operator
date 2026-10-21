@@ -299,9 +299,12 @@ var _ = Describe("MemgraphDBCluster Controller", func() {
 				Expect(podSpec.SecurityContext.RunAsUser).To(HaveValue(Equal(int64(101))))
 				Expect(podSpec.SecurityContext.RunAsGroup).To(HaveValue(Equal(int64(103))))
 
-				licenseRef := container.Env[len(container.Env)-2].ValueFrom.SecretKeyRef
-				Expect(licenseRef.Name).To(Equal("memgraph-secrets"))
-				Expect(licenseRef.Key).To(Equal("MEMGRAPH_ENTERPRISE_LICENSE"))
+				for _, variable := range container.Env {
+					if variable.ValueFrom != nil && variable.ValueFrom.SecretKeyRef != nil {
+						Expect(variable.ValueFrom.SecretKeyRef.Name).NotTo(Equal("memgraph-secrets"),
+							"the license reaches pods only as a database setting, never as env that goes stale on renewal")
+					}
+				}
 			}
 
 			for _, suffix := range []string{coordinatorSuffix, dataSuffix} {
@@ -431,12 +434,12 @@ var _ = Describe("MemgraphDBCluster Controller", func() {
 				Expect(container.Image).To(Equal("registry.example.com/memgraph:3.13.0"))
 				Expect(container.ImagePullPolicy).To(Equal(corev1.PullAlways))
 
-				licenseRef := container.Env[len(container.Env)-2].ValueFrom.SecretKeyRef
-				Expect(licenseRef.Name).To(Equal(customSecretName))
-				Expect(licenseRef.Key).To(Equal("license"))
-				organizationRef := container.Env[len(container.Env)-1].ValueFrom.SecretKeyRef
-				Expect(organizationRef.Name).To(Equal(customSecretName))
-				Expect(organizationRef.Key).To(Equal("organization"))
+				for _, variable := range container.Env {
+					if variable.ValueFrom != nil && variable.ValueFrom.SecretKeyRef != nil {
+						Expect(variable.ValueFrom.SecretKeyRef.Name).NotTo(Equal(customSecretName),
+							"the license reaches pods only as a database setting, never as env that goes stale on renewal")
+					}
+				}
 
 				Expect(sts.Spec.PersistentVolumeClaimRetentionPolicy).To(HaveValue(Equal(
 					appsv1.StatefulSetPersistentVolumeClaimRetentionPolicy{

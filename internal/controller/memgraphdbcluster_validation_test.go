@@ -815,7 +815,7 @@ var _ = Describe("MemgraphDBCluster CRD validation", func() {
 				memgraphcomv1alpha1.MemgraphDBClusterSpec{
 					ExtraEnv: memgraphcomv1alpha1.ExtraEnvSpec{
 						Data: []memgraphcomv1alpha1.EnvVar{{
-							Name:  memgraphcomv1alpha1.EnvLicense,
+							Name:  "MEMGRAPH_ENTERPRISE_LICENSE",
 							Value: "smuggled-license",
 						}},
 					},
