@@ -58,9 +58,9 @@ func (e *recordedEvents) Eventf(
 	e.keys = append(e.keys, key)
 }
 
-// merged returns the Events recorded since the first `since` that client-go
-// would fold into an earlier one of them instead of showing: same type,
-// reason, action and related object, whatever the note says.
+// merged returns the Events from index since on that client-go would fold
+// into an earlier one of them instead of showing: same type, reason, action
+// and related object, whatever the note says.
 func (e *recordedEvents) merged(since int) []string {
 	e.mu.Lock()
 	defer e.mu.Unlock()

@@ -41,9 +41,10 @@ import (
 // action, regarding and related object, seen within six minutes, into a
 // count on the earlier one's note; the note itself is not compared. With no
 // related object, adding coordinator_1 and then coordinator_2 reads as adding
-// coordinator_1 twice. So every action names the member it touched, and an
-// action with no object of its own (the coordinator settings) is one Event
-// per pass listing everything it did.
+// coordinator_1 twice. So every action names the member it touched, and a
+// step that SETs several settings is one Event listing them: per pod for the
+// database settings, per pass, on the Raft leader's pod, for the coordinator
+// settings.
 //
 // The Bolt commands are the reason Events exist at all: the Kubernetes audit
 // log sees every write the operator makes to the API server, but nothing it

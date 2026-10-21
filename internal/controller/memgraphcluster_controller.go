@@ -1444,7 +1444,7 @@ func (r *MemgraphClusterReconciler) reconcileRegistration(
 		// which keys to report as unknown, and which pods a changed template
 		// leaves with nothing to restart for.
 		classes := r.classifyFlags(ctx, cluster, leader, replicas, roles)
-		applied.merge(r.reconcileCoordinatorSettings(ctx, cluster, leader, classes))
+		applied.merge(r.reconcileCoordinatorSettings(ctx, cluster, leader, observedLeader(observed), classes))
 		applied.unknown = classes.unknownMessage()
 		converged := r.convergedCondition(ctx, cluster, topology, exposure, applied, claims)
 
@@ -1646,10 +1646,14 @@ const coordinatorSettingsSubject = "the Raft leader, which did not report the co
 // and a warning rather than an error. Writing on the strength of it would
 // re-issue every setting on every such pass, so the pass reports it pending
 // and tries again. A refused SET is reported like a refused per-instance one.
+//
+// The Events name the leader's pod, leaderName's, as the one that ran the
+// SETs: the settings themselves belong to no pod.
 func (r *MemgraphClusterReconciler) reconcileCoordinatorSettings(
 	ctx context.Context,
 	cluster *memgraphcomv1alpha1.MemgraphCluster,
 	leader memgraph.Client,
+	leaderName string,
 	classes flagClasses,
 ) settingsOutcome {
 	log := logf.FromContext(ctx)
@@ -1673,12 +1677,13 @@ func (r *MemgraphClusterReconciler) reconcileCoordinatorSettings(
 		return settingsOutcome{}
 	}
 	observed := classes.coordinatorSettings
-	// One Event for the pass rather than one per setting: these have no
-	// object of their own to tell them apart, see events.go.
+	// One Event for the pass rather than one per setting, like the
+	// per-instance settings (see events.go).
+	pod := coordinatorPodRef(cluster, leaderName)
 	var ran []string
 	recordRan := func() {
 		if len(ran) > 0 {
-			r.event(cluster, nil, EventReasonCoordinatorSettingApplied, eventActionSetCoordinatorSetting,
+			r.event(cluster, pod, EventReasonCoordinatorSettingApplied, eventActionSetCoordinatorSetting,
 				"Ran %s", strings.Join(ran, ", "))
 		}
 	}
@@ -1687,7 +1692,7 @@ func (r *MemgraphClusterReconciler) reconcileCoordinatorSettings(
 			recordRan()
 			rejected := fmt.Sprintf(
 				"the coordinators rejected SET COORDINATOR SETTING %q TO %q: %v", change.Setting, change.Value, err)
-			r.warning(cluster, nil, EventReasonSettingRejected, eventActionSetCoordinatorSetting, "%s", rejected)
+			r.warning(cluster, pod, EventReasonSettingRejected, eventActionSetCoordinatorSetting, "%s", rejected)
 			return settingsOutcome{rejected: []string{rejected}}
 		}
 		log.Info("Applied coordinator setting", "setting", change.Setting, "value", change.Value)
@@ -2702,13 +2707,7 @@ func (r *MemgraphClusterReconciler) observeCluster(
 			continue
 		}
 
-		leaderName := ""
-		for _, instance := range observed {
-			if instance.IsLeader() {
-				leaderName = instance.Name
-				break
-			}
-		}
+		leaderName := observedLeader(observed)
 		if leaderName == coordinator.Name {
 			return conn, observed, nil
 		}
@@ -2741,6 +2740,17 @@ func (r *MemgraphClusterReconciler) observeCluster(
 		return nil, nil, fmt.Errorf("%w: %w", errNoCoordinatorLeader, errors.Join(errs...))
 	}
 	return nil, nil, fmt.Errorf("no coordinator answered SHOW INSTANCES: %w", errors.Join(errs...))
+}
+
+// observedLeader is the coordinator a SHOW INSTANCES view reports as Raft
+// leader, empty when it reports none.
+func observedLeader(observed []memgraph.Instance) string {
+	for _, instance := range observed {
+		if instance.IsLeader() {
+			return instance.Name
+		}
+	}
+	return ""
 }
 
 // leaderAddress resolves the Bolt address the operator reaches the coordinator

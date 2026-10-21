@@ -3618,7 +3618,8 @@ var _ = Describe("MemgraphCluster Controller", func() {
 					`: SET COORDINATOR SETTING "` + downTimeoutSetting + `" TO "7"`,
 			))
 			Expect(recorded.withReason(EventReasonCoordinatorSettingApplied)).To(Equal([]string{
-				`Normal CoordinatorSettingApplied Ran SET COORDINATOR SETTING "` + downTimeoutSetting + `" TO "7"`,
+				`Normal CoordinatorSettingApplied Ran SET COORDINATOR SETTING "` + downTimeoutSetting + `" TO "7" [` +
+					resourceName + coordinatorSuffix + "-1]",
 			}))
 			Expect(condition(memgraphcomv1alpha1.ConditionConverged).Status).To(Equal(metav1.ConditionTrue))
 
