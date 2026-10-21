@@ -1985,10 +1985,10 @@ func exemptCurrentPods(roles *rolloutRoles, classes flagClasses) ([]string, bool
 
 // reconcileAWSCredentials brings every ready data instance's AWS configuration
 // (both credentials, the region and the endpoint URL) in line with the
-// awsCredentials Secret, one connection per pod, each read
-// before it is written. A data instance reads the Secret when it starts, so
-// this is what makes a rotation live without a restart; the coordinators run
-// no queries that read from AWS and are left alone.
+// awsCredentials Secret, one connection per pod, each read before it is
+// written. No pod reads the Secret itself, so this is the only way the values
+// reach an instance, for a new one and on a rotation alike; the coordinators
+// run no queries that read from AWS and are left alone.
 //
 // It reports into the run-time settings outcome, since that is what the four
 // values are: a Secret that cannot be read and a pod that does not answer
@@ -2045,10 +2045,10 @@ func (r *MemgraphDBClusterReconciler) reconcileAWSCredentials(
 	return outcome
 }
 
-// readAWSCredentials reads the four AWS values from the Secret, uncached like
-// the license, and returns them keyed by the settings they go to. A Secret
-// missing any key yields none: the pods cannot start on it either, and a
-// partial set is never applied.
+// readAWSCredentials reads the AWS values from the Secret, uncached like the
+// license, and returns them keyed by the settings they go to. Every key is
+// optional: one the Secret does not hold is left out, so its setting is not
+// managed and keeps whatever value the instance has.
 func (r *MemgraphDBClusterReconciler) readAWSCredentials(
 	ctx context.Context,
 	namespace, name string,
@@ -2067,11 +2067,9 @@ func (r *MemgraphDBClusterReconciler) readAWSCredentials(
 		{settings.AWSRegionSetting, memgraphcomv1alpha1.AWSRegionSecretKey},
 		{settings.AWSEndpointURLSetting, memgraphcomv1alpha1.AWSEndpointURLSecretKey},
 	} {
-		value, ok := secret.Data[credential.key]
-		if !ok {
-			return nil, fmt.Errorf("the Secret %s has no key %s", name, credential.key)
+		if value, ok := secret.Data[credential.key]; ok {
+			desired[credential.setting] = string(value)
 		}
-		desired[credential.setting] = string(value)
 	}
 	return desired, nil
 }

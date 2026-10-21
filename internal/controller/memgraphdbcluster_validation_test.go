@@ -820,17 +820,7 @@ var _ = Describe("MemgraphDBCluster CRD validation", func() {
 						}},
 					},
 				},
-				"MEMGRAPH_ENTERPRISE_LICENSE, MEMGRAPH_ORGANIZATION_NAME"),
-			Entry("an env var shadowing an AWS credential the awsCredentials block owns", "invalid-env-aws",
-				memgraphcomv1alpha1.MemgraphDBClusterSpec{
-					ExtraEnv: memgraphcomv1alpha1.ExtraEnvSpec{
-						Data: []memgraphcomv1alpha1.EnvVar{{
-							Name:  memgraphcomv1alpha1.EnvAWSSecretKey,
-							Value: "smuggled-secret",
-						}},
-					},
-				},
-				"they come from the secrets and awsCredentials blocks"),
+				"MEMGRAPH_ENTERPRISE_LICENSE or MEMGRAPH_ORGANIZATION_NAME"),
 			Entry("an awsCredentials block naming no Secret", "invalid-aws-no-secret",
 				memgraphcomv1alpha1.MemgraphDBClusterSpec{
 					AWSCredentials: &memgraphcomv1alpha1.AWSCredentialsSpec{},
@@ -883,6 +873,18 @@ var _ = Describe("MemgraphDBCluster CRD validation", func() {
 			Entry("a flag carrying an AWS credential", "invalid-flags-aws-secret",
 				memgraphcomv1alpha1.MemgraphDBClusterSpec{
 					Flags: memgraphcomv1alpha1.FlagsSpec{Data: map[string]memgraphcomv1alpha1.FlagValue{"aws-secret-key": "hunter2"}},
+				},
+				"the AWS configuration"),
+			Entry("a flag carrying the AWS access key", "invalid-flags-aws-access",
+				memgraphcomv1alpha1.MemgraphDBClusterSpec{
+					Flags: memgraphcomv1alpha1.FlagsSpec{Data: map[string]memgraphcomv1alpha1.FlagValue{"aws_access_key": "AKIAEXAMPLE"}},
+				},
+				"the AWS configuration"),
+			// Coordinators run no AWS queries, but a flag there would still start
+			// them on values no Secret holds.
+			Entry("a coordinator flag setting the AWS region", "invalid-flags-coord-aws",
+				memgraphcomv1alpha1.MemgraphDBClusterSpec{
+					Flags: memgraphcomv1alpha1.FlagsSpec{Coordinators: map[string]memgraphcomv1alpha1.FlagValue{"aws-region": "eu-west-1"}},
 				},
 				"the AWS configuration"),
 			// The region and endpoint are not secret, but they come from the

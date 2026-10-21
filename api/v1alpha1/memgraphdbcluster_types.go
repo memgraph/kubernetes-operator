@@ -134,16 +134,6 @@ const (
 // Names of the environment variables the operator itself sets on the Memgraph
 // container, which extraEnv therefore may not carry.
 const (
-	// The EnvAWS variables hold a data instance's AWS configuration, wired
-	// from the awsCredentials block. Memgraph does not read them itself: the
-	// command line hands them to --aws-access-key, --aws-secret-key,
-	// --aws-region and --aws-endpoint-url through Kubernetes' $(VAR)
-	// expansion, so the pod spec names the Secret and never a value.
-	EnvAWSAccessKey   = "MEMGRAPH_AWS_ACCESS_KEY"
-	EnvAWSSecretKey   = "MEMGRAPH_AWS_SECRET_KEY"
-	EnvAWSRegion      = "MEMGRAPH_AWS_REGION"
-	EnvAWSEndpointURL = "MEMGRAPH_AWS_ENDPOINT_URL"
-
 	// EnvPodName carries the pod's own name, from which a coordinator derives
 	// its zero-based ordinal identity and stable hostname at startup.
 	EnvPodName = "POD_NAME"
@@ -539,30 +529,27 @@ type SecretReference struct {
 }
 
 // AWSCredentialsSpec references an existing Kubernetes Secret holding the AWS
-// configuration of the data instances, all four values under fixed keys:
-// AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION and AWS_ENDPOINT_URL.
-// Every key is required, because a flag fed from a missing optional key would
-// reach Memgraph as the unexpanded $(VAR) text; an instance talking to AWS
-// itself sets AWS_ENDPOINT_URL to the empty string. Like the license, the
-// Secret is consumed by reference only, and on two paths. A data instance
-// starts with the Secret's values as --aws-access-key, --aws-secret-key,
-// --aws-region and --aws-endpoint-url, which Memgraph takes over the values it
-// persisted from an earlier run. A running one gets a change written to the
-// Secret through SET DATABASE SETTING, read before it is written, without a
-// restart. Coordinators get none of them: they run no queries that read from
-// AWS.
+// configuration of the data instances, under fixed keys: AWS_ACCESS_KEY_ID,
+// AWS_SECRET_ACCESS_KEY, AWS_REGION and AWS_ENDPOINT_URL. Every key is
+// optional: the operator manages the setting of each key the Secret holds and
+// leaves the others alone, so an instance talking to AWS itself simply leaves
+// AWS_ENDPOINT_URL out. Like the license, the Secret is consumed by reference
+// only and never by a pod: the operator reads it and brings every ready data
+// instance in line through SET DATABASE SETTING, read before it is written,
+// without a restart. Memgraph persists all four settings across restarts, so
+// a restarted instance comes back with what was last SET; a new one gets them
+// once it is ready and the cluster has converged. Coordinators get none of
+// them: they run no queries that read from AWS.
 //
-// Pointing at a differently named Secret, or adding the block, is a
-// pod-template change and rolls the data instances, though the live SET
-// reaches every ready one first. Removing the block issues no SET: Memgraph
-// persists all four settings across restarts, so an instance keeps the last
-// values until SET DATABASE SETTING clears them, for example
+// Neither adding the block nor pointing it at another Secret changes a pod.
+// Removing the block, or a key from the Secret, issues no SET: an instance
+// keeps the last value until SET DATABASE SETTING clears it, for example
 // SET DATABASE SETTING "aws.access_key" TO "".
 type AWSCredentialsSpec struct {
-	// secretRef names a Secret in the cluster's namespace holding the access
-	// key under AWS_ACCESS_KEY_ID, the secret key under AWS_SECRET_ACCESS_KEY,
-	// the region under AWS_REGION and the endpoint URL under
-	// AWS_ENDPOINT_URL.
+	// secretRef names a Secret in the cluster's namespace holding any of the
+	// access key under AWS_ACCESS_KEY_ID, the secret key under
+	// AWS_SECRET_ACCESS_KEY, the region under AWS_REGION and the endpoint URL
+	// under AWS_ENDPOINT_URL.
 	// +required
 	SecretRef SecretReference `json:"secretRef"`
 }
@@ -1246,7 +1233,7 @@ type ExtraEnvSpec struct {
 	// +listType=map
 	// +listMapKey=name
 	// +kubebuilder:validation:MaxItems=64
-	// +kubebuilder:validation:XValidation:rule="self.all(e, !(e.name in ['MEMGRAPH_ENTERPRISE_LICENSE', 'MEMGRAPH_ORGANIZATION_NAME', 'MEMGRAPH_AWS_ACCESS_KEY', 'MEMGRAPH_AWS_SECRET_KEY', 'MEMGRAPH_AWS_REGION', 'MEMGRAPH_AWS_ENDPOINT_URL', 'POD_NAME']))",message="extraEnv must not set MEMGRAPH_ENTERPRISE_LICENSE, MEMGRAPH_ORGANIZATION_NAME or MEMGRAPH_AWS_* (they come from the secrets and awsCredentials blocks) or POD_NAME (it carries the pod's own identity)"
+	// +kubebuilder:validation:XValidation:rule="self.all(e, !(e.name in ['MEMGRAPH_ENTERPRISE_LICENSE', 'MEMGRAPH_ORGANIZATION_NAME', 'POD_NAME']))",message="extraEnv must not set MEMGRAPH_ENTERPRISE_LICENSE or MEMGRAPH_ORGANIZATION_NAME (the license comes from the secrets block) or POD_NAME (it carries the pod's own identity)"
 	// +optional
 	Coordinators []EnvVar `json:"coordinators,omitempty"`
 
@@ -1254,7 +1241,7 @@ type ExtraEnvSpec struct {
 	// +listType=map
 	// +listMapKey=name
 	// +kubebuilder:validation:MaxItems=64
-	// +kubebuilder:validation:XValidation:rule="self.all(e, !(e.name in ['MEMGRAPH_ENTERPRISE_LICENSE', 'MEMGRAPH_ORGANIZATION_NAME', 'MEMGRAPH_AWS_ACCESS_KEY', 'MEMGRAPH_AWS_SECRET_KEY', 'MEMGRAPH_AWS_REGION', 'MEMGRAPH_AWS_ENDPOINT_URL', 'POD_NAME']))",message="extraEnv must not set MEMGRAPH_ENTERPRISE_LICENSE, MEMGRAPH_ORGANIZATION_NAME or MEMGRAPH_AWS_* (they come from the secrets and awsCredentials blocks) or POD_NAME (it carries the pod's own identity)"
+	// +kubebuilder:validation:XValidation:rule="self.all(e, !(e.name in ['MEMGRAPH_ENTERPRISE_LICENSE', 'MEMGRAPH_ORGANIZATION_NAME', 'POD_NAME']))",message="extraEnv must not set MEMGRAPH_ENTERPRISE_LICENSE or MEMGRAPH_ORGANIZATION_NAME (the license comes from the secrets block) or POD_NAME (it carries the pod's own identity)"
 	// +optional
 	Data []EnvVar `json:"data,omitempty"`
 }
