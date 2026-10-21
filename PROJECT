@@ -14,7 +14,7 @@ resources:
     namespaced: true
   controller: true
   domain: memgraph.com
-  kind: MemgraphCluster
+  kind: MemgraphDBCluster
   path: github.com/memgraph/kubernetes-operator/api/v1alpha1
   version: v1alpha1
 version: "3"

@@ -25,7 +25,7 @@ import (
 
 // CoordinatorHeadlessService builds the headless Service backing the
 // coordinator StatefulSet's per-pod DNS identities.
-func CoordinatorHeadlessService(cluster *memgraphcomv1alpha1.MemgraphCluster) *corev1.Service {
+func CoordinatorHeadlessService(cluster *memgraphcomv1alpha1.MemgraphDBCluster) *corev1.Service {
 	spec := normalize(cluster.Spec)
 
 	return headlessService(cluster, coordinatorComponent, CoordinatorName(cluster),
@@ -39,7 +39,7 @@ func CoordinatorHeadlessService(cluster *memgraphcomv1alpha1.MemgraphCluster) *c
 
 // DataHeadlessService builds the headless Service backing the data-instance
 // StatefulSet's per-pod DNS identities.
-func DataHeadlessService(cluster *memgraphcomv1alpha1.MemgraphCluster) *corev1.Service {
+func DataHeadlessService(cluster *memgraphcomv1alpha1.MemgraphDBCluster) *corev1.Service {
 	spec := normalize(cluster.Spec)
 
 	return headlessService(cluster, dataComponent, DataName(cluster),
@@ -52,7 +52,7 @@ func DataHeadlessService(cluster *memgraphcomv1alpha1.MemgraphCluster) *corev1.S
 }
 
 func headlessService(
-	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	cluster *memgraphcomv1alpha1.MemgraphDBCluster,
 	component, name string,
 	customLabels map[string]string,
 	ports []corev1.ServicePort,

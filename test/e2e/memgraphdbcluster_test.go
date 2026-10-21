@@ -224,7 +224,7 @@ func (c clusterUnderTest) workloadPods() string {
 	return "app.kubernetes.io/instance=" + c.name + ",app.kubernetes.io/component in (coordinator,data)"
 }
 
-// clusterUnderTest is one MemgraphCluster a spec observes, together with the
+// clusterUnderTest is one MemgraphDBCluster a spec observes, together with the
 // topology it declares. The suite runs several differently-shaped clusters —
 // the quickstart one, the retention one, the one that is scaled — so every
 // helper below takes its cluster rather than reaching for the quickstart
@@ -275,7 +275,7 @@ func declaredCount(field string, count *int32) int32 {
 // loadExample reads and decodes the quickstart manifest. Decoding is strict,
 // so a field the example misspells fails the suite instead of being silently
 // defaulted away by the API server.
-func loadExample() *memgraphcomv1alpha1.MemgraphCluster {
+func loadExample() *memgraphcomv1alpha1.MemgraphDBCluster {
 	projectDir, err := utils.GetProjectDir()
 	if err != nil {
 		panic(fmt.Sprintf("locating the project directory: %v", err))
@@ -284,7 +284,7 @@ func loadExample() *memgraphcomv1alpha1.MemgraphCluster {
 	if err != nil {
 		panic(fmt.Sprintf("reading %s: %v", exampleManifest, err))
 	}
-	cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+	cluster := &memgraphcomv1alpha1.MemgraphDBCluster{}
 	if err := yaml.UnmarshalStrict(manifest, cluster); err != nil {
 		panic(fmt.Sprintf("decoding %s: %v", exampleManifest, err))
 	}
@@ -306,7 +306,7 @@ func (c clusterUnderTest) declaredInstances() []string {
 	return names
 }
 
-// MemgraphCluster is the end-to-end proof of the provisioning and bootstrap
+// MemgraphDBCluster is the end-to-end proof of the provisioning and bootstrap
 // slices: a real multi-node Kind cluster, the deployed operator, real licensed
 // Memgraph images, and assertions over SHOW INSTANCES.
 //
@@ -316,7 +316,7 @@ func (c clusterUnderTest) declaredInstances() []string {
 // mutations, e.g. a deliberately wiped pod). A scenario needing a
 // differently-shaped cluster gets its own Ordered container following this
 // same pattern — no pipeline changes.
-var _ = Describe("MemgraphCluster", Ordered, func() {
+var _ = Describe("MemgraphDBCluster", Ordered, func() {
 	BeforeAll(func() {
 		license, organization := licenseFromEnv()
 
@@ -326,8 +326,8 @@ var _ = Describe("MemgraphCluster", Ordered, func() {
 		By("creating the enterprise license Secret")
 		createLicenseSecret(clusterNamespace, license, organization)
 
-		By("applying the MemgraphCluster")
-		applyMemgraphCluster()
+		By("applying the MemgraphDBCluster")
+		applyMemgraphDBCluster()
 	})
 
 	AfterAll(func() {
@@ -381,7 +381,7 @@ var _ = Describe("MemgraphCluster", Ordered, func() {
 	// ServiceMonitor CRD alone (hack/kind-prometheus-crds.sh).
 	It("creates the monitoring objects when asked for them and prunes them when the block is removed", func() {
 		By("adding the monitoring block with both objects")
-		cmd := exec.Command("kubectl", "patch", "memgraphcluster", quickstartCluster.name,
+		cmd := exec.Command("kubectl", "patch", "memgraphdbcluster", quickstartCluster.name,
 			"-n", clusterNamespace, "--type=merge", "-p",
 			`{"spec":{"monitoring":{"serviceMonitor":{"labels":{"release":"kube-prometheus-stack"},"interval":"15s"},`+
 				`"grafanaDashboard":{"annotations":{"grafana_folder":"Memgraph"}}}}}`)
@@ -420,7 +420,7 @@ var _ = Describe("MemgraphCluster", Ordered, func() {
 		quickstartCluster.awaitConverged(3 * time.Minute)
 
 		By("removing the block")
-		cmd = exec.Command("kubectl", "patch", "memgraphcluster", quickstartCluster.name,
+		cmd = exec.Command("kubectl", "patch", "memgraphdbcluster", quickstartCluster.name,
 			"-n", clusterNamespace, "--type=merge", "-p", `{"spec":{"monitoring":null}}`)
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred())
@@ -465,7 +465,7 @@ var _ = Describe("MemgraphCluster", Ordered, func() {
 		Expect(err).NotTo(HaveOccurred(), "Failed to create the basic-auth Secret")
 
 		By("adding the vmagentRemote block")
-		cmd = exec.Command("kubectl", "patch", "memgraphcluster", quickstartCluster.name,
+		cmd = exec.Command("kubectl", "patch", "memgraphdbcluster", quickstartCluster.name,
 			"-n", clusterNamespace, "--type=merge", "-p",
 			fmt.Sprintf(`{"spec":{"monitoring":{"vmagentRemote":{"remoteWrite":{"url":%q,"basicAuth":{"secretRef":{"name":%q}}},`+
 				`"externalLabels":{"cluster":"e2e"}}}}}`, remoteWriteURL, basicAuthSecret))
@@ -509,7 +509,7 @@ var _ = Describe("MemgraphCluster", Ordered, func() {
 		quickstartCluster.awaitConverged(3 * time.Minute)
 
 		By("removing the block")
-		cmd = exec.Command("kubectl", "patch", "memgraphcluster", quickstartCluster.name,
+		cmd = exec.Command("kubectl", "patch", "memgraphdbcluster", quickstartCluster.name,
 			"-n", clusterNamespace, "--type=merge", "-p", `{"spec":{"monitoring":null}}`)
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred())
@@ -569,7 +569,7 @@ var _ = Describe("MemgraphCluster", Ordered, func() {
 		Expect(before).To(HaveLen(len(declaredPods)))
 
 		By("adding the vectorRemote block")
-		cmd = exec.Command("kubectl", "patch", "memgraphcluster", quickstartCluster.name,
+		cmd = exec.Command("kubectl", "patch", "memgraphdbcluster", quickstartCluster.name,
 			"-n", clusterNamespace, "--type=merge", "-p",
 			fmt.Sprintf(`{"spec":{"monitoring":{"vectorRemote":{"logsEndpoint":%q,"auth":{"secretRef":{"name":%q}},`+
 				`"extraLabels":{"cluster_id":"e2e"}}}}}`, logsEndpoint, authSecret))
@@ -633,7 +633,7 @@ var _ = Describe("MemgraphCluster", Ordered, func() {
 		By("removing the block")
 		before, err = quickstartCluster.podUIDs()
 		Expect(err).NotTo(HaveOccurred())
-		cmd = exec.Command("kubectl", "patch", "memgraphcluster", quickstartCluster.name,
+		cmd = exec.Command("kubectl", "patch", "memgraphdbcluster", quickstartCluster.name,
 			"-n", clusterNamespace, "--type=merge", "-p", `{"spec":{"monitoring":null}}`)
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred())
@@ -715,7 +715,7 @@ var _ = Describe("MemgraphCluster", Ordered, func() {
 	})
 
 	// Storage survives the cluster under the default retention policy: an
-	// accidental `kubectl delete mgc` must not take a production database with
+	// accidental `kubectl delete mgdbc` must not take a production database with
 	// it. This deletes the CR, so it runs last in this Ordered container.
 	// The sequenced rolling restart, on the converged cluster the preceding specs
 	// left behind (Ordered). Both StatefulSets use updateStrategy OnDelete, so
@@ -750,7 +750,7 @@ var _ = Describe("MemgraphCluster", Ordered, func() {
 		mainPod := fmt.Sprintf("%s-data-%d", quickstartCluster.name, mainOrdinal)
 
 		By("adding an environment variable to both roles, which changes the pod template")
-		cmd := exec.Command("kubectl", "patch", "memgraphcluster", quickstartCluster.name,
+		cmd := exec.Command("kubectl", "patch", "memgraphdbcluster", quickstartCluster.name,
 			"-n", quickstartCluster.namespace, "--type=merge", "-p",
 			`{"spec":{"extraEnv":{`+
 				`"coordinators":[{"name":"E2E_ROLLING_RESTART","value":"1"}],`+
@@ -784,9 +784,9 @@ var _ = Describe("MemgraphCluster", Ordered, func() {
 		By("confirming the cluster converges with the new template and one MAIN")
 		Eventually(quickstartCluster.verifyRegistered, 10*time.Minute, 10*time.Second).Should(Succeed())
 		cmd = exec.Command("kubectl", "wait", "--for=condition=Updated",
-			"memgraphcluster/"+quickstartCluster.name, "-n", quickstartCluster.namespace, "--timeout=5m")
+			"memgraphdbcluster/"+quickstartCluster.name, "-n", quickstartCluster.namespace, "--timeout=5m")
 		_, err = utils.Run(cmd)
-		Expect(err).NotTo(HaveOccurred(), "the MemgraphCluster never reported Updated")
+		Expect(err).NotTo(HaveOccurred(), "the MemgraphDBCluster never reported Updated")
 	})
 
 	It("applies a run-time flag to every pod without a restart, and rolls for a startup-only one", func() {
@@ -800,7 +800,7 @@ var _ = Describe("MemgraphCluster", Ordered, func() {
 		By("setting a run-time flag on both roles")
 		patchFlags := func(flags string) {
 			GinkgoHelper()
-			cmd := exec.Command("kubectl", "patch", "memgraphcluster", quickstartCluster.name,
+			cmd := exec.Command("kubectl", "patch", "memgraphdbcluster", quickstartCluster.name,
 				"-n", quickstartCluster.namespace, "--type=merge", "-p",
 				`{"spec":{"flags":{"coordinators":`+flags+`,"data":`+flags+`}}}`)
 			_, err := utils.Run(cmd)
@@ -823,12 +823,12 @@ var _ = Describe("MemgraphCluster", Ordered, func() {
 		Expect(after).To(Equal(before), "a run-time flag must not replace any pod")
 		quickstartCluster.awaitConverged(2 * time.Minute)
 		cmd := exec.Command("kubectl", "wait", "--for=condition=Updated",
-			"memgraphcluster/"+quickstartCluster.name, "-n", quickstartCluster.namespace, "--timeout=2m")
+			"memgraphdbcluster/"+quickstartCluster.name, "-n", quickstartCluster.namespace, "--timeout=2m")
 		_, err = utils.Run(cmd)
-		Expect(err).NotTo(HaveOccurred(), "the MemgraphCluster must stay Updated: nothing about the pod template changed")
+		Expect(err).NotTo(HaveOccurred(), "the MemgraphDBCluster must stay Updated: nothing about the pod template changed")
 
 		By("setting a coordinator setting beside the coordinators' flags, which is written to Raft once")
-		cmd = exec.Command("kubectl", "patch", "memgraphcluster", quickstartCluster.name,
+		cmd = exec.Command("kubectl", "patch", "memgraphdbcluster", quickstartCluster.name,
 			"-n", quickstartCluster.namespace, "--type=merge", "-p",
 			`{"spec":{"flags":{"coordinators":{"query-execution-timeout-sec":"123","instance-down-timeout-sec":"7"}}}}`)
 		_, err = utils.Run(cmd)
@@ -844,13 +844,13 @@ var _ = Describe("MemgraphCluster", Ordered, func() {
 		Expect(after).To(Equal(before), "a coordinator setting must not replace any pod")
 
 		By("naming a flag Memgraph does not have, which is reported and restarts nothing")
-		cmd = exec.Command("kubectl", "patch", "memgraphcluster", quickstartCluster.name,
+		cmd = exec.Command("kubectl", "patch", "memgraphdbcluster", quickstartCluster.name,
 			"-n", quickstartCluster.namespace, "--type=merge", "-p",
 			`{"spec":{"flags":{"coordinators":{"query-execution-timeout-sec":"123","instance-down-timeout-sec":"7","enabled-reads-on-mai":"true"}}}}`)
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred())
 		Eventually(func(g Gomega) {
-			cmd := exec.Command("kubectl", "get", "memgraphcluster", quickstartCluster.name, "-n", quickstartCluster.namespace,
+			cmd := exec.Command("kubectl", "get", "memgraphdbcluster", quickstartCluster.name, "-n", quickstartCluster.namespace,
 				"-o", `jsonpath={.status.conditions[?(@.type=="Converged")].reason}`)
 			reason, err := utils.Run(cmd)
 			g.Expect(err).NotTo(HaveOccurred())
@@ -863,7 +863,7 @@ var _ = Describe("MemgraphCluster", Ordered, func() {
 		}, time.Minute, 5*time.Second).Should(Succeed())
 		// A JSON merge patch merges maps key by key, so leaving the typo out
 		// would keep it: only null deletes a key.
-		cmd = exec.Command("kubectl", "patch", "memgraphcluster", quickstartCluster.name,
+		cmd = exec.Command("kubectl", "patch", "memgraphdbcluster", quickstartCluster.name,
 			"-n", quickstartCluster.namespace, "--type=merge", "-p",
 			`{"spec":{"flags":{"coordinators":{"enabled-reads-on-mai":null}}}}`)
 		_, err = utils.Run(cmd)
@@ -910,9 +910,9 @@ var _ = Describe("MemgraphCluster", Ordered, func() {
 		By("confirming every restarted pod reads both values from the flag file")
 		Eventually(quickstartCluster.verifyRegistered, 10*time.Minute, 10*time.Second).Should(Succeed())
 		cmd = exec.Command("kubectl", "wait", "--for=condition=Updated",
-			"memgraphcluster/"+quickstartCluster.name, "-n", quickstartCluster.namespace, "--timeout=5m")
+			"memgraphdbcluster/"+quickstartCluster.name, "-n", quickstartCluster.namespace, "--timeout=5m")
 		_, err = utils.Run(cmd)
-		Expect(err).NotTo(HaveOccurred(), "the MemgraphCluster never reported Updated after the roll")
+		Expect(err).NotTo(HaveOccurred(), "the MemgraphDBCluster never reported Updated after the roll")
 		for _, pod := range quickstartCluster.workloadPodNames() {
 			value, err := quickstartCluster.settingOnPod(pod, "query.timeout")
 			Expect(err).NotTo(HaveOccurred())
@@ -935,11 +935,11 @@ var _ = Describe("MemgraphCluster", Ordered, func() {
 		// One lib claim per coordinator and data instance pod.
 		Expect(before).To(HaveLen(int(coordinatorCount + dataInstanceCount)))
 
-		By("deleting the MemgraphCluster")
-		cmd := exec.Command("kubectl", "delete", "memgraphcluster", clusterName,
+		By("deleting the MemgraphDBCluster")
+		cmd := exec.Command("kubectl", "delete", "memgraphdbcluster", clusterName,
 			"-n", clusterNamespace, "--wait=true")
 		_, err = utils.Run(cmd)
-		Expect(err).NotTo(HaveOccurred(), "Failed to delete the MemgraphCluster")
+		Expect(err).NotTo(HaveOccurred(), "Failed to delete the MemgraphDBCluster")
 
 		By("waiting for garbage collection to remove the workloads")
 		Eventually(func(g Gomega) {
@@ -967,7 +967,7 @@ var _ = Describe("MemgraphCluster", Ordered, func() {
 // cluster, and it never waits for registration to converge — the StatefulSet
 // controller provisions the claims as soon as the pods are created, so the
 // retention behavior is observable long before Memgraph is.
-var _ = Describe("MemgraphCluster with Delete storage retention", Ordered, func() {
+var _ = Describe("MemgraphDBCluster with Delete storage retention", Ordered, func() {
 	const retentionNamespace = "memgraph-e2e-retention"
 	const retentionCluster = "retention"
 
@@ -986,9 +986,9 @@ var _ = Describe("MemgraphCluster with Delete storage retention", Ordered, func(
 	})
 
 	It("removes the PVCs when the CR is deleted", func() {
-		By("applying a MemgraphCluster with Delete retention")
+		By("applying a MemgraphDBCluster with Delete retention")
 		manifest := fmt.Sprintf(`apiVersion: memgraph.com/v1alpha1
-kind: MemgraphCluster
+kind: MemgraphDBCluster
 metadata:
   name: %s
   namespace: %s
@@ -1004,7 +1004,7 @@ spec:
 			example.Spec.Image.Repository, example.Spec.Image.Tag)
 		cmd := exec.Command("kubectl", "apply", "-f", "-")
 		_, err := utils.RunWithInput(cmd, manifest)
-		Expect(err).NotTo(HaveOccurred(), "Failed to apply the MemgraphCluster")
+		Expect(err).NotTo(HaveOccurred(), "Failed to apply the MemgraphDBCluster")
 
 		By("waiting for the claims to be provisioned and adopted by their StatefulSets")
 		// One lib claim per pod: three coordinators and one data
@@ -1027,11 +1027,11 @@ spec:
 			g.Expect(claims).To(ConsistOf(wantClaims))
 		}, 5*time.Minute, 5*time.Second).Should(Succeed())
 
-		By("deleting the MemgraphCluster")
-		cmd = exec.Command("kubectl", "delete", "memgraphcluster", retentionCluster,
+		By("deleting the MemgraphDBCluster")
+		cmd = exec.Command("kubectl", "delete", "memgraphdbcluster", retentionCluster,
 			"-n", retentionNamespace, "--wait=true")
 		_, err = utils.Run(cmd)
-		Expect(err).NotTo(HaveOccurred(), "Failed to delete the MemgraphCluster")
+		Expect(err).NotTo(HaveOccurred(), "Failed to delete the MemgraphDBCluster")
 
 		// Claim deletion is garbage collection following the owner reference, so
 		// the sets have to be gone before their absence can take the claims with
@@ -1068,7 +1068,7 @@ spec:
 // cluster it may reshape, and its teardown is awaited — eight Memgraph pods are a
 // large share of a Kind cluster's capacity, which the scenarios that may run
 // after it need back.
-var _ = Describe("MemgraphCluster topology scaling", Ordered, func() {
+var _ = Describe("MemgraphDBCluster topology scaling", Ordered, func() {
 	const scalingNamespace = "memgraph-e2e-scaling"
 	const scalingClusterName = "scaling"
 
@@ -1088,12 +1088,12 @@ var _ = Describe("MemgraphCluster topology scaling", Ordered, func() {
 		By("creating the enterprise license Secret")
 		createLicenseSecret(scalingNamespace, license, organization)
 
-		By("applying the MemgraphCluster to scale")
+		By("applying the MemgraphDBCluster to scale")
 		// No file logging and explicit small requests: this cluster runs up to eight
 		// pods on the same Kind nodes as the other scenarios', so it asks for as
 		// little as it can while still being a real HA cluster.
 		manifest := fmt.Sprintf(`apiVersion: memgraph.com/v1alpha1
-kind: MemgraphCluster
+kind: MemgraphDBCluster
 metadata:
   name: %s
   namespace: %s
@@ -1123,7 +1123,7 @@ spec:
 			example.Spec.Image.Repository, example.Spec.Image.Tag, licenseSecretName)
 		cmd := exec.Command("kubectl", "apply", "-f", "-")
 		_, err := utils.RunWithInput(cmd, manifest)
-		Expect(err).NotTo(HaveOccurred(), "Failed to apply the MemgraphCluster")
+		Expect(err).NotTo(HaveOccurred(), "Failed to apply the MemgraphDBCluster")
 	})
 
 	AfterAll(func() {
@@ -1147,7 +1147,7 @@ spec:
 	// themselves.
 	It("grows both roles in one edit and registers every added member", func() {
 		By("raising both counts on the live cluster")
-		cmd := exec.Command("kubectl", "patch", "memgraphcluster", scalingClusterName,
+		cmd := exec.Command("kubectl", "patch", "memgraphdbcluster", scalingClusterName,
 			"-n", scalingNamespace, "--type=merge", "-p",
 			fmt.Sprintf(`{"spec":{"coordinators":%d,"dataInstances":%d}}`,
 				grown.coordinators, grown.dataInstances))
@@ -1186,7 +1186,7 @@ spec:
 		}, 5*time.Minute, 10*time.Second).Should(Succeed())
 
 		By("lowering the data-instance count on the live cluster")
-		cmd := exec.Command("kubectl", "patch", "memgraphcluster", scalingClusterName,
+		cmd := exec.Command("kubectl", "patch", "memgraphdbcluster", scalingClusterName,
 			"-n", scalingNamespace, "--type=merge", "-p",
 			fmt.Sprintf(`{"spec":{"dataInstances":%d}}`, shrunk.dataInstances))
 		_, err := utils.Run(cmd)
@@ -1274,7 +1274,7 @@ spec:
 		}, 10*time.Minute, 10*time.Second).Should(Succeed())
 
 		By("lowering the coordinator count on the live cluster")
-		cmd := exec.Command("kubectl", "patch", "memgraphcluster", scalingClusterName,
+		cmd := exec.Command("kubectl", "patch", "memgraphdbcluster", scalingClusterName,
 			"-n", scalingNamespace, "--type=merge", "-p",
 			fmt.Sprintf(`{"spec":{"coordinators":%d}}`, shrunk.coordinators))
 		_, err := utils.Run(cmd)
@@ -1454,9 +1454,9 @@ func (c clusterUnderTest) verifyRegistered(g Gomega) {
 func (c clusterUnderTest) awaitConverged(timeout time.Duration) {
 	GinkgoHelper()
 	cmd := exec.Command("kubectl", "wait", "--for=condition=Converged",
-		"memgraphcluster/"+c.name, "-n", c.namespace, "--timeout="+timeout.String())
+		"memgraphdbcluster/"+c.name, "-n", c.namespace, "--timeout="+timeout.String())
 	_, err := utils.Run(cmd)
-	Expect(err).NotTo(HaveOccurred(), "the MemgraphCluster never reported Converged")
+	Expect(err).NotTo(HaveOccurred(), "the MemgraphDBCluster never reported Converged")
 }
 
 // registeredCounts reads the registered coordinator and data-instance counts the
@@ -1464,7 +1464,7 @@ func (c clusterUnderTest) awaitConverged(timeout time.Duration) {
 func (c clusterUnderTest) registeredCounts() (string, string) {
 	GinkgoHelper()
 	read := func(field string) string {
-		cmd := exec.Command("kubectl", "get", "memgraphcluster", c.name, "-n", c.namespace,
+		cmd := exec.Command("kubectl", "get", "memgraphdbcluster", c.name, "-n", c.namespace,
 			"-o", fmt.Sprintf("jsonpath={.status.%s}", field))
 		output, err := utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred(), "Failed to read status.%s", field)
@@ -1767,7 +1767,7 @@ func dumpDiagnosticsOnFailure(clusterNamespace string) {
 	}
 	for _, args := range [][]string{
 		{"get", "pods", "-n", clusterNamespace, "-o", "wide"},
-		{"get", "memgraphclusters", "-n", clusterNamespace, "-o", "yaml"},
+		{"get", "memgraphdbclusters", "-n", clusterNamespace, "-o", "yaml"},
 		{"get", "events", "-n", clusterNamespace, "--sort-by=.lastTimestamp"},
 		{"logs", "deploy/" + controllerDeploymentName, "-n", namespace, "--tail=200"},
 		// The Vector sidecars, when the cluster has them: whether each one
@@ -1814,7 +1814,7 @@ func preloadMemgraphImage() {
 		"Failed to load the Memgraph image into Kind")
 }
 
-// createClusterNamespace creates a namespace for a MemgraphCluster and enforces
+// createClusterNamespace creates a namespace for a MemgraphDBCluster and enforces
 // the restricted Pod Security Standard in it, so every scenario proves the
 // operator's workloads run under the policy a security review demands.
 func createClusterNamespace(namespace string) {
@@ -1831,7 +1831,7 @@ func createClusterNamespace(namespace string) {
 	Expect(err).NotTo(HaveOccurred(), "Failed to label namespace with restricted policy")
 }
 
-// createLicenseSecret applies the Secret the MemgraphCluster references, under
+// createLicenseSecret applies the Secret the MemgraphDBCluster references, under
 // the name and keys the example points at. The manifest is piped over stdin so
 // no secret material ever reaches the logged command line.
 func createLicenseSecret(namespace, license, organization string) {
@@ -1855,14 +1855,14 @@ func createLicenseSecret(namespace, license, organization string) {
 	Expect(err).NotTo(HaveOccurred(), "Failed to apply the license Secret")
 }
 
-// applyMemgraphCluster applies the CR under test: the README's quickstart
+// applyMemgraphDBCluster applies the CR under test: the README's quickstart
 // manifest, unmodified, which is the minimal spec of a newcomer's first
 // contact — image, counts, and a license secret reference. The manifest declares
 // no namespace, exactly as a newcomer applies it into their own.
-func applyMemgraphCluster() {
+func applyMemgraphDBCluster() {
 	cmd := exec.Command("kubectl", "apply", "-n", clusterNamespace, "-f", exampleManifest)
 	_, err := utils.Run(cmd)
-	Expect(err).NotTo(HaveOccurred(), "Failed to apply the MemgraphCluster")
+	Expect(err).NotTo(HaveOccurred(), "Failed to apply the MemgraphDBCluster")
 }
 
 // instanceRow is one parsed row of SHOW INSTANCES.

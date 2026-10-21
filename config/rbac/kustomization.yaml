@@ -22,7 +22,7 @@ resources:
 # default, aiding admins in cluster management. Those roles are
 # not used by the kubernetes-operator itself. You can comment the following lines
 # if you do not want those helpers be installed with your Project.
-- memgraphcluster_admin_role.yaml
-- memgraphcluster_editor_role.yaml
-- memgraphcluster_viewer_role.yaml
+- memgraphdbcluster_admin_role.yaml
+- memgraphdbcluster_editor_role.yaml
+- memgraphdbcluster_viewer_role.yaml
 

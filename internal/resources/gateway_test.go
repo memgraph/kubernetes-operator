@@ -41,7 +41,7 @@ const (
 // gatewayCluster is exposedCluster switched to a Gateway, with the Gateway
 // block decorated and a non-default port base so the golden tests pin every
 // knob.
-func gatewayCluster() *memgraphcomv1alpha1.MemgraphCluster {
+func gatewayCluster() *memgraphcomv1alpha1.MemgraphDBCluster {
 	cluster := exposedCluster()
 	cluster.Spec.ExternalAccess.Type = memgraphcomv1alpha1.ExternalAccessGateway
 	cluster.Spec.ExternalAccess.Gateway = memgraphcomv1alpha1.ExternalAccessGatewaySpec{

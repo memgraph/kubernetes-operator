@@ -40,32 +40,32 @@ const (
 
 // GatewayName is the name of the one Gateway the operator creates for an
 // exposed cluster.
-func GatewayName(cluster *memgraphcomv1alpha1.MemgraphCluster) string {
+func GatewayName(cluster *memgraphcomv1alpha1.MemgraphDBCluster) string {
 	return cluster.Name + "-" + gatewayComponent
 }
 
 // CoordinatorTCPRouteName is the name of the TCPRoute feeding the coordinators'
 // shared listener.
-func CoordinatorTCPRouteName(cluster *memgraphcomv1alpha1.MemgraphCluster) string {
+func CoordinatorTCPRouteName(cluster *memgraphcomv1alpha1.MemgraphDBCluster) string {
 	return CoordinatorName(cluster) + "-bolt"
 }
 
 // DataTCPRouteName is the name of the TCPRoute feeding the listener of the data
 // instance on the given pod ordinal.
-func DataTCPRouteName(cluster *memgraphcomv1alpha1.MemgraphCluster, ordinal int32) string {
+func DataTCPRouteName(cluster *memgraphcomv1alpha1.MemgraphDBCluster, ordinal int32) string {
 	return fmt.Sprintf("%s-%d-bolt", DataName(cluster), ordinal)
 }
 
 // UsesGateway reports whether the cluster is exposed through a Gateway, which
 // is when the Gateway API objects below exist at all.
-func UsesGateway(cluster *memgraphcomv1alpha1.MemgraphCluster) bool {
+func UsesGateway(cluster *memgraphcomv1alpha1.MemgraphDBCluster) bool {
 	return cluster.Spec.ExternalAccess != nil &&
 		normalize(cluster.Spec).external.typ == memgraphcomv1alpha1.ExternalAccessGateway
 }
 
 // DataGatewayPort is the Gateway listener port of the data instance on the
 // given pod ordinal: the configured base plus the ordinal.
-func DataGatewayPort(cluster *memgraphcomv1alpha1.MemgraphCluster, ordinal int32) int32 {
+func DataGatewayPort(cluster *memgraphcomv1alpha1.MemgraphDBCluster, ordinal int32) int32 {
 	return normalize(cluster.Spec).external.gateway.dataPortBase + ordinal
 }
 
@@ -75,7 +75,7 @@ func DataGatewayPort(cluster *memgraphcomv1alpha1.MemgraphCluster, ordinal int32
 // listeners follow the applied data count rather than the declared one, so a
 // retiring instance stays reachable until its pod is shed. The Gateway only
 // admits TCPRoutes, from its own namespace, which is the Gateway API default.
-func Gateway(cluster *memgraphcomv1alpha1.MemgraphCluster, dataReplicas int32) *gatewayv1.Gateway {
+func Gateway(cluster *memgraphcomv1alpha1.MemgraphDBCluster, dataReplicas int32) *gatewayv1.Gateway {
 	spec := normalize(cluster.Spec)
 
 	listener := func(name string, port int32) gatewayv1.Listener {
@@ -116,7 +116,7 @@ func Gateway(cluster *memgraphcomv1alpha1.MemgraphCluster, dataReplicas int32) *
 // TCPRoutes builds every TCPRoute of an exposed cluster: the coordinators' and
 // one per data pod the operator currently runs, each attached to its listener
 // by section name and pointing at the role's or instance's ClusterIP Service.
-func TCPRoutes(cluster *memgraphcomv1alpha1.MemgraphCluster, dataReplicas int32) []*gatewayv1.TCPRoute {
+func TCPRoutes(cluster *memgraphcomv1alpha1.MemgraphDBCluster, dataReplicas int32) []*gatewayv1.TCPRoute {
 	routes := make([]*gatewayv1.TCPRoute, 0, 1+dataReplicas)
 	routes = append(routes, CoordinatorTCPRoute(cluster))
 	for ordinal := range dataReplicas {
@@ -128,7 +128,7 @@ func TCPRoutes(cluster *memgraphcomv1alpha1.MemgraphCluster, dataReplicas int32)
 // CoordinatorTCPRoute feeds the coordinators' shared listener from their shared
 // ClusterIP Service, so the Gateway spreads new connections across every
 // coordinator and a client keeps one entrypoint whichever of them is up.
-func CoordinatorTCPRoute(cluster *memgraphcomv1alpha1.MemgraphCluster) *gatewayv1.TCPRoute {
+func CoordinatorTCPRoute(cluster *memgraphcomv1alpha1.MemgraphDBCluster) *gatewayv1.TCPRoute {
 	spec := normalize(cluster.Spec)
 	return tcpRoute(cluster, coordinatorComponent, CoordinatorTCPRouteName(cluster), coordinatorsListener,
 		CoordinatorExternalServiceName(cluster), spec.external.coordinators, spec.external.coordinators.annotations)
@@ -138,7 +138,7 @@ func CoordinatorTCPRoute(cluster *memgraphcomv1alpha1.MemgraphCluster) *gatewayv
 // ClusterIP Service. The role's annotations land here with the ordinal
 // substituted, because in Gateway mode the route is what external-dns reads a
 // hostname from.
-func DataTCPRoute(cluster *memgraphcomv1alpha1.MemgraphCluster, ordinal int32) *gatewayv1.TCPRoute {
+func DataTCPRoute(cluster *memgraphcomv1alpha1.MemgraphDBCluster, ordinal int32) *gatewayv1.TCPRoute {
 	spec := normalize(cluster.Spec)
 	return tcpRoute(cluster, dataComponent, DataTCPRouteName(cluster, ordinal),
 		fmt.Sprintf(dataListenerFormat, ordinal), DataExternalServiceName(cluster, ordinal),
@@ -146,7 +146,7 @@ func DataTCPRoute(cluster *memgraphcomv1alpha1.MemgraphCluster, ordinal int32) *
 }
 
 func tcpRoute(
-	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	cluster *memgraphcomv1alpha1.MemgraphDBCluster,
 	component, name, listener, backend string,
 	external normalizedExternalRole,
 	annotations map[string]string,

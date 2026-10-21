@@ -43,7 +43,7 @@ const (
 
 // monitoredCluster asks for a ServiceMonitor with every knob set, so the golden
 // test pins each one.
-func monitoredCluster() *memgraphcomv1alpha1.MemgraphCluster {
+func monitoredCluster() *memgraphcomv1alpha1.MemgraphDBCluster {
 	cluster := minimalCluster()
 	cluster.Spec.Monitoring = &memgraphcomv1alpha1.MonitoringSpec{
 		ServiceMonitor: &memgraphcomv1alpha1.ServiceMonitorSpec{
@@ -156,7 +156,7 @@ const (
 // dashboardCluster asks for the dashboard with every knob set, so the golden
 // test pins each one — including that a named label set replaces the default
 // rather than adding to it.
-func dashboardCluster() *memgraphcomv1alpha1.MemgraphCluster {
+func dashboardCluster() *memgraphcomv1alpha1.MemgraphDBCluster {
 	cluster := minimalCluster()
 	cluster.Spec.Monitoring = &memgraphcomv1alpha1.MonitoringSpec{
 		GrafanaDashboard: &memgraphcomv1alpha1.GrafanaDashboardSpec{

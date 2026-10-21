@@ -45,7 +45,7 @@ const (
 
 // vectorCluster asks for the Vector sidecar with every knob set, so the golden
 // tests pin each one.
-func vectorCluster() *memgraphcomv1alpha1.MemgraphCluster {
+func vectorCluster() *memgraphcomv1alpha1.MemgraphDBCluster {
 	cluster := minimalCluster()
 	cluster.Spec.Monitoring = &memgraphcomv1alpha1.MonitoringSpec{
 		VectorRemote: &memgraphcomv1alpha1.VectorRemoteSpec{

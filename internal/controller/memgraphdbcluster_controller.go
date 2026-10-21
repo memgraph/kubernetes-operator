@@ -95,8 +95,8 @@ const (
 	maxConcurrentReconciles = 4
 )
 
-// MemgraphClusterReconciler reconciles a MemgraphCluster object
-type MemgraphClusterReconciler struct {
+// MemgraphDBClusterReconciler reconciles a MemgraphDBCluster object
+type MemgraphDBClusterReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 
@@ -150,7 +150,7 @@ type MemgraphClusterReconciler struct {
 
 // The install chart's ClusterRole is generated from these markers, so they are
 // the operator's permission surface: nothing broader is ever granted. The
-// verbs are only the ones this reconciler issues — it reads MemgraphClusters
+// verbs are only the ones this reconciler issues — it reads MemgraphDBClusters
 // and patches their status, and server-side-applies (create plus patch) the
 // workloads without ever updating or deleting them, because deletion belongs
 // to garbage collection via the owner references. The finalizers subresource
@@ -172,9 +172,9 @@ type MemgraphClusterReconciler struct {
 // live StatefulSet's claim templates and the next apply recreates it around the
 // pods with the new ones. The claims themselves are patched to the new size and
 // never created or deleted — the StatefulSet controller does both.
-// +kubebuilder:rbac:groups=memgraph.com,resources=memgraphclusters,verbs=get;list;watch
-// +kubebuilder:rbac:groups=memgraph.com,resources=memgraphclusters/status,verbs=get;patch
-// +kubebuilder:rbac:groups=memgraph.com,resources=memgraphclusters/finalizers,verbs=update
+// +kubebuilder:rbac:groups=memgraph.com,resources=memgraphdbclusters,verbs=get;list;watch
+// +kubebuilder:rbac:groups=memgraph.com,resources=memgraphdbclusters/status,verbs=get;patch
+// +kubebuilder:rbac:groups=memgraph.com,resources=memgraphdbclusters/finalizers,verbs=update
 // +kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;create;patch;delete
 // +kubebuilder:rbac:groups=core,resources=persistentvolumeclaims,verbs=get;list;watch;patch
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;patch;delete
@@ -205,7 +205,7 @@ type MemgraphClusterReconciler struct {
 // data is ever cached.
 // +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch
 
-// Reconcile drives the cluster toward the declared MemgraphCluster spec in
+// Reconcile drives the cluster toward the declared MemgraphDBCluster spec in
 // two stages. First it server-side-applies the builders' desired objects: one
 // StatefulSet per role (coordinators, data instances), each backed by a
 // headless Service, at the replica counts replicaCounts derives, and brings
@@ -234,8 +234,8 @@ type MemgraphClusterReconciler struct {
 // or not: everything below only sets it on the in-memory object, and the patch
 // is skipped when nothing changed, so a converged cluster re-observed on every
 // resync does not churn the resource version.
-func (r *MemgraphClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	cluster := new(memgraphcomv1alpha1.MemgraphCluster)
+func (r *MemgraphDBClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	cluster := new(memgraphcomv1alpha1.MemgraphDBCluster)
 	if err := r.Get(ctx, req.NamespacedName, cluster); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
@@ -250,16 +250,16 @@ func (r *MemgraphClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return result, reconcileErr
 	}
 	if err := r.Status().Patch(ctx, cluster, client.MergeFrom(orig)); err != nil {
-		return ctrl.Result{}, errors.Join(reconcileErr, fmt.Errorf("patching MemgraphCluster status: %w", err))
+		return ctrl.Result{}, errors.Join(reconcileErr, fmt.Errorf("patching MemgraphDBCluster status: %w", err))
 	}
 	return result, reconcileErr
 }
 
 // reconcileCluster is one pass over the cluster and its child objects. It
 // records what it observes on cluster.Status and leaves writing it to Reconcile.
-func (r *MemgraphClusterReconciler) reconcileCluster(
+func (r *MemgraphDBClusterReconciler) reconcileCluster(
 	ctx context.Context,
-	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	cluster *memgraphcomv1alpha1.MemgraphDBCluster,
 ) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
@@ -325,7 +325,7 @@ func (r *MemgraphClusterReconciler) reconcileCluster(
 		return ctrl.Result{}, err
 	}
 
-	log.Info("Applied desired workload objects for MemgraphCluster", "memgraphcluster", client.ObjectKeyFromObject(cluster))
+	log.Info("Applied desired workload objects for MemgraphDBCluster", "memgraphdbcluster", client.ObjectKeyFromObject(cluster))
 
 	exposure, err := r.observeExternalAccess(ctx, cluster)
 	if err != nil {
@@ -362,8 +362,8 @@ func (r *MemgraphClusterReconciler) reconcileCluster(
 // still applied as ClusterIPs and the cluster runs in-cluster; the exposure is
 // then reported as failed rather than pending, because no amount of waiting
 // makes the API appear.
-func (r *MemgraphClusterReconciler) desiredExternal(
-	cluster *memgraphcomv1alpha1.MemgraphCluster,
+func (r *MemgraphDBClusterReconciler) desiredExternal(
+	cluster *memgraphcomv1alpha1.MemgraphDBCluster,
 	dataReplicas int32,
 ) []client.Object {
 	var objects []client.Object
@@ -387,8 +387,8 @@ func (r *MemgraphClusterReconciler) desiredExternal(
 // vmagent Deployment with its scrape config, whose targets follow the pods the
 // operator runs for the reason the external objects do, and the Vector
 // sidecar's configuration, which the StatefulSets' pods mount.
-func (r *MemgraphClusterReconciler) desiredMonitoring(
-	cluster *memgraphcomv1alpha1.MemgraphCluster,
+func (r *MemgraphDBClusterReconciler) desiredMonitoring(
+	cluster *memgraphcomv1alpha1.MemgraphDBCluster,
 	replicas replicaCounts,
 ) []client.Object {
 	var objects []client.Object
@@ -412,7 +412,7 @@ func (r *MemgraphClusterReconciler) desiredMonitoring(
 
 // serviceMonitorFailure explains why the ServiceMonitor the spec asks for
 // cannot be served on this cluster, or is empty when it can or nothing asks.
-func (r *MemgraphClusterReconciler) serviceMonitorFailure(cluster *memgraphcomv1alpha1.MemgraphCluster) string {
+func (r *MemgraphDBClusterReconciler) serviceMonitorFailure(cluster *memgraphcomv1alpha1.MemgraphDBCluster) string {
 	if !resources.UsesServiceMonitor(cluster) || r.ServiceMonitorAPI {
 		return ""
 	}
@@ -425,9 +425,9 @@ func (r *MemgraphClusterReconciler) serviceMonitorFailure(cluster *memgraphcomv1
 // current spec does not describe, the way pruneExternal does for the external
 // ones. The ServiceMonitor kind is only consulted where the cluster serves it;
 // where it does not, nothing was ever created.
-func (r *MemgraphClusterReconciler) pruneMonitoring(
+func (r *MemgraphDBClusterReconciler) pruneMonitoring(
 	ctx context.Context,
-	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	cluster *memgraphcomv1alpha1.MemgraphDBCluster,
 	desired []client.Object,
 ) error {
 	keep := keptNames(desired)
@@ -461,9 +461,9 @@ func keptNames(desired []client.Object) map[string]bool {
 // does. Only objects this cluster controls are considered, and each delete is
 // conditioned on the UID observed, so an object recreated in between is left for
 // the next pass to judge.
-func (r *MemgraphClusterReconciler) pruneExternal(
+func (r *MemgraphDBClusterReconciler) pruneExternal(
 	ctx context.Context,
-	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	cluster *memgraphcomv1alpha1.MemgraphDBCluster,
 	desired []client.Object,
 ) error {
 	keep := keptNames(desired)
@@ -484,9 +484,9 @@ func (r *MemgraphClusterReconciler) pruneExternal(
 
 // pruneKind prunes one kind of operator-created object, listed by the marker
 // label every object of that family carries, sparing the ones desired names.
-func (r *MemgraphClusterReconciler) pruneKind(
+func (r *MemgraphDBClusterReconciler) pruneKind(
 	ctx context.Context,
-	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	cluster *memgraphcomv1alpha1.MemgraphDBCluster,
 	list client.ObjectList,
 	selector map[string]string,
 	keep map[string]bool,
@@ -547,9 +547,9 @@ type externalAccess struct {
 // at, so what registration announces this pass is what the objects report this
 // pass. An object the apply just created and the cache has not caught up with is
 // the same as one with no address yet: pending, and looked at again next pass.
-func (r *MemgraphClusterReconciler) observeExternalAccess(
+func (r *MemgraphDBClusterReconciler) observeExternalAccess(
 	ctx context.Context,
-	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	cluster *memgraphcomv1alpha1.MemgraphDBCluster,
 ) (externalAccess, error) {
 	if cluster.Spec.ExternalAccess == nil {
 		return externalAccess{}, nil
@@ -593,9 +593,9 @@ func (r *MemgraphClusterReconciler) observeExternalAccess(
 // port per listener — and a hostname per route when external-dns publishes one.
 // On a cluster without the Gateway API nothing can be read, so every member is
 // announced at its pod address and the exposure is reported as failed.
-func (r *MemgraphClusterReconciler) observeGatewayAccess(
+func (r *MemgraphDBClusterReconciler) observeGatewayAccess(
 	ctx context.Context,
-	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	cluster *memgraphcomv1alpha1.MemgraphDBCluster,
 ) (externalAccess, error) {
 	exposure := newExternalAccess()
 	if !r.GatewayAPI {
@@ -706,9 +706,9 @@ func (e *externalAccess) waitOn(name string) {
 // It returns the generation the API server assigned each object, which is how
 // the rest of the pass tells a cached object that predates this apply from one
 // that reflects it.
-func (r *MemgraphClusterReconciler) applyDesired(
+func (r *MemgraphDBClusterReconciler) applyDesired(
 	ctx context.Context,
-	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	cluster *memgraphcomv1alpha1.MemgraphDBCluster,
 	desired ...client.Object,
 ) (appliedObjects, error) {
 	applied := appliedObjects{}
@@ -844,9 +844,9 @@ func yieldedLeader(commands []planner.Command) string {
 // A lowered count of either role is carried out at the end of the registration
 // phase instead, once the retiring members have actually left the cluster (see
 // reconcileRegistration).
-func (r *MemgraphClusterReconciler) replicaCounts(
+func (r *MemgraphDBClusterReconciler) replicaCounts(
 	ctx context.Context,
-	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	cluster *memgraphcomv1alpha1.MemgraphDBCluster,
 ) (replicaCounts, error) {
 	var counts replicaCounts
 	for _, role := range []struct {
@@ -902,9 +902,9 @@ func (r *MemgraphClusterReconciler) replicaCounts(
 // ran with, read off the pods it left behind. The highest ordinal rather than
 // the number of pods, because a scale-up creates pods in parallel and a
 // restart takes one down, either of which leaves a gap below the top.
-func (r *MemgraphClusterReconciler) runningOrdinals(
+func (r *MemgraphDBClusterReconciler) runningOrdinals(
 	ctx context.Context,
-	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	cluster *memgraphcomv1alpha1.MemgraphDBCluster,
 	statefulSet string,
 	selector map[string]string,
 ) (int32, error) {
@@ -995,9 +995,9 @@ func (o volumeOutcome) done() bool {
 // A patch the API server refuses — a StorageClass without
 // allowVolumeExpansion — is reported, not returned: it is retried every pass,
 // and nothing is deleted while it stands.
-func (r *MemgraphClusterReconciler) reconcileVolumes(
+func (r *MemgraphDBClusterReconciler) reconcileVolumes(
 	ctx context.Context,
-	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	cluster *memgraphcomv1alpha1.MemgraphDBCluster,
 	roles ...claimedRole,
 ) (volumeOutcome, string, error) {
 	log := logf.FromContext(ctx)
@@ -1056,9 +1056,9 @@ func (r *MemgraphClusterReconciler) reconcileVolumes(
 
 // observeClaims reads one role's claims and pods as internal/volumes sees
 // them, with the claims by name for the patches.
-func (r *MemgraphClusterReconciler) observeClaims(
+func (r *MemgraphDBClusterReconciler) observeClaims(
 	ctx context.Context,
-	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	cluster *memgraphcomv1alpha1.MemgraphDBCluster,
 	role claimedRole,
 ) (volumes.Role, map[string]*corev1.PersistentVolumeClaim, error) {
 	name := role.desired.Name
@@ -1094,7 +1094,7 @@ func (r *MemgraphClusterReconciler) observeClaims(
 
 // growClaim patches one claim's storage request, conditioned on the version
 // observed so a claim changed in between is judged again next pass.
-func (r *MemgraphClusterReconciler) growClaim(
+func (r *MemgraphDBClusterReconciler) growClaim(
 	ctx context.Context,
 	pvc *corev1.PersistentVolumeClaim,
 	size resource.Quantity,
@@ -1137,9 +1137,9 @@ type rolloutRoles struct {
 // observeRollout reads both roles' pods and the revision their StatefulSet
 // currently hashes its pod template to, which is everything the rolling restart
 // needs about Kubernetes. It is pure observation: nothing is decided here.
-func (r *MemgraphClusterReconciler) observeRollout(
+func (r *MemgraphDBClusterReconciler) observeRollout(
 	ctx context.Context,
-	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	cluster *memgraphcomv1alpha1.MemgraphDBCluster,
 	replicas replicaCounts,
 	applied appliedObjects,
 ) (rolloutRoles, error) {
@@ -1208,9 +1208,9 @@ type observedRole struct {
 // make every pod look up to date. The role is marked stale in either case, from
 // the generation the apply returned and the one the status reports, and the
 // roll does not judge it until both agree.
-func (r *MemgraphClusterReconciler) observeRolloutRole(
+func (r *MemgraphDBClusterReconciler) observeRolloutRole(
 	ctx context.Context,
-	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	cluster *memgraphcomv1alpha1.MemgraphDBCluster,
 	role roleReplicas,
 	selector map[string]string,
 	instanceName func(ordinal int32) string,
@@ -1277,9 +1277,9 @@ func podReady(pod *corev1.Pod) bool {
 // that was observed: a pod already replaced between the observation and here is
 // left alone rather than restarted twice, and a pod that is simply gone is not an
 // error — the next pass re-observes and decides again.
-func (r *MemgraphClusterReconciler) restartPod(
+func (r *MemgraphDBClusterReconciler) restartPod(
 	ctx context.Context,
-	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	cluster *memgraphcomv1alpha1.MemgraphDBCluster,
 	decision rollout.Decision,
 ) error {
 	pod := &corev1.Pod{
@@ -1297,7 +1297,7 @@ func (r *MemgraphClusterReconciler) restartPod(
 
 // getStatefulSet reads a role's StatefulSet, or nil when the cluster has not
 // been provisioned yet.
-func (r *MemgraphClusterReconciler) getStatefulSet(
+func (r *MemgraphDBClusterReconciler) getStatefulSet(
 	ctx context.Context,
 	namespace, name string,
 ) (*appsv1.StatefulSet, error) {
@@ -1329,10 +1329,10 @@ func (r *MemgraphClusterReconciler) getStatefulSet(
 // applied at the declared count, shedding their pods. That is the one place the
 // operator ever lowers a replica count, so the coordinators never see a registered
 // instance's pod disappear, and no removed member's pod outlives its vote.
-func (r *MemgraphClusterReconciler) reconcileRegistration(
+func (r *MemgraphDBClusterReconciler) reconcileRegistration(
 	ctx context.Context,
 	reads podSettings,
-	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	cluster *memgraphcomv1alpha1.MemgraphDBCluster,
 	replicas replicaCounts,
 	exposure externalAccess,
 	roles rolloutRoles,
@@ -1546,9 +1546,9 @@ func (r *MemgraphClusterReconciler) reconcileRegistration(
 // names what a human has to act on before what will clear on its own. A grown
 // storage size slots in the same way: refused or given up on right after what
 // cannot be served, still growing just before the settings still owed.
-func (r *MemgraphClusterReconciler) convergedCondition(
+func (r *MemgraphDBClusterReconciler) convergedCondition(
 	ctx context.Context,
-	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	cluster *memgraphcomv1alpha1.MemgraphDBCluster,
 	topology planner.Topology,
 	exposure externalAccess,
 	applied settingsOutcome,
@@ -1649,9 +1649,9 @@ const coordinatorSettingsSubject = "the Raft leader, which did not report the co
 //
 // The Events name the leader's pod, leaderName's, as the one that ran the
 // SETs: the settings themselves belong to no pod.
-func (r *MemgraphClusterReconciler) reconcileCoordinatorSettings(
+func (r *MemgraphDBClusterReconciler) reconcileCoordinatorSettings(
 	ctx context.Context,
-	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	cluster *memgraphcomv1alpha1.MemgraphDBCluster,
 	leader memgraph.Client,
 	leaderName string,
 	classes flagClasses,
@@ -1715,10 +1715,10 @@ func (r *MemgraphClusterReconciler) reconcileCoordinatorSettings(
 // it would only crash-loop the pod. A pod that is not ready is skipped
 // outright and not reported: it is the roll's or the kubelet's business, and
 // the flag file carries its settings for when it comes up.
-func (r *MemgraphClusterReconciler) reconcileSettings(
+func (r *MemgraphDBClusterReconciler) reconcileSettings(
 	ctx context.Context,
 	reads podSettings,
-	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	cluster *memgraphcomv1alpha1.MemgraphDBCluster,
 	replicas replicaCounts,
 	roles rolloutRoles,
 ) settingsOutcome {
@@ -1788,9 +1788,9 @@ type flagClasses struct {
 // leader connection and sorts both roles' startup keys by them. Either view
 // may be missing — SHOW COORDINATOR SETTINGS answers with no rows without a
 // ready leader — and the result records that rather than guessing.
-func (r *MemgraphClusterReconciler) classifyFlags(
+func (r *MemgraphDBClusterReconciler) classifyFlags(
 	ctx context.Context,
-	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	cluster *memgraphcomv1alpha1.MemgraphDBCluster,
 	leader memgraph.Client,
 	replicas replicaCounts,
 	roles rolloutRoles,
@@ -1833,7 +1833,7 @@ func (r *MemgraphClusterReconciler) classifyFlags(
 // to prevent, so the roll waits instead.
 func waitForFlagClasses(
 	ctx context.Context,
-	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	cluster *memgraphcomv1alpha1.MemgraphDBCluster,
 	latest observation,
 	converged metav1.Condition,
 	keys []string,
@@ -1855,9 +1855,9 @@ func waitForFlagClasses(
 // data instances before coordinators since they are rolled first; the leader
 // connection is the fallback when no such pod exists, which is also exactly
 // when no pod can be spared a restart, since every pod's template differs.
-func (r *MemgraphClusterReconciler) showConfig(
+func (r *MemgraphDBClusterReconciler) showConfig(
 	ctx context.Context,
-	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	cluster *memgraphcomv1alpha1.MemgraphDBCluster,
 	leader memgraph.Client,
 	replicas replicaCounts,
 	roles rolloutRoles,
@@ -1996,10 +1996,10 @@ func exemptCurrentPods(roles *rolloutRoles, classes flagClasses) ([]string, bool
 // pass or restarts a pod. The values are sent to Memgraph and compared, and
 // never logged, put in an event or written to status: the region and endpoint
 // are not secret, but they share the Secret and the code path with the keys.
-func (r *MemgraphClusterReconciler) reconcileAWSCredentials(
+func (r *MemgraphDBClusterReconciler) reconcileAWSCredentials(
 	ctx context.Context,
 	reads podSettings,
-	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	cluster *memgraphcomv1alpha1.MemgraphDBCluster,
 	replicas replicaCounts,
 	roles rolloutRoles,
 ) settingsOutcome {
@@ -2049,7 +2049,7 @@ func (r *MemgraphClusterReconciler) reconcileAWSCredentials(
 // the license, and returns them keyed by the settings they go to. A Secret
 // missing any key yields none: the pods cannot start on it either, and a
 // partial set is never applied.
-func (r *MemgraphClusterReconciler) readAWSCredentials(
+func (r *MemgraphDBClusterReconciler) readAWSCredentials(
 	ctx context.Context,
 	namespace, name string,
 ) (map[string]string, error) {
@@ -2101,7 +2101,7 @@ type podSettingsRead struct {
 
 // observedSettings is the pod's settings as the pass read them, reading them
 // on the pass's first call for the pod.
-func (r *MemgraphClusterReconciler) observedSettings(
+func (r *MemgraphDBClusterReconciler) observedSettings(
 	ctx context.Context,
 	reads podSettings,
 	endpoint resources.Endpoint,
@@ -2118,7 +2118,7 @@ func (r *MemgraphClusterReconciler) observedSettings(
 }
 
 // readInstance dials one instance for one of its views and closes the connection.
-func (r *MemgraphClusterReconciler) readInstance(
+func (r *MemgraphDBClusterReconciler) readInstance(
 	ctx context.Context,
 	endpoint resources.Endpoint,
 	query func(conn memgraph.Client) (map[string]string, error),
@@ -2143,9 +2143,9 @@ func (r *MemgraphClusterReconciler) readInstance(
 // leave the value out; any other error is a pod that could not be reached.
 // The SETs that landed are one Event under action, the step's own, so two
 // steps SETting on one pod in a pass stay two Events (see events.go).
-func (r *MemgraphClusterReconciler) applySettings(
+func (r *MemgraphDBClusterReconciler) applySettings(
 	ctx context.Context,
-	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	cluster *memgraphcomv1alpha1.MemgraphDBCluster,
 	reads podSettings,
 	endpoint resources.Endpoint,
 	action string,
@@ -2219,10 +2219,10 @@ func secretSetting(change settings.Change) string {
 //
 // The license is secret material: it is sent to Memgraph and compared, and
 // never logged, put in an event or written to status.
-func (r *MemgraphClusterReconciler) reconcileLicense(
+func (r *MemgraphDBClusterReconciler) reconcileLicense(
 	ctx context.Context,
 	reads podSettings,
-	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	cluster *memgraphcomv1alpha1.MemgraphDBCluster,
 	replicas replicaCounts,
 	roles rolloutRoles,
 ) metav1.Condition {
@@ -2283,7 +2283,7 @@ func (r *MemgraphClusterReconciler) reconcileLicense(
 
 // readLicense reads the license and organization name from the Secret,
 // uncached: the operator's cache holds Secret metadata only.
-func (r *MemgraphClusterReconciler) readLicense(
+func (r *MemgraphDBClusterReconciler) readLicense(
 	ctx context.Context,
 	namespace string,
 	ref resources.LicenseSecret,
@@ -2306,10 +2306,10 @@ func (r *MemgraphClusterReconciler) readLicense(
 // clustersForSecret maps a Secret event to the clusters in its namespace whose
 // pods read their license or their AWS credentials from it. The event carries
 // metadata only, which is all the mapping needs.
-func (r *MemgraphClusterReconciler) clustersForSecret(ctx context.Context, secret client.Object) []reconcile.Request {
-	var clusters memgraphcomv1alpha1.MemgraphClusterList
+func (r *MemgraphDBClusterReconciler) clustersForSecret(ctx context.Context, secret client.Object) []reconcile.Request {
+	var clusters memgraphcomv1alpha1.MemgraphDBClusterList
 	if err := r.List(ctx, &clusters, client.InNamespace(secret.GetNamespace())); err != nil {
-		logf.FromContext(ctx).Error(err, "Failed to list MemgraphClusters for a changed Secret", "secret", secret.GetName())
+		logf.FromContext(ctx).Error(err, "Failed to list MemgraphDBClusters for a changed Secret", "secret", secret.GetName())
 		return nil
 	}
 	var requests []reconcile.Request
@@ -2362,9 +2362,9 @@ var memgraphPodChanged = predicate.Funcs{
 // reached only after the plan came back empty, so every pod it sheds belongs to a
 // member that has already left the Memgraph cluster: an unregistered data
 // instance, or a coordinator whose Raft vote is gone.
-func (r *MemgraphClusterReconciler) shedRetiredPods(
+func (r *MemgraphDBClusterReconciler) shedRetiredPods(
 	ctx context.Context,
-	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	cluster *memgraphcomv1alpha1.MemgraphDBCluster,
 	topology planner.Topology,
 	replicas replicaCounts,
 ) error {
@@ -2372,7 +2372,7 @@ func (r *MemgraphClusterReconciler) shedRetiredPods(
 	for _, role := range []struct {
 		retiring int
 		replicas roleReplicas
-		build    func(*memgraphcomv1alpha1.MemgraphCluster, int32) *appsv1.StatefulSet
+		build    func(*memgraphcomv1alpha1.MemgraphDBCluster, int32) *appsv1.StatefulSet
 	}{
 		{len(topology.RetiringCoordinators), replicas.coordinators, resources.CoordinatorStatefulSet},
 		{len(topology.RetiringDataInstances), replicas.data, resources.DataStatefulSet},
@@ -2432,7 +2432,7 @@ func (o observation) exposedAt(exposure externalAccess) observation {
 // that could not observe the cluster this pass republish it: an unready pod or
 // an unreachable coordinator says nothing about what the last reachable leader
 // reported.
-func lastObserved(cluster *memgraphcomv1alpha1.MemgraphCluster) observation {
+func lastObserved(cluster *memgraphcomv1alpha1.MemgraphDBCluster) observation {
 	return observation{
 		main:                    cluster.Status.Main,
 		registeredCoordinators:  cluster.Status.Coordinators,
@@ -2492,7 +2492,7 @@ func servingOrNot(main string) metav1.Condition {
 
 // summarizeReady replaces the pass's serving verdict with the Ready condition
 // it and the other three conditions add up to.
-func summarizeReady(cluster *memgraphcomv1alpha1.MemgraphCluster) {
+func summarizeReady(cluster *memgraphcomv1alpha1.MemgraphDBCluster) {
 	conditions := &cluster.Status.Conditions
 	var serving *metav1.Condition
 	if verdict := apimeta.FindStatusCondition(*conditions, conditionServing); verdict != nil {
@@ -2604,7 +2604,7 @@ func notUpdatedCondition(reason, message string) metav1.Condition {
 // setStatus records the pass's observation and the given conditions on the
 // in-memory cluster. Reconcile writes them once the pass ends.
 func setStatus(
-	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	cluster *memgraphcomv1alpha1.MemgraphDBCluster,
 	observed observation,
 	conditions ...metav1.Condition,
 ) {
@@ -2694,7 +2694,7 @@ var errNoCoordinatorLeader = errors.New("no coordinator reported a leader")
 // state machine, which can be arbitrarily stale. Every mutating query the
 // planner could issue needs a leader anyway, so such a view describes a cluster
 // state that is neither current nor writable.
-func (r *MemgraphClusterReconciler) observeCluster(
+func (r *MemgraphDBClusterReconciler) observeCluster(
 	ctx context.Context,
 	endpoints []resources.Endpoint,
 ) (memgraph.Client, []memgraph.Instance, error) {
@@ -2778,7 +2778,7 @@ func leaderAddress(endpoints []resources.Endpoint, observed []memgraph.Instance,
 // showInstances connects to one coordinator's Bolt address, in the mode the
 // spec says it serves, and fetches its cluster view, closing the connection
 // again on query failure.
-func (r *MemgraphClusterReconciler) showInstances(
+func (r *MemgraphDBClusterReconciler) showInstances(
 	ctx context.Context,
 	address string,
 	tls bool,
@@ -2803,7 +2803,7 @@ func (r *MemgraphClusterReconciler) showInstances(
 // object as the API server answered, its UID and generation included: the
 // response is decoded back into the applied configuration, so no second read
 // is needed for them.
-func (r *MemgraphClusterReconciler) apply(ctx context.Context, obj client.Object) (metav1.Object, error) {
+func (r *MemgraphDBClusterReconciler) apply(ctx context.Context, obj client.Object) (metav1.Object, error) {
 	content, err := runtime.DefaultUnstructuredConverter.ToUnstructured(obj)
 	if err != nil {
 		return nil, fmt.Errorf("converting to unstructured: %w", err)
@@ -2825,9 +2825,9 @@ func (r *MemgraphClusterReconciler) apply(ctx context.Context, obj client.Object
 // SetupWithManager sets up the controller with the Manager. The Gateway API
 // kinds are watched only where the cluster serves them: an informer on a kind
 // the API server does not know never syncs, and the manager would not start.
-func (r *MemgraphClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
+func (r *MemgraphDBClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	builder := ctrl.NewControllerManagedBy(mgr).
-		For(&memgraphcomv1alpha1.MemgraphCluster{}).
+		For(&memgraphcomv1alpha1.MemgraphDBCluster{}).
 		Owns(&appsv1.StatefulSet{}).
 		Owns(&appsv1.Deployment{}).
 		Owns(&corev1.Service{}).
@@ -2857,7 +2857,7 @@ func (r *MemgraphClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	// The workqueue never hands one cluster to two workers at once, so more
 	// workers only keep clusters from queueing behind each other: a pass can
 	// spend tens of seconds dialling pods that do not answer.
-	return builder.Named("memgraphcluster").
+	return builder.Named("memgraphdbcluster").
 		WithOptions(controller.Options{MaxConcurrentReconciles: maxConcurrentReconciles}).
 		Complete(r)
 }

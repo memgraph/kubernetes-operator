@@ -47,7 +47,7 @@ const metricsPath = "/metrics"
 // MonitoringSelector matches every monitoring object of this cluster and
 // nothing else: the objects the operator has to consider deleting when the
 // spec stops describing them.
-func MonitoringSelector(cluster *memgraphcomv1alpha1.MemgraphCluster) map[string]string {
+func MonitoringSelector(cluster *memgraphcomv1alpha1.MemgraphDBCluster) map[string]string {
 	return map[string]string{
 		instanceLabel:   cluster.Name,
 		MonitoringLabel: MonitoringValue,
@@ -56,12 +56,12 @@ func MonitoringSelector(cluster *memgraphcomv1alpha1.MemgraphCluster) map[string
 
 // ServiceMonitorName is the name of the one ServiceMonitor the operator
 // creates for a cluster that asks for it.
-func ServiceMonitorName(cluster *memgraphcomv1alpha1.MemgraphCluster) string {
+func ServiceMonitorName(cluster *memgraphcomv1alpha1.MemgraphDBCluster) string {
 	return cluster.Name
 }
 
 // UsesServiceMonitor reports whether the cluster asked for a ServiceMonitor.
-func UsesServiceMonitor(cluster *memgraphcomv1alpha1.MemgraphCluster) bool {
+func UsesServiceMonitor(cluster *memgraphcomv1alpha1.MemgraphDBCluster) bool {
 	return cluster.Spec.Monitoring != nil && cluster.Spec.Monitoring.ServiceMonitor != nil
 }
 
@@ -83,7 +83,7 @@ func UsesServiceMonitor(cluster *memgraphcomv1alpha1.MemgraphCluster) bool {
 //
 // The builder is only called for a cluster whose spec carries the block: it
 // reads the block's knobs and has nothing to build without them.
-func ServiceMonitor(cluster *memgraphcomv1alpha1.MemgraphCluster) *monitoringv1.ServiceMonitor {
+func ServiceMonitor(cluster *memgraphcomv1alpha1.MemgraphDBCluster) *monitoringv1.ServiceMonitor {
 	spec := normalize(cluster.Spec)
 	block := spec.monitoring.serviceMonitor
 
@@ -150,12 +150,12 @@ const grafanaDashboardComponent = "grafana-dashboard"
 
 // GrafanaDashboardName is the name of the one ConfigMap the operator creates
 // for a cluster that asks for the dashboard.
-func GrafanaDashboardName(cluster *memgraphcomv1alpha1.MemgraphCluster) string {
+func GrafanaDashboardName(cluster *memgraphcomv1alpha1.MemgraphDBCluster) string {
 	return cluster.Name + "-" + grafanaDashboardComponent
 }
 
 // UsesGrafanaDashboard reports whether the cluster asked for the dashboard.
-func UsesGrafanaDashboard(cluster *memgraphcomv1alpha1.MemgraphCluster) bool {
+func UsesGrafanaDashboard(cluster *memgraphcomv1alpha1.MemgraphDBCluster) bool {
 	return cluster.Spec.Monitoring != nil && cluster.Spec.Monitoring.GrafanaDashboard != nil
 }
 
@@ -165,7 +165,7 @@ func UsesGrafanaDashboard(cluster *memgraphcomv1alpha1.MemgraphCluster) bool {
 // own identity labels and the marker the controller prunes by.
 //
 // The builder is only called for a cluster whose spec carries the block.
-func GrafanaDashboard(cluster *memgraphcomv1alpha1.MemgraphCluster) *corev1.ConfigMap {
+func GrafanaDashboard(cluster *memgraphcomv1alpha1.MemgraphDBCluster) *corev1.ConfigMap {
 	spec := normalize(cluster.Spec)
 	block := spec.monitoring.grafanaDashboard
 

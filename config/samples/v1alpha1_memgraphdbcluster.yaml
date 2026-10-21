@@ -1,10 +1,10 @@
 apiVersion: memgraph.com/v1alpha1
-kind: MemgraphCluster
+kind: MemgraphDBCluster
 metadata:
   labels:
     app.kubernetes.io/name: kubernetes-operator
     app.kubernetes.io/managed-by: kustomize
-  name: memgraphcluster-sample
+  name: memgraphdbcluster-sample
 spec:
   # Raising either count on a live cluster grows it: the operator provisions the
   # new pods and registers them with the cluster. The coordinator count must be
@@ -52,7 +52,7 @@ spec:
     # on a class with allowVolumeExpansion. Access modes and classes become
     # StatefulSet volumeClaimTemplates, which Kubernetes treats as immutable, so
     # admission refuses changing them on a live cluster: delete the
-    # MemgraphCluster (the claims are retained) and recreate it with the new
+    # MemgraphDBCluster (the claims are retained) and recreate it with the new
     # values. Setting logFile to None passes an empty --log-file, leaving stderr
     # (and so `kubectl logs`) as the only log sink; it changes on a live cluster
     # with a rolling restart, and moving to None leaves the log files already
@@ -78,7 +78,7 @@ spec:
   # there and have the platform point core_pattern at that directory itself. Whether a role collects dumps is decided when the cluster is
   # created: the claim is a StatefulSet volumeClaimTemplate, which Kubernetes
   # forbids adding or removing in place, so adding or removing a role's block on
-  # a live cluster is rejected. To change it, delete the MemgraphCluster (the
+  # a live cluster is rejected. To change it, delete the MemgraphDBCluster (the
   # default retention policy keeps every claim) and recreate it.
   # coreDumps:
     # Per role, because only these two answers differ between them: whether the

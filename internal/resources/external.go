@@ -45,7 +45,7 @@ const externalSuffix = "-external"
 // ExternalServicesSelector matches every external Service of this cluster and
 // nothing else: the Services the operator has to consider deleting when the
 // spec stops describing them.
-func ExternalServicesSelector(cluster *memgraphcomv1alpha1.MemgraphCluster) map[string]string {
+func ExternalServicesSelector(cluster *memgraphcomv1alpha1.MemgraphDBCluster) map[string]string {
 	return map[string]string{
 		instanceLabel:       cluster.Name,
 		ExternalAccessLabel: ExternalAccessValue,
@@ -54,13 +54,13 @@ func ExternalServicesSelector(cluster *memgraphcomv1alpha1.MemgraphCluster) map[
 
 // CoordinatorExternalServiceName is the name of the one LoadBalancer Service
 // shared by all coordinators.
-func CoordinatorExternalServiceName(cluster *memgraphcomv1alpha1.MemgraphCluster) string {
+func CoordinatorExternalServiceName(cluster *memgraphcomv1alpha1.MemgraphDBCluster) string {
 	return CoordinatorName(cluster) + externalSuffix
 }
 
 // DataExternalServiceName is the name of the LoadBalancer Service in front of
 // the data instance on the given pod ordinal.
-func DataExternalServiceName(cluster *memgraphcomv1alpha1.MemgraphCluster, ordinal int32) string {
+func DataExternalServiceName(cluster *memgraphcomv1alpha1.MemgraphDBCluster, ordinal int32) string {
 	return fmt.Sprintf("%s-%d%s", DataName(cluster), ordinal, externalSuffix)
 }
 
@@ -75,7 +75,7 @@ func DataExternalServiceName(cluster *memgraphcomv1alpha1.MemgraphCluster, ordin
 // The Services are the same in both exposure modes and differ only in type:
 // LoadBalancers when they are the way in themselves, ClusterIPs when a Gateway
 // is, with a TCPRoute per Service pointing at it.
-func ExternalServices(cluster *memgraphcomv1alpha1.MemgraphCluster, dataReplicas int32) []*corev1.Service {
+func ExternalServices(cluster *memgraphcomv1alpha1.MemgraphDBCluster, dataReplicas int32) []*corev1.Service {
 	if cluster.Spec.ExternalAccess == nil {
 		return nil
 	}
@@ -91,7 +91,7 @@ func ExternalServices(cluster *memgraphcomv1alpha1.MemgraphCluster, dataReplicas
 // behind. Any coordinator answers a routing request — a follower forwards it to
 // the leader — so clients need one address for the role, not one per member,
 // and every coordinator is announced at this one.
-func CoordinatorExternalService(cluster *memgraphcomv1alpha1.MemgraphCluster) *corev1.Service {
+func CoordinatorExternalService(cluster *memgraphcomv1alpha1.MemgraphDBCluster) *corev1.Service {
 	spec := normalize(cluster.Spec)
 	return externalService(cluster, coordinatorComponent, CoordinatorExternalServiceName(cluster),
 		selectorLabels(cluster, coordinatorComponent), spec, spec.coordinatorRole, spec.external.coordinators,
@@ -104,7 +104,7 @@ func CoordinatorExternalService(cluster *memgraphcomv1alpha1.MemgraphCluster) *c
 // name, so one address per instance is the only shape that works. The Service
 // selects the pod by the name label the StatefulSet controller stamps on it,
 // which is the one label that singles out an ordinal.
-func DataExternalService(cluster *memgraphcomv1alpha1.MemgraphCluster, ordinal int32) *corev1.Service {
+func DataExternalService(cluster *memgraphcomv1alpha1.MemgraphDBCluster, ordinal int32) *corev1.Service {
 	spec := normalize(cluster.Spec)
 	selector := selectorLabels(cluster, dataComponent)
 	selector[appsv1.StatefulSetPodNameLabel] = PodName(DataName(cluster), ordinal)
@@ -132,7 +132,7 @@ func serviceAnnotations(spec normalizedSpec, annotations map[string]string) map[
 // block's labels beside them and the operator's identity labels winning any
 // collision.
 func externalService(
-	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	cluster *memgraphcomv1alpha1.MemgraphDBCluster,
 	component, name string,
 	selector map[string]string,
 	spec normalizedSpec,
@@ -169,7 +169,7 @@ func externalService(
 // externalLabels is the label set of an external object: the role's labels with
 // the custom ones merged underneath, plus the marker the controller prunes by.
 func externalLabels(
-	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	cluster *memgraphcomv1alpha1.MemgraphDBCluster,
 	component string,
 	custom map[string]string,
 ) map[string]string {

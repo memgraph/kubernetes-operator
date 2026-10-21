@@ -47,7 +47,7 @@ import (
 // Retain, a claim left behind by a scale-down is grown while nothing mounts
 // it, a re-grow mounts it at the new size, and the pod the re-grow adds gets
 // its claim at the new size from the recreated template.
-var _ = Describe("MemgraphCluster growing its storage", Ordered, func() {
+var _ = Describe("MemgraphDBCluster growing its storage", Ordered, func() {
 	const resizeNamespace = "memgraph-e2e-resize"
 	const resizeClusterName = "growing"
 	const storageClass = "csi-hostpath-expandable"
@@ -64,9 +64,9 @@ var _ = Describe("MemgraphCluster growing its storage", Ordered, func() {
 		By("creating the enterprise license Secret")
 		createLicenseSecret(resizeNamespace, license, organization)
 
-		By("applying a MemgraphCluster with every claim on the expandable class")
+		By("applying a MemgraphDBCluster with every claim on the expandable class")
 		manifest := fmt.Sprintf(`apiVersion: memgraph.com/v1alpha1
-kind: MemgraphCluster
+kind: MemgraphDBCluster
 metadata:
   name: %[1]s
   namespace: %[2]s
@@ -106,7 +106,7 @@ spec:
 			licenseSecretName, storageClass)
 		cmd := exec.Command("kubectl", "apply", "-f", "-")
 		_, err := utils.RunWithInput(cmd, manifest)
-		Expect(err).NotTo(HaveOccurred(), "Failed to apply the MemgraphCluster")
+		Expect(err).NotTo(HaveOccurred(), "Failed to apply the MemgraphDBCluster")
 
 		Eventually(cluster.verifyRegistered, 10*time.Minute, 10*time.Second).Should(Succeed())
 		cluster.awaitConverged(5 * time.Minute)
@@ -132,7 +132,7 @@ spec:
 		statefulSetsBefore := statefulSetUIDs(resizeNamespace, resizeClusterName)
 
 		By("growing the lib and core dumps sizes of both roles in one edit")
-		cmd := exec.Command("kubectl", "patch", "memgraphcluster", resizeClusterName,
+		cmd := exec.Command("kubectl", "patch", "memgraphdbcluster", resizeClusterName,
 			"-n", resizeNamespace, "--type=merge", "-p", `{"spec":{
   "storage":{"coordinators":{"libPVCSize":"2Gi"},"data":{"libPVCSize":"2Gi"}},
   "coreDumps":{"coordinators":{"size":"2Gi"},"data":{"size":"2Gi"}}}}`)
@@ -175,7 +175,7 @@ spec:
 
 	It("grows a claim a scale-down left behind, which a re-grow mounts at the new size", func() {
 		By("keeping the claims of a scale-down")
-		cmd := exec.Command("kubectl", "patch", "memgraphcluster", resizeClusterName,
+		cmd := exec.Command("kubectl", "patch", "memgraphdbcluster", resizeClusterName,
 			"-n", resizeNamespace, "--type=merge", "-p", `{"spec":{"storage":{"retentionPolicy":"Retain"},"dataInstances":1}}`)
 		_, err := utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred())
@@ -191,7 +191,7 @@ spec:
 		Expect(err).NotTo(HaveOccurred())
 
 		By("growing the data instances' lib storage while nothing mounts the retained claim")
-		cmd = exec.Command("kubectl", "patch", "memgraphcluster", resizeClusterName,
+		cmd = exec.Command("kubectl", "patch", "memgraphdbcluster", resizeClusterName,
 			"-n", resizeNamespace, "--type=merge", "-p", `{"spec":{"storage":{"data":{"libPVCSize":"3Gi"}}}}`)
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred())
@@ -207,7 +207,7 @@ spec:
 		Expect(shrunk.podUIDs()).To(Equal(pods), "an online expansion restarts no pod")
 
 		By("growing the data instances back past the retained claim")
-		cmd = exec.Command("kubectl", "patch", "memgraphcluster", resizeClusterName,
+		cmd = exec.Command("kubectl", "patch", "memgraphdbcluster", resizeClusterName,
 			"-n", resizeNamespace, "--type=merge", "-p", `{"spec":{"dataInstances":3}}`)
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred())
@@ -298,7 +298,7 @@ func statefulSetUIDs(namespace, cluster string) map[string]string {
 // updatedStatus is the status of the resource's Updated condition.
 func updatedStatus(namespace, cluster string) string {
 	GinkgoHelper()
-	cmd := exec.Command("kubectl", "get", "memgraphcluster", cluster, "-n", namespace, "-o",
+	cmd := exec.Command("kubectl", "get", "memgraphdbcluster", cluster, "-n", namespace, "-o",
 		`jsonpath={.status.conditions[?(@.type=="Updated")].status}`)
 	output, err := utils.Run(cmd)
 	Expect(err).NotTo(HaveOccurred(), "Failed to read the Updated condition")

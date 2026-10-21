@@ -105,7 +105,7 @@ func TestDeclaredTopologyFollowsReplicaCounts(t *testing.T) {
 func TestRetiringDataInstances(t *testing.T) {
 	cases := []struct {
 		name    string
-		cluster *memgraphcomv1alpha1.MemgraphCluster
+		cluster *memgraphcomv1alpha1.MemgraphDBCluster
 		applied int32
 		want    []string
 	}{
@@ -153,7 +153,7 @@ func TestRetiringDataInstances(t *testing.T) {
 func TestRetiringCoordinators(t *testing.T) {
 	cases := []struct {
 		name    string
-		cluster *memgraphcomv1alpha1.MemgraphCluster
+		cluster *memgraphcomv1alpha1.MemgraphDBCluster
 		applied int32
 		want    []string
 	}{
@@ -219,7 +219,7 @@ func TestRetiringCoordinatorMatchesItsDeclaredForm(t *testing.T) {
 
 // coordinatorsCluster is the minimal cluster with a different coordinators count,
 // the spec side of a coordinator scale.
-func coordinatorsCluster(coordinators int32) *memgraphcomv1alpha1.MemgraphCluster {
+func coordinatorsCluster(coordinators int32) *memgraphcomv1alpha1.MemgraphDBCluster {
 	cluster := minimalCluster()
 	cluster.Spec.Coordinators = ptr.To(coordinators)
 	return cluster
@@ -227,7 +227,7 @@ func coordinatorsCluster(coordinators int32) *memgraphcomv1alpha1.MemgraphCluste
 
 // dataInstancesCluster is the minimal cluster with a lowered dataInstances count,
 // the spec side of a scale-down.
-func dataInstancesCluster(dataInstances int32) *memgraphcomv1alpha1.MemgraphCluster {
+func dataInstancesCluster(dataInstances int32) *memgraphcomv1alpha1.MemgraphDBCluster {
 	cluster := minimalCluster()
 	cluster.Spec.DataInstances = ptr.To(dataInstances)
 	return cluster

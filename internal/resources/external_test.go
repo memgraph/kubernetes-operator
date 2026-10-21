@@ -47,7 +47,7 @@ const (
 // every decoration of the block set so the golden tests can pin where each one
 // lands: the coordinators' hostname has no ordinal, the data hostname carries
 // the placeholder, and each role has one label of its own.
-func exposedCluster() *memgraphcomv1alpha1.MemgraphCluster {
+func exposedCluster() *memgraphcomv1alpha1.MemgraphDBCluster {
 	cluster := minimalCluster()
 	cluster.Spec.ExternalAccess = &memgraphcomv1alpha1.ExternalAccessSpec{
 		Type: memgraphcomv1alpha1.ExternalAccessLoadBalancer,

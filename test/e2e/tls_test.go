@@ -60,7 +60,7 @@ import (
 // port answers over TLS. Both certificates are minted here from one
 // throwaway CA, with the pod-DNS wildcards a verifying client would need; no
 // cert-manager runs.
-var _ = Describe("MemgraphCluster serving TLS", Ordered, func() {
+var _ = Describe("MemgraphDBCluster serving TLS", Ordered, func() {
 	const tlsNamespace = "memgraph-e2e-tls"
 	const tlsClusterName = "secured"
 	const tlsSecretName = "bolt-tls"
@@ -94,9 +94,9 @@ var _ = Describe("MemgraphCluster serving TLS", Ordered, func() {
 		intraCert, intraKey := ca.mintLeaf(dnsNames, x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth)
 		createTLSSecret(tlsNamespace, intraSecretName, intraCert, intraKey, ca.certPEM)
 
-		By("applying a MemgraphCluster with intra-cluster TLS, plaintext Bolt, LoadBalancers and a ServiceMonitor")
+		By("applying a MemgraphDBCluster with intra-cluster TLS, plaintext Bolt, LoadBalancers and a ServiceMonitor")
 		manifest := fmt.Sprintf(`apiVersion: memgraph.com/v1alpha1
-kind: MemgraphCluster
+kind: MemgraphDBCluster
 metadata:
   name: %s
   namespace: %s
@@ -134,7 +134,7 @@ spec:
 			example.Spec.Image.Repository, example.Spec.Image.Tag, licenseSecretName, intraSecretName)
 		cmd := exec.Command("kubectl", "apply", "-f", "-")
 		_, err := utils.RunWithInput(cmd, manifest)
-		Expect(err).NotTo(HaveOccurred(), "Failed to apply the MemgraphCluster")
+		Expect(err).NotTo(HaveOccurred(), "Failed to apply the MemgraphDBCluster")
 	})
 
 	AfterAll(func() {
@@ -154,7 +154,7 @@ spec:
 	})
 
 	It("refuses to drop intra-cluster TLS from the live cluster", func() {
-		cmd := exec.Command("kubectl", "patch", "memgraphcluster", tlsClusterName,
+		cmd := exec.Command("kubectl", "patch", "memgraphdbcluster", tlsClusterName,
 			"-n", tlsNamespace, "--type=merge", "-p", `{"spec":{"tls":null}}`)
 		out, err := utils.Run(cmd)
 		Expect(err).To(HaveOccurred(), "admission must refuse removing intraCluster on a live cluster")
@@ -173,7 +173,7 @@ spec:
 		Expect(before).To(HaveLen(int(plain.coordinators + plain.dataInstances)))
 
 		By("adding the tls.bolt block")
-		cmd := exec.Command("kubectl", "patch", "memgraphcluster", tlsClusterName,
+		cmd := exec.Command("kubectl", "patch", "memgraphdbcluster", tlsClusterName,
 			"-n", tlsNamespace, "--type=merge", "-p",
 			fmt.Sprintf(`{"spec":{"tls":{"bolt":{"secretRef":{"name":"%s"}}}}}`, tlsSecretName))
 		_, err = utils.Run(cmd)
@@ -194,9 +194,9 @@ spec:
 		By("confirming the cluster converges with every member registered, reached over TLS")
 		Eventually(secured.verifyRegistered, 10*time.Minute, 10*time.Second).Should(Succeed())
 		cmd = exec.Command("kubectl", "wait", "--for=condition=Updated",
-			"memgraphcluster/"+tlsClusterName, "-n", tlsNamespace, "--timeout=5m")
+			"memgraphdbcluster/"+tlsClusterName, "-n", tlsNamespace, "--timeout=5m")
 		_, err = utils.Run(cmd)
-		Expect(err).NotTo(HaveOccurred(), "the MemgraphCluster never reported Updated")
+		Expect(err).NotTo(HaveOccurred(), "the MemgraphDBCluster never reported Updated")
 		secured.awaitConverged(5 * time.Minute)
 	})
 
