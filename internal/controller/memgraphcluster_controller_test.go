@@ -1554,6 +1554,10 @@ var _ = Describe("MemgraphCluster Controller", func() {
 				"the condition must name the command that was refused")
 			Expect(converged.Message).To(ContainSubstring("replication port already in use"),
 				"the condition must carry the coordinator's own words")
+			Expect(recorded.withReason(EventReasonInstanceRegistrationRefused)).To(Equal([]string{
+				"Warning InstanceRegistrationRefused Registered data instance instance_1 with the coordinators refused: " +
+					"replication port already in use [" + resourceName + dataSuffix + "-1]",
+			}), "the reason names the command Memgraph refused")
 		})
 
 		It("should report ready and converged once the cluster is bootstrapped", func() {

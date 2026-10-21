@@ -47,25 +47,33 @@ import (
 //
 // The Bolt commands are the reason Events exist at all: the Kubernetes audit
 // log sees every write the operator makes to the API server, but nothing it
-// sends to Memgraph.
+// sends to Memgraph. Each has a reason for the command Memgraph accepted and
+// one for the command it refused, a Warning, so the reason alone says which
+// command failed.
 const (
-	EventReasonCoordinatorAdded          = "CoordinatorAdded"
-	EventReasonInstanceRegistered        = "InstanceRegistered"
-	EventReasonMainPromoted              = "MainPromoted"
-	EventReasonMainPromotionRefused      = "MainPromotionRefused"
-	EventReasonMainDemoted               = "MainDemoted"
-	EventReasonInstanceUnregistered      = "InstanceUnregistered"
-	EventReasonCoordinatorRemoved        = "CoordinatorRemoved"
-	EventReasonLeadershipYielded         = "LeadershipYielded"
-	EventReasonBoltServerUpdated         = "BoltServerUpdated"
-	EventReasonRegistrationFailed        = "RegistrationFailed"
-	EventReasonSettingApplied            = "SettingApplied"
-	EventReasonSettingRejected           = "SettingRejected"
-	EventReasonCoordinatorSettingApplied = "CoordinatorSettingApplied"
-	EventReasonPodRestarted              = "PodRestarted"
-	EventReasonStatefulSetShrunk         = "StatefulSetShrunk"
-	EventReasonVolumeExpansionRequested  = "VolumeExpansionRequested"
-	EventReasonStatefulSetOrphaned       = "StatefulSetOrphaned"
+	EventReasonCoordinatorAdded              = "CoordinatorAdded"
+	EventReasonCoordinatorAdditionRefused    = "CoordinatorAdditionRefused"
+	EventReasonInstanceRegistered            = "InstanceRegistered"
+	EventReasonInstanceRegistrationRefused   = "InstanceRegistrationRefused"
+	EventReasonMainPromoted                  = "MainPromoted"
+	EventReasonMainPromotionRefused          = "MainPromotionRefused"
+	EventReasonMainDemoted                   = "MainDemoted"
+	EventReasonMainDemotionRefused           = "MainDemotionRefused"
+	EventReasonInstanceUnregistered          = "InstanceUnregistered"
+	EventReasonInstanceUnregistrationRefused = "InstanceUnregistrationRefused"
+	EventReasonCoordinatorRemoved            = "CoordinatorRemoved"
+	EventReasonCoordinatorRemovalRefused     = "CoordinatorRemovalRefused"
+	EventReasonLeadershipYielded             = "LeadershipYielded"
+	EventReasonLeadershipYieldRefused        = "LeadershipYieldRefused"
+	EventReasonBoltServerUpdated             = "BoltServerUpdated"
+	EventReasonBoltServerUpdateRefused       = "BoltServerUpdateRefused"
+	EventReasonSettingApplied                = "SettingApplied"
+	EventReasonSettingRejected               = "SettingRejected"
+	EventReasonCoordinatorSettingApplied     = "CoordinatorSettingApplied"
+	EventReasonPodRestarted                  = "PodRestarted"
+	EventReasonStatefulSetShrunk             = "StatefulSetShrunk"
+	EventReasonVolumeExpansionRequested      = "VolumeExpansionRequested"
+	EventReasonStatefulSetOrphaned           = "StatefulSetOrphaned"
 )
 
 // Event actions, the events.k8s.io field saying what the operator did to the
@@ -158,22 +166,23 @@ type recordingClient struct {
 
 func (c recordingClient) AddCoordinator(ctx context.Context, coordinator memgraph.CoordinatorSpec) error {
 	err := c.Client.AddCoordinator(ctx, coordinator)
-	c.record(err, coordinatorPodRef(c.cluster, coordinator.Name()), EventReasonCoordinatorAdded, eventActionRegister,
+	c.record(err, coordinatorPodRef(c.cluster, coordinator.Name()),
+		EventReasonCoordinatorAdded, EventReasonCoordinatorAdditionRefused, eventActionRegister,
 		"Added coordinator %s to the Raft cluster", coordinator.Name())
 	return err
 }
 
 func (c recordingClient) RegisterInstance(ctx context.Context, instance memgraph.DataInstanceSpec) error {
 	err := c.Client.RegisterInstance(ctx, instance)
-	c.record(err, dataInstancePodRef(c.cluster, instance.Name), EventReasonInstanceRegistered, eventActionRegister,
+	c.record(err, dataInstancePodRef(c.cluster, instance.Name),
+		EventReasonInstanceRegistered, EventReasonInstanceRegistrationRefused, eventActionRegister,
 		"Registered data instance %s with the coordinators", instance.Name)
 	return err
 }
 
-// SetInstanceToMain records a refusal as a Warning of its own rather than a
-// failed registration: the command falls back to its next candidate, so a
-// refusal is not the end of the promotion, and the instance that did become
-// MAIN gets the MainPromoted.
+// SetInstanceToMain records each refused candidate, and is the one command
+// whose refusal is not the end of it: the command falls back to its next
+// candidate, and the instance that did become MAIN gets the MainPromoted.
 func (c recordingClient) SetInstanceToMain(ctx context.Context, name string) error {
 	err := c.Client.SetInstanceToMain(ctx, name)
 	if err != nil {
@@ -188,14 +197,16 @@ func (c recordingClient) SetInstanceToMain(ctx context.Context, name string) err
 
 func (c recordingClient) DemoteInstance(ctx context.Context, name string) error {
 	err := c.Client.DemoteInstance(ctx, name)
-	c.record(err, dataInstancePodRef(c.cluster, name), EventReasonMainDemoted, eventActionDemote,
+	c.record(err, dataInstancePodRef(c.cluster, name),
+		EventReasonMainDemoted, EventReasonMainDemotionRefused, eventActionDemote,
 		"Demoted retiring data instance %s from MAIN to REPLICA", name)
 	return err
 }
 
 func (c recordingClient) UnregisterInstance(ctx context.Context, name string) error {
 	err := c.Client.UnregisterInstance(ctx, name)
-	c.record(err, dataInstancePodRef(c.cluster, name), EventReasonInstanceUnregistered, eventActionUnregister,
+	c.record(err, dataInstancePodRef(c.cluster, name),
+		EventReasonInstanceUnregistered, EventReasonInstanceUnregistrationRefused, eventActionUnregister,
 		"Unregistered retiring data instance %s from the coordinators", name)
 	return err
 }
@@ -203,14 +214,16 @@ func (c recordingClient) UnregisterInstance(ctx context.Context, name string) er
 func (c recordingClient) RemoveCoordinator(ctx context.Context, id int32) error {
 	err := c.Client.RemoveCoordinator(ctx, id)
 	name := memgraph.CoordinatorSpec{ID: id}.Name()
-	c.record(err, coordinatorPodRef(c.cluster, name), EventReasonCoordinatorRemoved, eventActionUnregister,
+	c.record(err, coordinatorPodRef(c.cluster, name),
+		EventReasonCoordinatorRemoved, EventReasonCoordinatorRemovalRefused, eventActionUnregister,
 		"Removed retiring coordinator %s from the Raft cluster", name)
 	return err
 }
 
 func (c recordingClient) YieldLeadership(ctx context.Context) error {
 	err := c.Client.YieldLeadership(ctx)
-	c.record(err, coordinatorPodRef(c.cluster, c.leader), EventReasonLeadershipYielded, eventActionYield,
+	c.record(err, coordinatorPodRef(c.cluster, c.leader),
+		EventReasonLeadershipYielded, EventReasonLeadershipYieldRefused, eventActionYield,
 		"Yielded Raft leadership of retiring coordinator %s to another coordinator", c.leader)
 	return err
 }
@@ -218,26 +231,30 @@ func (c recordingClient) YieldLeadership(ctx context.Context) error {
 func (c recordingClient) UpdateCoordinatorBoltServer(ctx context.Context, id int32, boltServer string) error {
 	err := c.Client.UpdateCoordinatorBoltServer(ctx, id, boltServer)
 	name := memgraph.CoordinatorSpec{ID: id}.Name()
-	c.record(err, coordinatorPodRef(c.cluster, name), EventReasonBoltServerUpdated, eventActionUpdateConfig,
+	c.record(err, coordinatorPodRef(c.cluster, name),
+		EventReasonBoltServerUpdated, EventReasonBoltServerUpdateRefused, eventActionUpdateConfig,
 		"Updated the bolt_server coordinator %s announces to %s", name, boltServer)
 	return err
 }
 
 func (c recordingClient) UpdateInstanceBoltServer(ctx context.Context, name, boltServer string) error {
 	err := c.Client.UpdateInstanceBoltServer(ctx, name, boltServer)
-	c.record(err, dataInstancePodRef(c.cluster, name), EventReasonBoltServerUpdated, eventActionUpdateConfig,
+	c.record(err, dataInstancePodRef(c.cluster, name),
+		EventReasonBoltServerUpdated, EventReasonBoltServerUpdateRefused, eventActionUpdateConfig,
 		"Updated the bolt_server data instance %s announces to %s", name, boltServer)
 	return err
 }
 
-// record is the Normal Event an accepted command earns, or the Warning a
-// refused one does; the refusal carries what the action would have been and
-// Memgraph's error. related is the pod of the member the command was about.
-func (c recordingClient) record(err error, related runtime.Object, reason, action, note string, args ...any) {
+// record is the Normal Event under accepted that an accepted command earns,
+// or the Warning under refused that a refused one does; the refusal carries
+// what the action would have been and Memgraph's error. related is the pod of
+// the member the command was about.
+func (c recordingClient) record(
+	err error, related runtime.Object, accepted, refused, action, note string, args ...any,
+) {
 	if err != nil {
-		c.r.warning(c.cluster, related, EventReasonRegistrationFailed, action,
-			"%s refused: %v", fmt.Sprintf(note, args...), err)
+		c.r.warning(c.cluster, related, refused, action, "%s refused: %v", fmt.Sprintf(note, args...), err)
 		return
 	}
-	c.r.event(c.cluster, related, reason, action, note, args...)
+	c.r.event(c.cluster, related, accepted, action, note, args...)
 }
