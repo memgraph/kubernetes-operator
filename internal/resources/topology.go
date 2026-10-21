@@ -62,6 +62,11 @@ func DataInstanceName(ordinal int32) string {
 	return fmt.Sprintf("instance_%d", ordinal)
 }
 
+// PodName is the name of the pod a StatefulSet runs on the given ordinal.
+func PodName(statefulSet string, ordinal int32) string {
+	return fmt.Sprintf("%s-%d", statefulSet, ordinal)
+}
+
 // CoordinatorOrdinal and DataInstanceOrdinal are the inverses: the ordinal of the
 // pod running the member an observed view names. They live next to the functions
 // they invert so the two cannot drift apart, and they are what anything holding a
@@ -167,7 +172,7 @@ func endpoints(
 	for ordinal := range running {
 		endpoints = append(endpoints, Endpoint{
 			Name:    instanceName(ordinal),
-			Pod:     fmt.Sprintf("%s-%d", statefulSet, ordinal),
+			Pod:     PodName(statefulSet, ordinal),
 			Address: hostPort(podFQDN(cluster, statefulSet, spec, ordinal), memgraphcomv1alpha1.BoltPort),
 			TLS:     spec.boltTLSSecret != "",
 		})

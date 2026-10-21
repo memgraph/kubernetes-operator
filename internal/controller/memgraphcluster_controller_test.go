@@ -175,10 +175,13 @@ var _ = Describe("MemgraphCluster Controller", func() {
 
 	reconcileCluster := func(name string) reconcile.Result {
 		GinkgoHelper()
+		before := len(recorded.all())
 		result, err := reconciler.Reconcile(ctx, reconcile.Request{
 			NamespacedName: types.NamespacedName{Name: name, Namespace: resourceNamespace},
 		})
 		Expect(err).NotTo(HaveOccurred())
+		Expect(recorded.merged(before)).To(BeEmpty(),
+			"every action a pass takes must stay its own Event, not a count on an earlier one's")
 		return result
 	}
 
@@ -525,14 +528,17 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			}))
 			Expect(result.RequeueAfter).To(BeNumerically(">", 0),
 				"registration was issued, so a follow-up reconcile must verify convergence")
+			coordinatorPod := func(ordinal int) string { return fmt.Sprintf("[%s%s-%d]", resourceName, coordinatorSuffix, ordinal) }
+			dataPod := func(ordinal int) string { return fmt.Sprintf("[%s%s-%d]", resourceName, dataSuffix, ordinal) }
 			Expect(recorded.all()).To(Equal([]string{
-				"Normal CoordinatorAdded Added coordinator coordinator_0 to the Raft cluster",
-				"Normal CoordinatorAdded Added coordinator coordinator_1 to the Raft cluster",
-				"Normal CoordinatorAdded Added coordinator coordinator_2 to the Raft cluster",
-				"Normal InstanceRegistered Registered data instance instance_0 with the coordinators",
-				"Normal InstanceRegistered Registered data instance instance_1 with the coordinators",
-				"Normal MainPromoted Promoted data instance instance_0 to MAIN",
-			}), "every command Memgraph accepted is recorded on the cluster, in the order it ran")
+				"Normal CoordinatorAdded Added coordinator coordinator_0 to the Raft cluster " + coordinatorPod(0),
+				"Normal CoordinatorAdded Added coordinator coordinator_1 to the Raft cluster " + coordinatorPod(1),
+				"Normal CoordinatorAdded Added coordinator coordinator_2 to the Raft cluster " + coordinatorPod(2),
+				"Normal InstanceRegistered Registered data instance instance_0 with the coordinators " + dataPod(0),
+				"Normal InstanceRegistered Registered data instance instance_1 with the coordinators " + dataPod(1),
+				"Normal MainPromoted Promoted data instance instance_0 to MAIN " + dataPod(0),
+			}), "every command Memgraph accepted is recorded on the cluster, in the order it ran, "+
+				"naming the member's pod so that client-go keeps each its own Event")
 
 			result = reconcileCluster(resourceName)
 			Expect(fake.executedCommands()).To(HaveLen(6),
@@ -913,8 +919,10 @@ var _ = Describe("MemgraphCluster Controller", func() {
 				"the condition must name the coordinators being retired")
 
 			Expect(recorded.withReason(EventReasonCoordinatorRemoved)).To(Equal([]string{
-				"Normal CoordinatorRemoved Removed retiring coordinator coordinator_3 from the Raft cluster",
-				"Normal CoordinatorRemoved Removed retiring coordinator coordinator_4 from the Raft cluster",
+				"Normal CoordinatorRemoved Removed retiring coordinator coordinator_3 from the Raft cluster [" +
+					resourceName + coordinatorSuffix + "-3]",
+				"Normal CoordinatorRemoved Removed retiring coordinator coordinator_4 from the Raft cluster [" +
+					resourceName + coordinatorSuffix + "-4]",
 			}))
 
 			By("shedding the pods once the members have left the Raft cluster")
@@ -955,7 +963,8 @@ var _ = Describe("MemgraphCluster Controller", func() {
 				retiringLeader + ": YIELD LEADERSHIP",
 			}), "the yield comes last, after the removal the planner could still order safely")
 			Expect(recorded.withReason(EventReasonLeadershipYielded)).To(Equal([]string{
-				"Normal LeadershipYielded Yielded Raft leadership of retiring coordinator coordinator_3 to another coordinator",
+				"Normal LeadershipYielded Yielded Raft leadership of retiring coordinator coordinator_3 to another coordinator [" +
+					resourceName + coordinatorSuffix + "-3]",
 			}), "the query names no one, so the Event names the coordinator the plan moved leadership off")
 			converged := convergedCondition()
 			Expect(converged.Status).To(Equal(metav1.ConditionFalse))
@@ -1129,9 +1138,10 @@ var _ = Describe("MemgraphCluster Controller", func() {
 				leader + ": UNREGISTER INSTANCE instance_1",
 			}), "demote, promote and unregister issue in one pass against one leader")
 			Expect(recorded.all()[len(recorded.all())-3:]).To(Equal([]string{
-				"Normal MainDemoted Demoted retiring data instance instance_1 from MAIN to REPLICA",
-				"Normal MainPromoted Promoted data instance instance_0 to MAIN",
-				"Normal InstanceUnregistered Unregistered retiring data instance instance_1 from the coordinators",
+				"Normal MainDemoted Demoted retiring data instance instance_1 from MAIN to REPLICA [" + resourceName + dataSuffix + "-1]",
+				"Normal MainPromoted Promoted data instance instance_0 to MAIN [" + resourceName + dataSuffix + "-0]",
+				"Normal InstanceUnregistered Unregistered retiring data instance instance_1 from the coordinators [" +
+					resourceName + dataSuffix + "-1]",
 			}))
 			Expect(replicas(dataSuffix)).To(Equal(int32(2)),
 				"a pass with pending commands must never lower the replica count")
@@ -1223,10 +1233,10 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			}), "the refused survivor is skipped and the retirement completes in the same pass")
 			Expect(recorded.withReason(EventReasonMainPromotionRefused)).To(Equal([]string{
 				"Warning MainPromotionRefused The coordinators refused to promote data instance instance_0 to MAIN: " +
-					"instance is not registered",
+					"instance is not registered [" + resourceName + dataSuffix + "-0]",
 			}))
 			Expect(recorded.withReason(EventReasonMainPromoted)).To(ContainElement(
-				"Normal MainPromoted Promoted data instance instance_1 to MAIN"),
+				"Normal MainPromoted Promoted data instance instance_1 to MAIN ["+resourceName+dataSuffix+"-1]"),
 				"the Event names the instance the coordinators took, not the plan's first choice")
 
 			reconcileCluster(resourceName)
@@ -1262,10 +1272,10 @@ var _ = Describe("MemgraphCluster Controller", func() {
 				leader + ": SET INSTANCE instance_1 TO MAIN",
 			}), "MAIN goes back to the demoted instance, and the unregistration never runs")
 			Expect(recorded.all()[len(recorded.all())-3:]).To(Equal([]string{
-				"Normal MainDemoted Demoted retiring data instance instance_1 from MAIN to REPLICA",
+				"Normal MainDemoted Demoted retiring data instance instance_1 from MAIN to REPLICA [" + resourceName + dataSuffix + "-1]",
 				"Warning MainPromotionRefused The coordinators refused to promote data instance instance_0 to MAIN: " +
-					"instance is down",
-				"Normal MainPromoted Promoted data instance instance_1 to MAIN",
+					"instance is down [" + resourceName + dataSuffix + "-0]",
+				"Normal MainPromoted Promoted data instance instance_1 to MAIN [" + resourceName + dataSuffix + "-1]",
 			}), "a handover that went back is visible as one: demoted, refused, promoted back")
 			Expect(replicas(dataSuffix)).To(Equal(int32(2)),
 				"the retiring pod outlives a retirement that did not finish")
@@ -1544,6 +1554,10 @@ var _ = Describe("MemgraphCluster Controller", func() {
 				"the condition must name the command that was refused")
 			Expect(converged.Message).To(ContainSubstring("replication port already in use"),
 				"the condition must carry the coordinator's own words")
+			Expect(recorded.withReason(EventReasonInstanceRegistrationRefused)).To(Equal([]string{
+				"Warning InstanceRegistrationRefused Registered data instance instance_1 with the coordinators refused: " +
+					"replication port already in use [" + resourceName + dataSuffix + "-1]",
+			}), "the reason names the command Memgraph refused")
 		})
 
 		It("should report ready and converged once the cluster is bootstrapped", func() {
@@ -3122,8 +3136,15 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			}
 			Expect(awsCommands()[6:]).To(HaveLen(4))
 			Expect(awsCommands()[6:]).To(HaveEach(Or(ContainSubstring(secretKeySET), ContainSubstring(endpointSET))))
-			Expect(recorded.withReason(EventReasonSettingApplied)).To(ContainElement(
-				ContainSubstring(`Ran SET DATABASE SETTING "aws.secret_key" from the Secret on pod`)))
+			rotated := recorded.withReason(EventReasonSettingApplied)
+			Expect(rotated[len(rotated)-2:]).To(Equal([]string{
+				`Normal SettingApplied Ran SET DATABASE SETTING "aws.endpoint_url" from the Secret, ` +
+					`SET DATABASE SETTING "aws.secret_key" from the Secret on pod ` + podName(dataSuffix, 0) +
+					" [" + podName(dataSuffix, 0) + "]",
+				`Normal SettingApplied Ran SET DATABASE SETTING "aws.endpoint_url" from the Secret, ` +
+					`SET DATABASE SETTING "aws.secret_key" from the Secret on pod ` + podName(dataSuffix, 1) +
+					" [" + podName(dataSuffix, 1) + "]",
+			}), "one Event per pod for the step, listing every SET it ran")
 			for _, credential := range []string{accessKey, secretKey, rotatedKey} {
 				Expect(recorded.all()).NotTo(ContainElement(ContainSubstring(credential)),
 					"an Event names the setting, never a credential")
@@ -3597,7 +3618,8 @@ var _ = Describe("MemgraphCluster Controller", func() {
 					`: SET COORDINATOR SETTING "` + downTimeoutSetting + `" TO "7"`,
 			))
 			Expect(recorded.withReason(EventReasonCoordinatorSettingApplied)).To(Equal([]string{
-				`Normal CoordinatorSettingApplied Ran SET COORDINATOR SETTING "` + downTimeoutSetting + `" TO "7"`,
+				`Normal CoordinatorSettingApplied Ran SET COORDINATOR SETTING "` + downTimeoutSetting + `" TO "7" [` +
+					resourceName + coordinatorSuffix + "-1]",
 			}))
 			Expect(condition(memgraphcomv1alpha1.ConditionConverged).Status).To(Equal(metav1.ConditionTrue))
 

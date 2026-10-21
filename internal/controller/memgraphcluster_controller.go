@@ -1244,7 +1244,7 @@ func (r *MemgraphClusterReconciler) observeRolloutRole(
 	}
 
 	for ordinal := int32(0); ordinal < role.applied; ordinal++ {
-		pod, ok := byName[fmt.Sprintf("%s-%d", role.name, ordinal)]
+		pod, ok := byName[resources.PodName(role.name, ordinal)]
 		if !ok {
 			continue
 		}
@@ -1444,7 +1444,7 @@ func (r *MemgraphClusterReconciler) reconcileRegistration(
 		// which keys to report as unknown, and which pods a changed template
 		// leaves with nothing to restart for.
 		classes := r.classifyFlags(ctx, cluster, leader, replicas, roles)
-		applied.merge(r.reconcileCoordinatorSettings(ctx, cluster, leader, classes))
+		applied.merge(r.reconcileCoordinatorSettings(ctx, cluster, leader, observedLeader(observed), classes))
 		applied.unknown = classes.unknownMessage()
 		converged := r.convergedCondition(ctx, cluster, topology, exposure, applied, claims)
 
@@ -1646,10 +1646,14 @@ const coordinatorSettingsSubject = "the Raft leader, which did not report the co
 // and a warning rather than an error. Writing on the strength of it would
 // re-issue every setting on every such pass, so the pass reports it pending
 // and tries again. A refused SET is reported like a refused per-instance one.
+//
+// The Events name the leader's pod, leaderName's, as the one that ran the
+// SETs: the settings themselves belong to no pod.
 func (r *MemgraphClusterReconciler) reconcileCoordinatorSettings(
 	ctx context.Context,
 	cluster *memgraphcomv1alpha1.MemgraphCluster,
 	leader memgraph.Client,
+	leaderName string,
 	classes flagClasses,
 ) settingsOutcome {
 	log := logf.FromContext(ctx)
@@ -1673,17 +1677,28 @@ func (r *MemgraphClusterReconciler) reconcileCoordinatorSettings(
 		return settingsOutcome{}
 	}
 	observed := classes.coordinatorSettings
+	// One Event for the pass rather than one per setting, like the
+	// per-instance settings (see events.go).
+	pod := coordinatorPodRef(cluster, leaderName)
+	var ran []string
+	recordRan := func() {
+		if len(ran) > 0 {
+			r.event(cluster, pod, EventReasonCoordinatorSettingApplied, eventActionSetCoordinatorSetting,
+				"Ran %s", strings.Join(ran, ", "))
+		}
+	}
 	for _, change := range settings.Diff(desired, observed) {
 		if err := leader.SetCoordinatorSetting(ctx, change.Setting, change.Value); err != nil {
+			recordRan()
 			rejected := fmt.Sprintf(
 				"the coordinators rejected SET COORDINATOR SETTING %q TO %q: %v", change.Setting, change.Value, err)
-			r.warning(cluster, nil, EventReasonSettingRejected, eventActionSetSetting, "%s", rejected)
+			r.warning(cluster, pod, EventReasonSettingRejected, eventActionSetCoordinatorSetting, "%s", rejected)
 			return settingsOutcome{rejected: []string{rejected}}
 		}
 		log.Info("Applied coordinator setting", "setting", change.Setting, "value", change.Value)
-		r.event(cluster, nil, EventReasonCoordinatorSettingApplied, eventActionSetSetting,
-			"Ran SET COORDINATOR SETTING %q TO %q", change.Setting, change.Value)
+		ran = append(ran, fmt.Sprintf("SET COORDINATOR SETTING %q TO %q", change.Setting, change.Value))
 	}
+	recordRan()
 	return settingsOutcome{}
 }
 
@@ -1734,7 +1749,7 @@ func (r *MemgraphClusterReconciler) reconcileSettings(
 			if !ready[endpoint.Pod] {
 				continue
 			}
-			changes, err := r.applySettings(ctx, cluster, reads, endpoint, func(observed map[string]string) []settings.Change {
+			changes, err := r.applySettings(ctx, cluster, reads, endpoint, eventActionSetRunTimeFlags, func(observed map[string]string) []settings.Change {
 				return settings.Plan(role.flags, observed)
 			}, runTimeSetting)
 			for _, change := range changes {
@@ -2008,7 +2023,7 @@ func (r *MemgraphClusterReconciler) reconcileAWSCredentials(
 		if !ready[endpoint.Pod] {
 			continue
 		}
-		changes, err := r.applySettings(ctx, cluster, reads, endpoint, func(observed map[string]string) []settings.Change {
+		changes, err := r.applySettings(ctx, cluster, reads, endpoint, eventActionSetAWSCredentials, func(observed map[string]string) []settings.Change {
 			return settings.Diff(desired, observed)
 		}, secretSetting)
 		for _, change := range changes {
@@ -2126,11 +2141,14 @@ func (r *MemgraphClusterReconciler) readInstance(
 // remaining changes for this pass and comes back as a settingRejected whose
 // command is what describe says, so a caller holding secret material can
 // leave the value out; any other error is a pod that could not be reached.
+// The SETs that landed are one Event under action, the step's own, so two
+// steps SETting on one pod in a pass stay two Events (see events.go).
 func (r *MemgraphClusterReconciler) applySettings(
 	ctx context.Context,
 	cluster *memgraphcomv1alpha1.MemgraphCluster,
 	reads podSettings,
 	endpoint resources.Endpoint,
+	action string,
 	plan func(observed map[string]string) []settings.Change,
 	describe func(change settings.Change) string,
 ) ([]settings.Change, error) {
@@ -2151,18 +2169,27 @@ func (r *MemgraphClusterReconciler) applySettings(
 			logf.FromContext(ctx).Error(err, "Failed to close instance connection", "pod", endpoint.Pod)
 		}
 	}()
+	pod := podRef(cluster, endpoint.Pod)
 	var applied []settings.Change
+	var ran []string
+	recordRan := func() {
+		if len(ran) > 0 {
+			r.event(cluster, pod, EventReasonSettingApplied, action,
+				"Ran %s on pod %s", strings.Join(ran, ", "), endpoint.Pod)
+		}
+	}
 	for _, change := range changes {
 		if err := conn.SetSetting(ctx, change.Setting, change.Value); err != nil {
-			r.warning(cluster, podRef(cluster, endpoint.Pod), EventReasonSettingRejected, eventActionSetSetting,
+			recordRan()
+			r.warning(cluster, pod, EventReasonSettingRejected, action,
 				"Pod %s rejected %s: %v", endpoint.Pod, describe(change), err)
 			return applied, &settingRejected{command: describe(change), err: err}
 		}
-		r.event(cluster, podRef(cluster, endpoint.Pod), EventReasonSettingApplied, eventActionSetSetting,
-			"Ran %s on pod %s", describe(change), endpoint.Pod)
 		observed[change.Setting] = change.Value
 		applied = append(applied, change)
+		ran = append(ran, describe(change))
 	}
+	recordRan()
 	return applied, nil
 }
 
@@ -2223,7 +2250,7 @@ func (r *MemgraphClusterReconciler) reconcileLicense(
 			if !ready[endpoint.Pod] {
 				continue
 			}
-			changes, err := r.applySettings(ctx, cluster, reads, endpoint, func(observed map[string]string) []settings.Change {
+			changes, err := r.applySettings(ctx, cluster, reads, endpoint, eventActionSetLicense, func(observed map[string]string) []settings.Change {
 				return settings.License(license, organization, observed)
 			}, secretSetting)
 			for _, change := range changes {
@@ -2364,7 +2391,7 @@ func (r *MemgraphClusterReconciler) shedRetiredPods(
 			written.uid, written.generation)
 		log.Info("Shrank a StatefulSet to the declared replica count",
 			"statefulset", role.replicas.name, "replicas", role.replicas.declared)
-		r.event(cluster, nil, EventReasonStatefulSetShrunk, eventActionScaleDown,
+		r.event(cluster, statefulSetRef(cluster, role.replicas.name), EventReasonStatefulSetShrunk, eventActionScaleDown,
 			"Shrank StatefulSet %s to %d replicas, shedding the pods of members that left the cluster",
 			role.replicas.name, role.replicas.declared)
 	}
@@ -2680,13 +2707,7 @@ func (r *MemgraphClusterReconciler) observeCluster(
 			continue
 		}
 
-		leaderName := ""
-		for _, instance := range observed {
-			if instance.IsLeader() {
-				leaderName = instance.Name
-				break
-			}
-		}
+		leaderName := observedLeader(observed)
 		if leaderName == coordinator.Name {
 			return conn, observed, nil
 		}
@@ -2719,6 +2740,17 @@ func (r *MemgraphClusterReconciler) observeCluster(
 		return nil, nil, fmt.Errorf("%w: %w", errNoCoordinatorLeader, errors.Join(errs...))
 	}
 	return nil, nil, fmt.Errorf("no coordinator answered SHOW INSTANCES: %w", errors.Join(errs...))
+}
+
+// observedLeader is the coordinator a SHOW INSTANCES view reports as Raft
+// leader, empty when it reports none.
+func observedLeader(observed []memgraph.Instance) string {
+	for _, instance := range observed {
+		if instance.IsLeader() {
+			return instance.Name
+		}
+	}
+	return ""
 }
 
 // leaderAddress resolves the Bolt address the operator reaches the coordinator

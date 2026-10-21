@@ -20,57 +20,83 @@ import (
 	"context"
 	"fmt"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 
 	memgraphcomv1alpha1 "github.com/memgraph/kubernetes-operator/api/v1alpha1"
 	"github.com/memgraph/kubernetes-operator/internal/memgraph"
+	"github.com/memgraph/kubernetes-operator/internal/resources"
 )
 
 // Event reasons, one per action the operator takes on a cluster. Every Event
-// is recorded on the MemgraphCluster, with the pod or claim the action touched
-// as the related object where there is one. They record what the operator
-// did, never what it is waiting for: waiting is what the conditions say, and
-// an Event repeated every pass would bury the actions.
+// is recorded on the MemgraphCluster, with the pod, claim or StatefulSet the
+// action touched as the related object where there is one. They record what
+// the operator did, never what it is waiting for: waiting is what the
+// conditions say, and an Event repeated every pass would bury the actions.
+//
+// The related object is what keeps two actions two Events. client-go's
+// recorder folds an Event into an earlier one with the same type, reason,
+// action, regarding and related object, seen within six minutes, into a
+// count on the earlier one's note; the note itself is not compared. With no
+// related object, adding coordinator_1 and then coordinator_2 reads as adding
+// coordinator_1 twice. So every action names the member it touched, and a
+// step that SETs several settings is one Event listing them: per pod for the
+// database settings, per pass, on the Raft leader's pod, for the coordinator
+// settings.
 //
 // The Bolt commands are the reason Events exist at all: the Kubernetes audit
 // log sees every write the operator makes to the API server, but nothing it
-// sends to Memgraph.
+// sends to Memgraph. Each has a reason for the command Memgraph accepted and
+// one for the command it refused, a Warning, so the reason alone says which
+// command failed.
 const (
-	EventReasonCoordinatorAdded          = "CoordinatorAdded"
-	EventReasonInstanceRegistered        = "InstanceRegistered"
-	EventReasonMainPromoted              = "MainPromoted"
-	EventReasonMainPromotionRefused      = "MainPromotionRefused"
-	EventReasonMainDemoted               = "MainDemoted"
-	EventReasonInstanceUnregistered      = "InstanceUnregistered"
-	EventReasonCoordinatorRemoved        = "CoordinatorRemoved"
-	EventReasonLeadershipYielded         = "LeadershipYielded"
-	EventReasonBoltServerUpdated         = "BoltServerUpdated"
-	EventReasonRegistrationFailed        = "RegistrationFailed"
-	EventReasonSettingApplied            = "SettingApplied"
-	EventReasonSettingRejected           = "SettingRejected"
-	EventReasonCoordinatorSettingApplied = "CoordinatorSettingApplied"
-	EventReasonPodRestarted              = "PodRestarted"
-	EventReasonStatefulSetShrunk         = "StatefulSetShrunk"
-	EventReasonVolumeExpansionRequested  = "VolumeExpansionRequested"
-	EventReasonStatefulSetOrphaned       = "StatefulSetOrphaned"
+	EventReasonCoordinatorAdded              = "CoordinatorAdded"
+	EventReasonCoordinatorAdditionRefused    = "CoordinatorAdditionRefused"
+	EventReasonInstanceRegistered            = "InstanceRegistered"
+	EventReasonInstanceRegistrationRefused   = "InstanceRegistrationRefused"
+	EventReasonMainPromoted                  = "MainPromoted"
+	EventReasonMainPromotionRefused          = "MainPromotionRefused"
+	EventReasonMainDemoted                   = "MainDemoted"
+	EventReasonMainDemotionRefused           = "MainDemotionRefused"
+	EventReasonInstanceUnregistered          = "InstanceUnregistered"
+	EventReasonInstanceUnregistrationRefused = "InstanceUnregistrationRefused"
+	EventReasonCoordinatorRemoved            = "CoordinatorRemoved"
+	EventReasonCoordinatorRemovalRefused     = "CoordinatorRemovalRefused"
+	EventReasonLeadershipYielded             = "LeadershipYielded"
+	EventReasonLeadershipYieldRefused        = "LeadershipYieldRefused"
+	EventReasonBoltServerUpdated             = "BoltServerUpdated"
+	EventReasonBoltServerUpdateRefused       = "BoltServerUpdateRefused"
+	EventReasonSettingApplied                = "SettingApplied"
+	EventReasonSettingRejected               = "SettingRejected"
+	EventReasonCoordinatorSettingApplied     = "CoordinatorSettingApplied"
+	EventReasonPodRestarted                  = "PodRestarted"
+	EventReasonStatefulSetShrunk             = "StatefulSetShrunk"
+	EventReasonVolumeExpansionRequested      = "VolumeExpansionRequested"
+	EventReasonStatefulSetOrphaned           = "StatefulSetOrphaned"
 )
 
 // Event actions, the events.k8s.io field saying what the operator did to the
 // regarding object's members; a reason says why it is worth knowing.
 const (
-	eventActionRegister     = "Register"
-	eventActionPromote      = "Promote"
-	eventActionDemote       = "Demote"
-	eventActionUnregister   = "Unregister"
-	eventActionYield        = "YieldLeadership"
-	eventActionUpdateConfig = "UpdateConfig"
-	eventActionSetSetting   = "SetSetting"
-	eventActionRestart      = "Restart"
-	eventActionScaleDown    = "ScaleDown"
-	eventActionExpandVolume = "ExpandVolume"
-	eventActionRecreate     = "RecreateStatefulSet"
+	eventActionRegister              = "Register"
+	eventActionPromote               = "Promote"
+	eventActionDemote                = "Demote"
+	eventActionUnregister            = "Unregister"
+	eventActionYield                 = "YieldLeadership"
+	eventActionUpdateConfig          = "UpdateConfig"
+	eventActionSetCoordinatorSetting = "SetCoordinatorSetting"
+	// The three steps that SET database settings on a pod each have their
+	// own action, because two of them can SET on the same pod in one pass
+	// and would otherwise be one Event.
+	eventActionSetLicense        = "SetLicense"
+	eventActionSetAWSCredentials = "SetAWSCredentials"
+	eventActionSetRunTimeFlags   = "SetRunTimeFlags"
+	eventActionRestart           = "Restart"
+	eventActionScaleDown         = "ScaleDown"
+	eventActionExpandVolume      = "ExpandVolume"
+	eventActionRecreate          = "RecreateStatefulSet"
 )
 
 // event records one Normal Event on the cluster.
@@ -99,6 +125,31 @@ func podRef(cluster *memgraphcomv1alpha1.MemgraphCluster, name string) runtime.O
 	return &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: cluster.Namespace}}
 }
 
+// statefulSetRef is a StatefulSet of the cluster as an Event's related object.
+func statefulSetRef(cluster *memgraphcomv1alpha1.MemgraphCluster, name string) runtime.Object {
+	return &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: cluster.Namespace}}
+}
+
+// dataInstancePodRef is the pod running the named data instance. A name that
+// does not parse yields no related object rather than a wrong one.
+func dataInstancePodRef(cluster *memgraphcomv1alpha1.MemgraphCluster, instance string) runtime.Object {
+	ordinal, err := resources.DataInstanceOrdinal(instance)
+	if err != nil {
+		return nil
+	}
+	return podRef(cluster, resources.PodName(resources.DataName(cluster), ordinal))
+}
+
+// coordinatorPodRef is the pod running the named coordinator, with the same
+// fallback.
+func coordinatorPodRef(cluster *memgraphcomv1alpha1.MemgraphCluster, coordinator string) runtime.Object {
+	ordinal, err := resources.CoordinatorOrdinal(coordinator)
+	if err != nil {
+		return nil
+	}
+	return podRef(cluster, resources.PodName(resources.CoordinatorName(cluster), ordinal))
+}
+
 // recordingClient records an Event for every registration command the leader
 // answers, accepted or refused, so the record is of what Memgraph was asked
 // and said rather than of what the plan intended: a promotion tries its
@@ -116,83 +167,95 @@ type recordingClient struct {
 
 func (c recordingClient) AddCoordinator(ctx context.Context, coordinator memgraph.CoordinatorSpec) error {
 	err := c.Client.AddCoordinator(ctx, coordinator)
-	c.record(err, EventReasonCoordinatorAdded, eventActionRegister,
+	c.record(err, coordinatorPodRef(c.cluster, coordinator.Name()),
+		EventReasonCoordinatorAdded, EventReasonCoordinatorAdditionRefused, eventActionRegister,
 		"Added coordinator %s to the Raft cluster", coordinator.Name())
 	return err
 }
 
 func (c recordingClient) RegisterInstance(ctx context.Context, instance memgraph.DataInstanceSpec) error {
 	err := c.Client.RegisterInstance(ctx, instance)
-	c.record(err, EventReasonInstanceRegistered, eventActionRegister,
+	c.record(err, dataInstancePodRef(c.cluster, instance.Name),
+		EventReasonInstanceRegistered, EventReasonInstanceRegistrationRefused, eventActionRegister,
 		"Registered data instance %s with the coordinators", instance.Name)
 	return err
 }
 
-// SetInstanceToMain records a refusal as a Warning of its own rather than a
-// failed registration: the command falls back to its next candidate, so a
-// refusal is not the end of the promotion, and the instance that did become
-// MAIN gets the MainPromoted.
+// SetInstanceToMain records each refused candidate, and is the one command
+// whose refusal is not the end of it: the command falls back to its next
+// candidate, and the instance that did become MAIN gets the MainPromoted.
 func (c recordingClient) SetInstanceToMain(ctx context.Context, name string) error {
 	err := c.Client.SetInstanceToMain(ctx, name)
 	if err != nil {
-		c.r.warning(c.cluster, nil, EventReasonMainPromotionRefused, eventActionPromote,
+		c.r.warning(c.cluster, dataInstancePodRef(c.cluster, name), EventReasonMainPromotionRefused, eventActionPromote,
 			"The coordinators refused to promote data instance %s to MAIN: %v", name, err)
 		return err
 	}
-	c.r.event(c.cluster, nil, EventReasonMainPromoted, eventActionPromote, "Promoted data instance %s to MAIN", name)
+	c.r.event(c.cluster, dataInstancePodRef(c.cluster, name), EventReasonMainPromoted, eventActionPromote,
+		"Promoted data instance %s to MAIN", name)
 	return nil
 }
 
 func (c recordingClient) DemoteInstance(ctx context.Context, name string) error {
 	err := c.Client.DemoteInstance(ctx, name)
-	c.record(err, EventReasonMainDemoted, eventActionDemote,
+	c.record(err, dataInstancePodRef(c.cluster, name),
+		EventReasonMainDemoted, EventReasonMainDemotionRefused, eventActionDemote,
 		"Demoted retiring data instance %s from MAIN to REPLICA", name)
 	return err
 }
 
 func (c recordingClient) UnregisterInstance(ctx context.Context, name string) error {
 	err := c.Client.UnregisterInstance(ctx, name)
-	c.record(err, EventReasonInstanceUnregistered, eventActionUnregister,
+	c.record(err, dataInstancePodRef(c.cluster, name),
+		EventReasonInstanceUnregistered, EventReasonInstanceUnregistrationRefused, eventActionUnregister,
 		"Unregistered retiring data instance %s from the coordinators", name)
 	return err
 }
 
 func (c recordingClient) RemoveCoordinator(ctx context.Context, id int32) error {
 	err := c.Client.RemoveCoordinator(ctx, id)
-	c.record(err, EventReasonCoordinatorRemoved, eventActionUnregister,
-		"Removed retiring coordinator %s from the Raft cluster", memgraph.CoordinatorSpec{ID: id}.Name())
+	name := memgraph.CoordinatorSpec{ID: id}.Name()
+	c.record(err, coordinatorPodRef(c.cluster, name),
+		EventReasonCoordinatorRemoved, EventReasonCoordinatorRemovalRefused, eventActionUnregister,
+		"Removed retiring coordinator %s from the Raft cluster", name)
 	return err
 }
 
 func (c recordingClient) YieldLeadership(ctx context.Context) error {
 	err := c.Client.YieldLeadership(ctx)
-	c.record(err, EventReasonLeadershipYielded, eventActionYield,
+	c.record(err, coordinatorPodRef(c.cluster, c.leader),
+		EventReasonLeadershipYielded, EventReasonLeadershipYieldRefused, eventActionYield,
 		"Yielded Raft leadership of retiring coordinator %s to another coordinator", c.leader)
 	return err
 }
 
 func (c recordingClient) UpdateCoordinatorBoltServer(ctx context.Context, id int32, boltServer string) error {
 	err := c.Client.UpdateCoordinatorBoltServer(ctx, id, boltServer)
-	c.record(err, EventReasonBoltServerUpdated, eventActionUpdateConfig,
-		"Updated the bolt_server coordinator %s announces to %s", memgraph.CoordinatorSpec{ID: id}.Name(), boltServer)
+	name := memgraph.CoordinatorSpec{ID: id}.Name()
+	c.record(err, coordinatorPodRef(c.cluster, name),
+		EventReasonBoltServerUpdated, EventReasonBoltServerUpdateRefused, eventActionUpdateConfig,
+		"Updated the bolt_server coordinator %s announces to %s", name, boltServer)
 	return err
 }
 
 func (c recordingClient) UpdateInstanceBoltServer(ctx context.Context, name, boltServer string) error {
 	err := c.Client.UpdateInstanceBoltServer(ctx, name, boltServer)
-	c.record(err, EventReasonBoltServerUpdated, eventActionUpdateConfig,
+	c.record(err, dataInstancePodRef(c.cluster, name),
+		EventReasonBoltServerUpdated, EventReasonBoltServerUpdateRefused, eventActionUpdateConfig,
 		"Updated the bolt_server data instance %s announces to %s", name, boltServer)
 	return err
 }
 
-// record is the Normal Event an accepted command earns, or the Warning a
-// refused one does; the refusal carries what the action would have been and
-// Memgraph's error.
-func (c recordingClient) record(err error, reason, action, note string, args ...any) {
+// record is the Normal Event under accepted that an accepted command earns,
+// or the Warning under refused that a refused one does; the refusal carries
+// what the action would have been and Memgraph's error. related is the pod of
+// the member the command was about.
+func (c recordingClient) record(
+	err error, related runtime.Object, accepted, refused, action, note string, args ...any,
+) {
 	if err != nil {
-		c.r.warning(c.cluster, nil, EventReasonRegistrationFailed, action,
-			"%s refused: %v", fmt.Sprintf(note, args...), err)
+		c.r.warning(c.cluster, related, refused, action, "%s refused: %v", fmt.Sprintf(note, args...), err)
 		return
 	}
-	c.r.event(c.cluster, nil, reason, action, note, args...)
+	c.r.event(c.cluster, related, accepted, action, note, args...)
 }
