@@ -159,11 +159,6 @@ func DataStatefulSet(cluster *memgraphcomv1alpha1.MemgraphDBCluster, replicas in
 
 	container := memgraphContainer(spec, role)
 	container.Args = commonArgs(spec, role)
-	if spec.awsCredentialsSecret != "" {
-		env, args := awsCredentials(spec.awsCredentialsSecret)
-		container.Env = append(env, container.Env...)
-		container.Args = append(container.Args, args...)
-	}
 	container.Ports = []corev1.ContainerPort{
 		{Name: boltPortName, ContainerPort: memgraphcomv1alpha1.BoltPort},
 		{Name: managementPortName, ContainerPort: memgraphcomv1alpha1.ManagementPort},
@@ -261,46 +256,8 @@ func commonArgs(spec normalizedSpec, role normalizedRole) []string {
 	return args
 }
 
-// awsCredentials wires a data instance's AWS configuration from the Secret:
-// four environment variables read from it, and the four flags that hand them
-// to Memgraph through Kubernetes' $(VAR) expansion, so the pod spec carries
-// the Secret's name and never its values. They are flags, not Memgraph's own
-// AWS_* environment fallback, because Memgraph restores a persisted setting
-// over the environment but not over a flag given on the command line: only
-// the flag makes a restart pick up what the Secret holds now. Memgraph's
-// gflags has no --fromenv to keep them off the command line instead. Every
-// key is required: Kubernetes leaves a reference to an undefined variable as
-// literal text, so an optional key left out would start Memgraph on the
-// string "$(MEMGRAPH_AWS_REGION)".
-func awsCredentials(secret string) ([]corev1.EnvVar, []string) {
-	fromSecret := func(name, key string) corev1.EnvVar {
-		return corev1.EnvVar{
-			Name: name,
-			ValueFrom: &corev1.EnvVarSource{
-				SecretKeyRef: &corev1.SecretKeySelector{
-					LocalObjectReference: corev1.LocalObjectReference{Name: secret},
-					Key:                  key,
-				},
-			},
-		}
-	}
-	values := []struct{ flag, variable, key string }{
-		{"aws-access-key", memgraphcomv1alpha1.EnvAWSAccessKey, memgraphcomv1alpha1.AWSAccessKeySecretKey},
-		{"aws-secret-key", memgraphcomv1alpha1.EnvAWSSecretKey, memgraphcomv1alpha1.AWSSecretKeySecretKey},
-		{"aws-region", memgraphcomv1alpha1.EnvAWSRegion, memgraphcomv1alpha1.AWSRegionSecretKey},
-		{"aws-endpoint-url", memgraphcomv1alpha1.EnvAWSEndpointURL, memgraphcomv1alpha1.AWSEndpointURLSecretKey},
-	}
-	env := make([]corev1.EnvVar, 0, len(values))
-	args := make([]string, 0, len(values))
-	for _, value := range values {
-		env = append(env, fromSecret(value.variable, value.key))
-		args = append(args, "--"+value.flag+"=$("+value.variable+")")
-	}
-	return env, args
-}
-
 // memgraphContainer builds the parts of the Memgraph container shared by both
-// roles: image, license env wiring, the role's extra environment and resources,
+// roles: image, the role's extra environment and resources,
 // storage mounts, and the restricted security context.
 func memgraphContainer(spec normalizedSpec, role normalizedRole) corev1.Container {
 	return corev1.Container{
@@ -308,29 +265,7 @@ func memgraphContainer(spec normalizedSpec, role normalizedRole) corev1.Containe
 		Image:           spec.image,
 		ImagePullPolicy: spec.pullPolicy,
 		Resources:       role.resources,
-		// The license variables come first and the role's extra environment
-		// last; admission rejects an extra variable that repeats one of the
-		// names the operator owns, so the two can never collide.
-		Env: append([]corev1.EnvVar{
-			{
-				Name: memgraphcomv1alpha1.EnvLicense,
-				ValueFrom: &corev1.EnvVarSource{
-					SecretKeyRef: &corev1.SecretKeySelector{
-						LocalObjectReference: corev1.LocalObjectReference{Name: spec.secretName},
-						Key:                  spec.licenseKey,
-					},
-				},
-			},
-			{
-				Name: memgraphcomv1alpha1.EnvOrganization,
-				ValueFrom: &corev1.EnvVarSource{
-					SecretKeyRef: &corev1.SecretKeySelector{
-						LocalObjectReference: corev1.LocalObjectReference{Name: spec.secretName},
-						Key:                  spec.organizationKey,
-					},
-				},
-			},
-		}, role.env...),
+		Env:             role.env,
 		VolumeMounts:    volumeMounts(spec, role),
 		SecurityContext: restrictedSecurityContext(),
 	}
@@ -521,8 +456,8 @@ func volumeMounts(spec normalizedSpec, role normalizedRole) []corev1.VolumeMount
 	mounts := []corev1.VolumeMount{
 		{Name: libVolumeName, MountPath: libMountPath},
 		{Name: flagsVolumeName, MountPath: flagsMountPath, ReadOnly: true},
+		{Name: tmpVolumeName, MountPath: tmpMountPath},
 	}
-	mounts = append(mounts, corev1.VolumeMount{Name: tmpVolumeName, MountPath: tmpMountPath})
 	if role.coreDumps.enabled {
 		mounts = append(mounts,
 			corev1.VolumeMount{Name: coreDumpsVolumeName, MountPath: coreDumpsMountPath})
@@ -546,7 +481,7 @@ func volumeMounts(spec normalizedSpec, role normalizedRole) []corev1.VolumeMount
 // The certificate Secrets are projected by key name: tls.crt and tls.key, the
 // shape of a kubernetes.io/tls Secret, plus ca.crt for the intra-cluster one.
 // A Secret carrying more keys mounts fine, and one missing a key keeps the pod
-// from starting, which is how a missing license Secret is reported too.
+// from starting.
 func podVolumes(
 	cluster *memgraphcomv1alpha1.MemgraphDBCluster,
 	spec normalizedSpec,

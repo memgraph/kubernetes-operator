@@ -203,29 +203,6 @@ func tunedCluster() *memgraphcomv1alpha1.MemgraphDBCluster {
 	return cluster
 }
 
-func licenseEnv(secretName, licenseKey, organizationKey string) []corev1.EnvVar {
-	return []corev1.EnvVar{
-		{
-			Name: "MEMGRAPH_ENTERPRISE_LICENSE",
-			ValueFrom: &corev1.EnvVarSource{
-				SecretKeyRef: &corev1.SecretKeySelector{
-					LocalObjectReference: corev1.LocalObjectReference{Name: secretName},
-					Key:                  licenseKey,
-				},
-			},
-		},
-		{
-			Name: "MEMGRAPH_ORGANIZATION_NAME",
-			ValueFrom: &corev1.EnvVarSource{
-				SecretKeyRef: &corev1.SecretKeySelector{
-					LocalObjectReference: corev1.LocalObjectReference{Name: secretName},
-					Key:                  organizationKey,
-				},
-			},
-		},
-	}
-}
-
 // tcpProbe is a readiness probe with the default timings and the given failure
 // threshold.
 func tcpProbe(port, failureThreshold int32) *corev1.Probe {
@@ -510,12 +487,12 @@ func TestCoordinatorStatefulSetDefaults(t *testing.T) {
 						ImagePullPolicy: corev1.PullIfNotPresent,
 						Command:         expectedCommand(expectedCoordinatorScript),
 						Args:            expectedCoordinatorArgs(logFilePath),
-						Env: append([]corev1.EnvVar{{
+						Env: []corev1.EnvVar{{
 							Name: "POD_NAME",
 							ValueFrom: &corev1.EnvVarSource{
 								FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"},
 							},
-						}}, licenseEnv("memgraph-secrets", "MEMGRAPH_ENTERPRISE_LICENSE", "MEMGRAPH_ORGANIZATION_NAME")...),
+						}},
 						Ports: []corev1.ContainerPort{
 							{Name: boltPortName, ContainerPort: memgraphcomv1alpha1.BoltPort},
 							{Name: managementPortName, ContainerPort: memgraphcomv1alpha1.ManagementPort},
@@ -575,7 +552,6 @@ func TestDataStatefulSetDefaults(t *testing.T) {
 						Image:           defaultImageRef,
 						ImagePullPolicy: corev1.PullIfNotPresent,
 						Args:            expectedArgs(logFilePath),
-						Env:             licenseEnv("memgraph-secrets", "MEMGRAPH_ENTERPRISE_LICENSE", "MEMGRAPH_ORGANIZATION_NAME"),
 						Ports: []corev1.ContainerPort{
 							{Name: boltPortName, ContainerPort: memgraphcomv1alpha1.BoltPort},
 							{Name: managementPortName, ContainerPort: memgraphcomv1alpha1.ManagementPort},
@@ -675,10 +651,14 @@ func TestStatefulSetSpecOverrides(t *testing.T) {
 			if container.ImagePullPolicy != corev1.PullAlways {
 				t.Errorf("pull policy = %q, want %q", container.ImagePullPolicy, corev1.PullAlways)
 			}
-			wantEnv := licenseEnv("my-license", "license", "organization")
-			gotEnv := container.Env[len(container.Env)-2:]
-			if diff := cmp.Diff(wantEnv, gotEnv); diff != "" {
-				t.Errorf("license env mismatch (-want +got):\n%s", diff)
+			// The operator SETs the license on the running instance; a pod
+			// reading it into its environment would keep a stale copy there
+			// after every renewal.
+			for _, variable := range container.Env {
+				if variable.ValueFrom != nil && variable.ValueFrom.SecretKeyRef != nil &&
+					variable.ValueFrom.SecretKeyRef.Name == "my-license" {
+					t.Errorf("env %q reads the license Secret", variable.Name)
+				}
 			}
 		})
 	}
@@ -1653,8 +1633,8 @@ func TestStatefulSetCustomLabelsCannotOverrideIdentity(t *testing.T) {
 }
 
 // TestStatefulSetExtraEnv asserts the passthrough environment lands after the
-// license variables the operator wires from the secrets block, and that no
-// secret material can ride along with it.
+// variables the operator sets itself, and that no secret material can ride
+// along with it.
 func TestStatefulSetExtraEnv(t *testing.T) {
 	cluster := tunedCluster()
 
@@ -1666,24 +1646,23 @@ func TestStatefulSetExtraEnv(t *testing.T) {
 		{
 			name: coordinatorComponent,
 			sts:  coordinatorStatefulSet(cluster),
-			want: append(
-				append([]corev1.EnvVar{{
+			want: []corev1.EnvVar{
+				{
 					Name: "POD_NAME",
 					ValueFrom: &corev1.EnvVarSource{
 						FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"},
 					},
-				}}, licenseEnv("memgraph-secrets", "MEMGRAPH_ENTERPRISE_LICENSE", "MEMGRAPH_ORGANIZATION_NAME")...),
-				corev1.EnvVar{Name: "COORDINATOR_LABEL", Value: "coord"},
-			),
+				},
+				{Name: "COORDINATOR_LABEL", Value: "coord"},
+			},
 		},
 		{
 			name: dataComponent,
 			sts:  dataStatefulSet(cluster),
-			want: append(
-				licenseEnv("memgraph-secrets", "MEMGRAPH_ENTERPRISE_LICENSE", "MEMGRAPH_ORGANIZATION_NAME"),
-				corev1.EnvVar{Name: "DATA_LABEL_ONE", Value: "one"},
-				corev1.EnvVar{Name: "DATA_LABEL_TWO", Value: "two"},
-			),
+			want: []corev1.EnvVar{
+				{Name: "DATA_LABEL_ONE", Value: "one"},
+				{Name: "DATA_LABEL_TWO", Value: "two"},
+			},
 		},
 	}
 	for _, tc := range tests {
@@ -1694,71 +1673,35 @@ func TestStatefulSetExtraEnv(t *testing.T) {
 			}
 			for _, variable := range got {
 				if variable.ValueFrom != nil && variable.ValueFrom.SecretKeyRef != nil {
-					if variable.Name != "MEMGRAPH_ENTERPRISE_LICENSE" && variable.Name != "MEMGRAPH_ORGANIZATION_NAME" {
-						t.Errorf("env %q reads a Secret; only the secrets block may", variable.Name)
-					}
+					t.Errorf("env %q reads a Secret", variable.Name)
 				}
 			}
 		})
 	}
 }
 
-// TestStatefulSetAWSCredentials pins what spec.awsCredentials adds to the data
-// instances and only to them: four variables read from the Secret's fixed
-// keys, and the four flags that hand them to Memgraph by $(VAR) expansion, so
-// the pod spec names the Secret and never a value. The flags come after
-// the flag file like every pinned flag, which is what makes a restart start on
-// the Secret's values rather than the ones Memgraph persisted.
+// TestStatefulSetAWSCredentials pins that spec.awsCredentials changes no pod:
+// the operator SETs the values on the running instances, so neither role reads
+// the Secret into its environment or names an AWS flag on its command line.
 func TestStatefulSetAWSCredentials(t *testing.T) {
 	const secretName = "aws-s3-credentials"
 	cluster := minimalCluster()
 	cluster.Spec.AWSCredentials = &memgraphcomv1alpha1.AWSCredentialsSpec{SecretRef: memgraphcomv1alpha1.SecretReference{Name: secretName}}
 
-	fromSecret := func(name, key string) corev1.EnvVar {
-		return corev1.EnvVar{
-			Name: name,
-			ValueFrom: &corev1.EnvVarSource{
-				SecretKeyRef: &corev1.SecretKeySelector{
-					LocalObjectReference: corev1.LocalObjectReference{Name: secretName},
-					Key:                  key,
-				},
-			},
-		}
+	tests := []struct {
+		name      string
+		with, out *appsv1.StatefulSet
+	}{
+		{coordinatorComponent, coordinatorStatefulSet(cluster), coordinatorStatefulSet(minimalCluster())},
+		{dataComponent, dataStatefulSet(cluster), dataStatefulSet(minimalCluster())},
 	}
-
-	t.Run(dataComponent, func(t *testing.T) {
-		container := dataStatefulSet(cluster).Spec.Template.Spec.Containers[0]
-		wantEnv := append([]corev1.EnvVar{
-			fromSecret("MEMGRAPH_AWS_ACCESS_KEY", "AWS_ACCESS_KEY_ID"),
-			fromSecret("MEMGRAPH_AWS_SECRET_KEY", "AWS_SECRET_ACCESS_KEY"),
-			fromSecret("MEMGRAPH_AWS_REGION", "AWS_REGION"),
-			fromSecret("MEMGRAPH_AWS_ENDPOINT_URL", "AWS_ENDPOINT_URL"),
-		}, licenseEnv("memgraph-secrets", "MEMGRAPH_ENTERPRISE_LICENSE", "MEMGRAPH_ORGANIZATION_NAME")...)
-		if diff := cmp.Diff(wantEnv, container.Env); diff != "" {
-			t.Errorf("env mismatch (-want +got):\n%s", diff)
-		}
-		wantArgs := expectedArgs(logFilePath,
-			"--aws-access-key=$(MEMGRAPH_AWS_ACCESS_KEY)",
-			"--aws-secret-key=$(MEMGRAPH_AWS_SECRET_KEY)",
-			"--aws-region=$(MEMGRAPH_AWS_REGION)",
-			"--aws-endpoint-url=$(MEMGRAPH_AWS_ENDPOINT_URL)",
-		)
-		if diff := cmp.Diff(wantArgs, container.Args); diff != "" {
-			t.Errorf("args mismatch (-want +got):\n%s", diff)
-		}
-	})
-
-	t.Run(coordinatorComponent, func(t *testing.T) {
-		container := coordinatorStatefulSet(cluster).Spec.Template.Spec.Containers[0]
-		if diff := cmp.Diff(expectedCoordinatorArgs(logFilePath), container.Args); diff != "" {
-			t.Errorf("args mismatch (-want +got):\n%s", diff)
-		}
-		for _, variable := range container.Env {
-			if strings.HasPrefix(variable.Name, "MEMGRAPH_AWS_") {
-				t.Errorf("coordinator env carries %q; the coordinators run no queries that read from AWS", variable.Name)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if diff := cmp.Diff(tc.out.Spec.Template, tc.with.Spec.Template); diff != "" {
+				t.Errorf("pod template mismatch (-without +with awsCredentials):\n%s", diff)
 			}
-		}
-	})
+		})
+	}
 }
 
 // TestStatefulSetBoltTLS pins what spec.tls.bolt adds to both roles: the

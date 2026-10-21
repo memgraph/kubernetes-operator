@@ -299,9 +299,12 @@ var _ = Describe("MemgraphDBCluster Controller", func() {
 				Expect(podSpec.SecurityContext.RunAsUser).To(HaveValue(Equal(int64(101))))
 				Expect(podSpec.SecurityContext.RunAsGroup).To(HaveValue(Equal(int64(103))))
 
-				licenseRef := container.Env[len(container.Env)-2].ValueFrom.SecretKeyRef
-				Expect(licenseRef.Name).To(Equal("memgraph-secrets"))
-				Expect(licenseRef.Key).To(Equal("MEMGRAPH_ENTERPRISE_LICENSE"))
+				for _, variable := range container.Env {
+					if variable.ValueFrom != nil && variable.ValueFrom.SecretKeyRef != nil {
+						Expect(variable.ValueFrom.SecretKeyRef.Name).NotTo(Equal("memgraph-secrets"),
+							"the license reaches pods only as a database setting, never as env that goes stale on renewal")
+					}
+				}
 			}
 
 			for _, suffix := range []string{coordinatorSuffix, dataSuffix} {
@@ -431,12 +434,12 @@ var _ = Describe("MemgraphDBCluster Controller", func() {
 				Expect(container.Image).To(Equal("registry.example.com/memgraph:3.13.0"))
 				Expect(container.ImagePullPolicy).To(Equal(corev1.PullAlways))
 
-				licenseRef := container.Env[len(container.Env)-2].ValueFrom.SecretKeyRef
-				Expect(licenseRef.Name).To(Equal(customSecretName))
-				Expect(licenseRef.Key).To(Equal("license"))
-				organizationRef := container.Env[len(container.Env)-1].ValueFrom.SecretKeyRef
-				Expect(organizationRef.Name).To(Equal(customSecretName))
-				Expect(organizationRef.Key).To(Equal("organization"))
+				for _, variable := range container.Env {
+					if variable.ValueFrom != nil && variable.ValueFrom.SecretKeyRef != nil {
+						Expect(variable.ValueFrom.SecretKeyRef.Name).NotTo(Equal(customSecretName),
+							"the license reaches pods only as a database setting, never as env that goes stale on renewal")
+					}
+				}
 
 				Expect(sts.Spec.PersistentVolumeClaimRetentionPolicy).To(HaveValue(Equal(
 					appsv1.StatefulSetPersistentVolumeClaimRetentionPolicy{
@@ -2865,7 +2868,7 @@ var _ = Describe("MemgraphDBCluster Controller", func() {
 			reconcileCluster(resourceName)
 
 			Expect(fake.settingsOf(podAddress(dataSuffix, 1))).To(HaveKeyWithValue("enterprise.license", startupLicense),
-				"an unready pod is not dialed: it reads the Secret itself when it starts")
+				"an unready pod is not dialed: the pass after it turns ready brings it in line")
 			condition := licenseCondition()
 			Expect(condition.Status).To(Equal(metav1.ConditionFalse))
 			Expect(condition.Reason).To(Equal(memgraphcomv1alpha1.ReasonLicensePending))
@@ -3180,21 +3183,6 @@ var _ = Describe("MemgraphDBCluster Controller", func() {
 			Expect(converged().Status).To(Equal(metav1.ConditionTrue))
 		})
 
-		It("should start the data instances with the Secret's values on their command line, by reference", func() {
-			sts := &appsv1.StatefulSet{}
-			get(resourceName+dataSuffix, sts)
-			container := sts.Spec.Template.Spec.Containers[0]
-			Expect(container.Args).To(ContainElements(
-				"--aws-access-key=$(MEMGRAPH_AWS_ACCESS_KEY)", "--aws-secret-key=$(MEMGRAPH_AWS_SECRET_KEY)",
-				"--aws-region=$(MEMGRAPH_AWS_REGION)", "--aws-endpoint-url=$(MEMGRAPH_AWS_ENDPOINT_URL)"))
-			Expect(container.Env).To(ContainElement(And(
-				HaveField("Name", "MEMGRAPH_AWS_SECRET_KEY"),
-				HaveField("ValueFrom.SecretKeyRef.Name", secretName),
-				HaveField("ValueFrom.SecretKeyRef.Key", memgraphcomv1alpha1.AWSSecretKeySecretKey),
-			)))
-			Expect(fmt.Sprint(sts.Spec)).NotTo(ContainSubstring(secretKey), "the pod spec names the Secret, never a credential")
-		})
-
 		It("should skip a data instance that is not ready", func() {
 			putPod(dataSuffix, dataComponent, 1, false)
 
@@ -3221,22 +3209,32 @@ var _ = Describe("MemgraphDBCluster Controller", func() {
 			Expect(fmt.Sprint(cluster.Status)).NotTo(ContainSubstring(accessKey), "a credential is secret material")
 		})
 
-		It("should report a missing Secret or key as pending and apply none of the values", func() {
+		It("should report a missing Secret as pending and apply none of the values", func() {
 			secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: resourceNamespace}}
 			Expect(k8sClient.Delete(ctx, secret)).To(Succeed())
 			reconcileCluster(resourceName)
 			condition := converged()
 			Expect(condition.Reason).To(Equal(memgraphcomv1alpha1.ReasonSettingsPending))
 			Expect(condition.Message).To(ContainSubstring(secretName + " does not exist"))
+			Expect(awsCommands()).To(BeEmpty())
+		})
 
-			withoutEndpoint := credentials(accessKey, secretKey, "")
-			delete(withoutEndpoint, memgraphcomv1alpha1.AWSEndpointURLSecretKey)
-			putSecret(withoutEndpoint)
+		It("should SET only the keys the Secret holds and leave the others alone", func() {
 			reconcileCluster(resourceName)
-			condition = converged()
-			Expect(condition.Reason).To(Equal(memgraphcomv1alpha1.ReasonSettingsPending))
-			Expect(condition.Message).To(ContainSubstring("no key " + memgraphcomv1alpha1.AWSEndpointURLSecretKey))
-			Expect(awsCommands()).To(BeEmpty(), "a partial set is never applied, and the pods could not start on it")
+			before := len(awsCommands())
+
+			putSecret(map[string][]byte{memgraphcomv1alpha1.AWSAccessKeySecretKey: []byte(rotatedKey)})
+			reconcileCluster(resourceName)
+
+			for ordinal := range 2 {
+				settings := fake.settingsOf(podAddress(dataSuffix, ordinal))
+				Expect(settings).To(HaveKeyWithValue("aws.access_key", rotatedKey))
+				Expect(settings).To(HaveKeyWithValue("aws.secret_key", secretKey),
+					"a key the Secret no longer holds leaves its setting as the instance has it")
+				Expect(settings).To(HaveKeyWithValue("aws.region", region))
+			}
+			Expect(awsCommands()[before:]).To(HaveLen(2), "the access key once per data instance")
+			Expect(converged().Status).To(Equal(metav1.ConditionTrue))
 		})
 
 		It("should map a changed Secret to the clusters that read their AWS credentials from it", func() {

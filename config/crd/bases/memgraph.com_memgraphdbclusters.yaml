@@ -79,10 +79,10 @@ spec:
                 properties:
                   secretRef:
                     description: |-
-                      secretRef names a Secret in the cluster's namespace holding the access
-                      key under AWS_ACCESS_KEY_ID, the secret key under AWS_SECRET_ACCESS_KEY,
-                      the region under AWS_REGION and the endpoint URL under
-                      AWS_ENDPOINT_URL.
+                      secretRef names a Secret in the cluster's namespace holding any of the
+                      access key under AWS_ACCESS_KEY_ID, the secret key under
+                      AWS_SECRET_ACCESS_KEY, the region under AWS_REGION and the endpoint URL
+                      under AWS_ENDPOINT_URL.
                     properties:
                       name:
                         description: name is the name of the Secret in the cluster's
@@ -576,13 +576,11 @@ spec:
                     - name
                     x-kubernetes-list-type: map
                     x-kubernetes-validations:
-                    - message: extraEnv must not set MEMGRAPH_ENTERPRISE_LICENSE,
-                        MEMGRAPH_ORGANIZATION_NAME or MEMGRAPH_AWS_* (they come from
-                        the secrets and awsCredentials blocks) or POD_NAME (it carries
-                        the pod's own identity)
+                    - message: extraEnv must not set MEMGRAPH_ENTERPRISE_LICENSE or
+                        MEMGRAPH_ORGANIZATION_NAME (the license comes from the secrets
+                        block) or POD_NAME (it carries the pod's own identity)
                       rule: self.all(e, !(e.name in ['MEMGRAPH_ENTERPRISE_LICENSE',
-                        'MEMGRAPH_ORGANIZATION_NAME', 'MEMGRAPH_AWS_ACCESS_KEY', 'MEMGRAPH_AWS_SECRET_KEY',
-                        'MEMGRAPH_AWS_REGION', 'MEMGRAPH_AWS_ENDPOINT_URL', 'POD_NAME']))
+                        'MEMGRAPH_ORGANIZATION_NAME', 'POD_NAME']))
                   data:
                     description: data are added to every data instance pod's Memgraph
                       container.
@@ -612,13 +610,11 @@ spec:
                     - name
                     x-kubernetes-list-type: map
                     x-kubernetes-validations:
-                    - message: extraEnv must not set MEMGRAPH_ENTERPRISE_LICENSE,
-                        MEMGRAPH_ORGANIZATION_NAME or MEMGRAPH_AWS_* (they come from
-                        the secrets and awsCredentials blocks) or POD_NAME (it carries
-                        the pod's own identity)
+                    - message: extraEnv must not set MEMGRAPH_ENTERPRISE_LICENSE or
+                        MEMGRAPH_ORGANIZATION_NAME (the license comes from the secrets
+                        block) or POD_NAME (it carries the pod's own identity)
                       rule: self.all(e, !(e.name in ['MEMGRAPH_ENTERPRISE_LICENSE',
-                        'MEMGRAPH_ORGANIZATION_NAME', 'MEMGRAPH_AWS_ACCESS_KEY', 'MEMGRAPH_AWS_SECRET_KEY',
-                        'MEMGRAPH_AWS_REGION', 'MEMGRAPH_AWS_ENDPOINT_URL', 'POD_NAME']))
+                        'MEMGRAPH_ORGANIZATION_NAME', 'POD_NAME']))
                 type: object
               extraVolumeMounts:
                 description: |-
