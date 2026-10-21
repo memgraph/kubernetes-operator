@@ -32,22 +32,47 @@ import (
 type recordedEvents struct {
 	mu     sync.Mutex
 	events []string
+	// keys holds each Event's isomorphism key, parallel to events.
+	keys []string
 }
 
 // Eventf renders an Event as "<type> <reason> <note>", plus " [<name>]" naming
 // the related object when there is one.
 func (e *recordedEvents) Eventf(
-	_ runtime.Object, related runtime.Object, eventtype, reason, _, note string, args ...any,
+	_ runtime.Object, related runtime.Object, eventtype, reason, action, note string, args ...any,
 ) {
 	line := eventtype + " " + reason + " " + fmt.Sprintf(note, args...)
+	// What client-go's events broadcaster compares to fold an Event into an
+	// earlier one (getKey in tools/events): everything but the note, with the
+	// regarding object always the cluster here.
+	key := eventtype + "/" + reason + "/" + action
 	if related != nil {
 		if accessor, err := meta.Accessor(related); err == nil {
 			line += " [" + accessor.GetName() + "]"
+			key += "/" + fmt.Sprintf("%T", related) + "/" + accessor.GetName()
 		}
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.events = append(e.events, line)
+	e.keys = append(e.keys, key)
+}
+
+// merged returns the Events recorded since the first `since` that client-go
+// would fold into an earlier one of them instead of showing: same type,
+// reason, action and related object, whatever the note says.
+func (e *recordedEvents) merged(since int) []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	seen := map[string]bool{}
+	var merged []string
+	for i := since; i < len(e.events); i++ {
+		if seen[e.keys[i]] {
+			merged = append(merged, e.events[i])
+		}
+		seen[e.keys[i]] = true
+	}
+	return merged
 }
 
 // all returns every Event recorded so far.

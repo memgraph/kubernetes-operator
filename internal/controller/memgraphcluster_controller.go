@@ -1244,7 +1244,7 @@ func (r *MemgraphClusterReconciler) observeRolloutRole(
 	}
 
 	for ordinal := int32(0); ordinal < role.applied; ordinal++ {
-		pod, ok := byName[fmt.Sprintf("%s-%d", role.name, ordinal)]
+		pod, ok := byName[resources.PodName(role.name, ordinal)]
 		if !ok {
 			continue
 		}
@@ -1673,17 +1673,27 @@ func (r *MemgraphClusterReconciler) reconcileCoordinatorSettings(
 		return settingsOutcome{}
 	}
 	observed := classes.coordinatorSettings
+	// One Event for the pass rather than one per setting: these have no
+	// object of their own to tell them apart, see events.go.
+	var ran []string
+	recordRan := func() {
+		if len(ran) > 0 {
+			r.event(cluster, nil, EventReasonCoordinatorSettingApplied, eventActionSetCoordinatorSetting,
+				"Ran %s", strings.Join(ran, ", "))
+		}
+	}
 	for _, change := range settings.Diff(desired, observed) {
 		if err := leader.SetCoordinatorSetting(ctx, change.Setting, change.Value); err != nil {
+			recordRan()
 			rejected := fmt.Sprintf(
 				"the coordinators rejected SET COORDINATOR SETTING %q TO %q: %v", change.Setting, change.Value, err)
-			r.warning(cluster, nil, EventReasonSettingRejected, eventActionSetSetting, "%s", rejected)
+			r.warning(cluster, nil, EventReasonSettingRejected, eventActionSetCoordinatorSetting, "%s", rejected)
 			return settingsOutcome{rejected: []string{rejected}}
 		}
 		log.Info("Applied coordinator setting", "setting", change.Setting, "value", change.Value)
-		r.event(cluster, nil, EventReasonCoordinatorSettingApplied, eventActionSetSetting,
-			"Ran SET COORDINATOR SETTING %q TO %q", change.Setting, change.Value)
+		ran = append(ran, fmt.Sprintf("SET COORDINATOR SETTING %q TO %q", change.Setting, change.Value))
 	}
+	recordRan()
 	return settingsOutcome{}
 }
 
@@ -1734,7 +1744,7 @@ func (r *MemgraphClusterReconciler) reconcileSettings(
 			if !ready[endpoint.Pod] {
 				continue
 			}
-			changes, err := r.applySettings(ctx, cluster, reads, endpoint, func(observed map[string]string) []settings.Change {
+			changes, err := r.applySettings(ctx, cluster, reads, endpoint, eventActionSetRunTimeFlags, func(observed map[string]string) []settings.Change {
 				return settings.Plan(role.flags, observed)
 			}, runTimeSetting)
 			for _, change := range changes {
@@ -2008,7 +2018,7 @@ func (r *MemgraphClusterReconciler) reconcileAWSCredentials(
 		if !ready[endpoint.Pod] {
 			continue
 		}
-		changes, err := r.applySettings(ctx, cluster, reads, endpoint, func(observed map[string]string) []settings.Change {
+		changes, err := r.applySettings(ctx, cluster, reads, endpoint, eventActionSetAWSCredentials, func(observed map[string]string) []settings.Change {
 			return settings.Diff(desired, observed)
 		}, secretSetting)
 		for _, change := range changes {
@@ -2126,11 +2136,14 @@ func (r *MemgraphClusterReconciler) readInstance(
 // remaining changes for this pass and comes back as a settingRejected whose
 // command is what describe says, so a caller holding secret material can
 // leave the value out; any other error is a pod that could not be reached.
+// The SETs that landed are one Event under action, the step's own, so two
+// steps SETting on one pod in a pass stay two Events (see events.go).
 func (r *MemgraphClusterReconciler) applySettings(
 	ctx context.Context,
 	cluster *memgraphcomv1alpha1.MemgraphCluster,
 	reads podSettings,
 	endpoint resources.Endpoint,
+	action string,
 	plan func(observed map[string]string) []settings.Change,
 	describe func(change settings.Change) string,
 ) ([]settings.Change, error) {
@@ -2151,18 +2164,27 @@ func (r *MemgraphClusterReconciler) applySettings(
 			logf.FromContext(ctx).Error(err, "Failed to close instance connection", "pod", endpoint.Pod)
 		}
 	}()
+	pod := podRef(cluster, endpoint.Pod)
 	var applied []settings.Change
+	var ran []string
+	recordRan := func() {
+		if len(ran) > 0 {
+			r.event(cluster, pod, EventReasonSettingApplied, action,
+				"Ran %s on pod %s", strings.Join(ran, ", "), endpoint.Pod)
+		}
+	}
 	for _, change := range changes {
 		if err := conn.SetSetting(ctx, change.Setting, change.Value); err != nil {
-			r.warning(cluster, podRef(cluster, endpoint.Pod), EventReasonSettingRejected, eventActionSetSetting,
+			recordRan()
+			r.warning(cluster, pod, EventReasonSettingRejected, action,
 				"Pod %s rejected %s: %v", endpoint.Pod, describe(change), err)
 			return applied, &settingRejected{command: describe(change), err: err}
 		}
-		r.event(cluster, podRef(cluster, endpoint.Pod), EventReasonSettingApplied, eventActionSetSetting,
-			"Ran %s on pod %s", describe(change), endpoint.Pod)
 		observed[change.Setting] = change.Value
 		applied = append(applied, change)
+		ran = append(ran, describe(change))
 	}
+	recordRan()
 	return applied, nil
 }
 
@@ -2223,7 +2245,7 @@ func (r *MemgraphClusterReconciler) reconcileLicense(
 			if !ready[endpoint.Pod] {
 				continue
 			}
-			changes, err := r.applySettings(ctx, cluster, reads, endpoint, func(observed map[string]string) []settings.Change {
+			changes, err := r.applySettings(ctx, cluster, reads, endpoint, eventActionSetLicense, func(observed map[string]string) []settings.Change {
 				return settings.License(license, organization, observed)
 			}, secretSetting)
 			for _, change := range changes {
@@ -2364,7 +2386,7 @@ func (r *MemgraphClusterReconciler) shedRetiredPods(
 			written.uid, written.generation)
 		log.Info("Shrank a StatefulSet to the declared replica count",
 			"statefulset", role.replicas.name, "replicas", role.replicas.declared)
-		r.event(cluster, nil, EventReasonStatefulSetShrunk, eventActionScaleDown,
+		r.event(cluster, statefulSetRef(cluster, role.replicas.name), EventReasonStatefulSetShrunk, eventActionScaleDown,
 			"Shrank StatefulSet %s to %d replicas, shedding the pods of members that left the cluster",
 			role.replicas.name, role.replicas.declared)
 	}

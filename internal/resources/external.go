@@ -107,7 +107,7 @@ func CoordinatorExternalService(cluster *memgraphcomv1alpha1.MemgraphCluster) *c
 func DataExternalService(cluster *memgraphcomv1alpha1.MemgraphCluster, ordinal int32) *corev1.Service {
 	spec := normalize(cluster.Spec)
 	selector := selectorLabels(cluster, dataComponent)
-	selector[appsv1.StatefulSetPodNameLabel] = fmt.Sprintf("%s-%d", DataName(cluster), ordinal)
+	selector[appsv1.StatefulSetPodNameLabel] = PodName(DataName(cluster), ordinal)
 	return externalService(cluster, dataComponent, DataExternalServiceName(cluster, ordinal),
 		selector, spec, spec.dataRole, spec.external.data,
 		serviceAnnotations(spec, perInstanceAnnotations(spec.external.data.annotations, ordinal)))
