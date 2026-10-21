@@ -248,7 +248,7 @@ func main() {
 	}
 	setupLog.Info("Discovered ServiceMonitor support", "served", serviceMonitorAPI, "missing", serviceMonitorAPIMissing)
 
-	if err := (&controller.MemgraphClusterReconciler{
+	if err := (&controller.MemgraphDBClusterReconciler{
 		Client:                   mgr.GetClient(),
 		Scheme:                   mgr.GetScheme(),
 		APIReader:                mgr.GetAPIReader(),
@@ -259,7 +259,7 @@ func main() {
 		ServiceMonitorAPI:        serviceMonitorAPI,
 		ServiceMonitorAPIMissing: serviceMonitorAPIMissing,
 	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "Failed to create controller", "controller", "memgraphcluster")
+		setupLog.Error(err, "Failed to create controller", "controller", "memgraphdbcluster")
 		os.Exit(1)
 	}
 	// +kubebuilder:scaffold:builder

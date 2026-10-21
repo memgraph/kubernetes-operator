@@ -31,7 +31,7 @@ import (
 )
 
 // Event reasons, one per action the operator takes on a cluster. Every Event
-// is recorded on the MemgraphCluster, with the pod, claim or StatefulSet the
+// is recorded on the MemgraphDBCluster, with the pod, claim or StatefulSet the
 // action touched as the related object where there is one. They record what
 // the operator did, never what it is waiting for: waiting is what the
 // conditions say, and an Event repeated every pass would bury the actions.
@@ -100,8 +100,8 @@ const (
 )
 
 // event records one Normal Event on the cluster.
-func (r *MemgraphClusterReconciler) event(
-	cluster *memgraphcomv1alpha1.MemgraphCluster,
+func (r *MemgraphDBClusterReconciler) event(
+	cluster *memgraphcomv1alpha1.MemgraphDBCluster,
 	related runtime.Object,
 	reason, action, note string,
 	args ...any,
@@ -110,8 +110,8 @@ func (r *MemgraphClusterReconciler) event(
 }
 
 // warning records one Warning Event on the cluster.
-func (r *MemgraphClusterReconciler) warning(
-	cluster *memgraphcomv1alpha1.MemgraphCluster,
+func (r *MemgraphDBClusterReconciler) warning(
+	cluster *memgraphcomv1alpha1.MemgraphDBCluster,
 	related runtime.Object,
 	reason, action, note string,
 	args ...any,
@@ -121,18 +121,18 @@ func (r *MemgraphClusterReconciler) warning(
 
 // podRef is a pod of the cluster as an Event's related object. The recorder
 // needs only the kind, name and namespace to reference it.
-func podRef(cluster *memgraphcomv1alpha1.MemgraphCluster, name string) runtime.Object {
+func podRef(cluster *memgraphcomv1alpha1.MemgraphDBCluster, name string) runtime.Object {
 	return &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: cluster.Namespace}}
 }
 
 // statefulSetRef is a StatefulSet of the cluster as an Event's related object.
-func statefulSetRef(cluster *memgraphcomv1alpha1.MemgraphCluster, name string) runtime.Object {
+func statefulSetRef(cluster *memgraphcomv1alpha1.MemgraphDBCluster, name string) runtime.Object {
 	return &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: cluster.Namespace}}
 }
 
 // dataInstancePodRef is the pod running the named data instance. A name that
 // does not parse yields no related object rather than a wrong one.
-func dataInstancePodRef(cluster *memgraphcomv1alpha1.MemgraphCluster, instance string) runtime.Object {
+func dataInstancePodRef(cluster *memgraphcomv1alpha1.MemgraphDBCluster, instance string) runtime.Object {
 	ordinal, err := resources.DataInstanceOrdinal(instance)
 	if err != nil {
 		return nil
@@ -142,7 +142,7 @@ func dataInstancePodRef(cluster *memgraphcomv1alpha1.MemgraphCluster, instance s
 
 // coordinatorPodRef is the pod running the named coordinator, with the same
 // fallback.
-func coordinatorPodRef(cluster *memgraphcomv1alpha1.MemgraphCluster, coordinator string) runtime.Object {
+func coordinatorPodRef(cluster *memgraphcomv1alpha1.MemgraphDBCluster, coordinator string) runtime.Object {
 	ordinal, err := resources.CoordinatorOrdinal(coordinator)
 	if err != nil {
 		return nil
@@ -157,8 +157,8 @@ func coordinatorPodRef(cluster *memgraphcomv1alpha1.MemgraphCluster, coordinator
 // them the coordinators took.
 type recordingClient struct {
 	memgraph.Client
-	r       *MemgraphClusterReconciler
-	cluster *memgraphcomv1alpha1.MemgraphCluster
+	r       *MemgraphDBClusterReconciler
+	cluster *memgraphcomv1alpha1.MemgraphDBCluster
 
 	// leader is the retiring coordinator a YieldLeadership in this plan moves
 	// leadership away from; the query names no one, so the plan says who.

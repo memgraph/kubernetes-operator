@@ -4,16 +4,18 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.21.0
-  name: memgraphclusters.memgraph.com
+  name: memgraphdbclusters.memgraph.com
 spec:
   group: memgraph.com
   names:
-    kind: MemgraphCluster
-    listKind: MemgraphClusterList
-    plural: memgraphclusters
+    categories:
+    - memgraph
+    kind: MemgraphDBCluster
+    listKind: MemgraphDBClusterList
+    plural: memgraphdbclusters
     shortNames:
-    - mgc
-    singular: memgraphcluster
+    - mgdbc
+    singular: memgraphdbcluster
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
@@ -46,7 +48,7 @@ spec:
     name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: MemgraphCluster is the Schema for the memgraphclusters API
+        description: MemgraphDBCluster is the Schema for the memgraphdbclusters API
         properties:
           apiVersion:
             description: |-
@@ -66,7 +68,7 @@ spec:
           metadata:
             type: object
           spec:
-            description: spec defines the desired state of MemgraphCluster
+            description: spec defines the desired state of MemgraphDBCluster
             properties:
               awsCredentials:
                 description: |-
@@ -133,7 +135,7 @@ spec:
                       onto a volume of the size it names. It is a create-time choice: once the
                       cluster exists the block cannot be added or removed, and an edit that
                       tries is rejected at admission with the procedure that works — delete the
-                      MemgraphCluster, whose claims the default Retain policy keeps, and
+                      MemgraphDBCluster, whose claims the default Retain policy keeps, and
                       recreate it.
                     properties:
                       size:
@@ -224,7 +226,7 @@ spec:
                       the operator mounts the core dumps volume into the sidecar read-only,
                       passes the directory as CORE_DUMPS_DIR, and gives it the same locked-down
                       security context as the Memgraph container. See
-                      config/samples/v1alpha1_memgraphcluster.yaml for an S3 uploader
+                      config/samples/v1alpha1_memgraphdbcluster.yaml for an S3 uploader
                       equivalent to the Helm chart's.
 
                       One definition serves both roles — the destination and credentials do not
@@ -373,12 +375,12 @@ spec:
                 - message: 'coreDumps.coordinators cannot be added or removed on a
                     live cluster: the core dumps volume is a StatefulSet volumeClaimTemplate,
                     which Kubernetes forbids adding or removing in place. Delete the
-                    MemgraphCluster (its claims are retained under the default retention
+                    MemgraphDBCluster (its claims are retained under the default retention
                     policy) and recreate it with the new setting'
                   rule: has(self.coordinators) == has(oldSelf.coordinators)
                 - message: 'coreDumps.data cannot be added or removed on a live cluster:
                     the core dumps volume is a StatefulSet volumeClaimTemplate, which
-                    Kubernetes forbids adding or removing in place. Delete the MemgraphCluster
+                    Kubernetes forbids adding or removing in place. Delete the MemgraphDBCluster
                     (its claims are retained under the default retention policy) and
                     recreate it with the new setting'
                   rule: has(self.data) == has(oldSelf.data)
@@ -388,7 +390,7 @@ spec:
                 - message: 'coreDumps storageClassName cannot be changed on a live
                     cluster while a role collects dumps: it is part of a StatefulSet
                     volumeClaimTemplate, which Kubernetes forbids changing in place.
-                    Delete the MemgraphCluster (its claims are retained under the
+                    Delete the MemgraphDBCluster (its claims are retained under the
                     default retention policy) and recreate it with the new value'
                   rule: '!(has(self.coordinators) || has(self.data)) || (has(self.storageClassName)
                     == has(oldSelf.storageClassName) && (!has(self.storageClassName)
@@ -2923,7 +2925,7 @@ spec:
                     x-kubernetes-validations:
                     - message: 'libStorageClassName cannot be changed on a live cluster:
                         it is part of a StatefulSet volumeClaimTemplate, which Kubernetes
-                        forbids changing in place. Delete the MemgraphCluster (its
+                        forbids changing in place. Delete the MemgraphDBCluster (its
                         claims are retained under the default retention policy) and
                         recreate it with the new value'
                       rule: has(self.libStorageClassName) == has(oldSelf.libStorageClassName)
@@ -2936,7 +2938,7 @@ spec:
                         >= 0)
                     - message: 'libStorageAccessMode cannot be changed on a live cluster:
                         it is part of a StatefulSet volumeClaimTemplate, which Kubernetes
-                        forbids changing in place. Delete the MemgraphCluster (its
+                        forbids changing in place. Delete the MemgraphDBCluster (its
                         claims are retained under the default retention policy) and
                         recreate it with the new value'
                       rule: has(self.libStorageAccessMode) == has(oldSelf.libStorageAccessMode)
@@ -3005,7 +3007,7 @@ spec:
                     x-kubernetes-validations:
                     - message: 'libStorageClassName cannot be changed on a live cluster:
                         it is part of a StatefulSet volumeClaimTemplate, which Kubernetes
-                        forbids changing in place. Delete the MemgraphCluster (its
+                        forbids changing in place. Delete the MemgraphDBCluster (its
                         claims are retained under the default retention policy) and
                         recreate it with the new value'
                       rule: has(self.libStorageClassName) == has(oldSelf.libStorageClassName)
@@ -3018,7 +3020,7 @@ spec:
                         >= 0)
                     - message: 'libStorageAccessMode cannot be changed on a live cluster:
                         it is part of a StatefulSet volumeClaimTemplate, which Kubernetes
-                        forbids changing in place. Delete the MemgraphCluster (its
+                        forbids changing in place. Delete the MemgraphDBCluster (its
                         claims are retained under the default retention policy) and
                         recreate it with the new value'
                       rule: has(self.libStorageAccessMode) == has(oldSelf.libStorageAccessMode)
@@ -3028,7 +3030,7 @@ spec:
                     default: Retain
                     description: |-
                       retentionPolicy decides whether a PersistentVolumeClaim of this cluster
-                      survives being orphaned, which happens two ways: the MemgraphCluster is
+                      survives being orphaned, which happens two ways: the MemgraphDBCluster is
                       deleted, or a lowered replica count retires the pod that used it. Both are
                       the same question — keep this cluster's data, or do not — so the policy
                       maps onto both halves of the StatefulSets'
@@ -3150,7 +3152,7 @@ spec:
             - message: 'tls.intraCluster cannot be added or removed on a live cluster:
                 a member with intra-cluster TLS cannot talk to one without it, so
                 restarting pods one at a time would deadlock waiting for replication
-                that can no longer happen. Delete the MemgraphCluster (its claims
+                that can no longer happen. Delete the MemgraphDBCluster (its claims
                 are retained under the default retention policy) and recreate it with
                 the new setting'
               rule: (has(self.tls) && has(self.tls.intraCluster)) == (has(oldSelf.tls)
@@ -3163,11 +3165,11 @@ spec:
                 || (has(self.securityContext.runAsUser) && (has(self.securityContext.runAsGroup)
                 || has(self.securityContext.fsGroup)))'
           status:
-            description: status defines the observed state of MemgraphCluster
+            description: status defines the observed state of MemgraphDBCluster
             properties:
               conditions:
                 description: |-
-                  conditions represent the current state of the MemgraphCluster resource.
+                  conditions represent the current state of the MemgraphDBCluster resource.
                   Each condition has a unique type and reflects the status of a specific aspect of the resource.
 
                   Standard condition types include:

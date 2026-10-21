@@ -45,7 +45,7 @@ import (
 // ownership container has real work to do here. It never waits for
 // registration: every container has done its work by the time Memgraph is
 // listening.
-var _ = Describe("MemgraphCluster with root init containers", Ordered, func() {
+var _ = Describe("MemgraphDBCluster with root init containers", Ordered, func() {
 	const initNamespace = "memgraph-e2e-init"
 	const initCluster = "tuned"
 
@@ -81,9 +81,9 @@ var _ = Describe("MemgraphCluster with root init containers", Ordered, func() {
 	})
 
 	It("raises vm.max_map_count, sets the core pattern and fixes volume ownership before Memgraph starts", func() {
-		By("applying a MemgraphCluster asking for all three init containers on the data role")
+		By("applying a MemgraphDBCluster asking for all three init containers on the data role")
 		manifest := fmt.Sprintf(`apiVersion: memgraph.com/v1alpha1
-kind: MemgraphCluster
+kind: MemgraphDBCluster
 metadata:
   name: %s
   namespace: %s
@@ -104,7 +104,7 @@ spec:
 			licenseSecretName, maxMapCount)
 		cmd := exec.Command("kubectl", "apply", "-f", "-")
 		_, err := utils.RunWithInput(cmd, manifest)
-		Expect(err).NotTo(HaveOccurred(), "Failed to apply the MemgraphCluster")
+		Expect(err).NotTo(HaveOccurred(), "Failed to apply the MemgraphDBCluster")
 
 		// Polled rather than `kubectl wait`, which fails at once on a pod that
 		// does not exist yet, and right after the apply the operator has not

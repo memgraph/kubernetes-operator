@@ -76,7 +76,7 @@ rules:
 - apiGroups:
   - memgraph.com
   resources:
-  - memgraphclusters
+  - memgraphdbclusters
   verbs:
   - get
   - list
@@ -84,13 +84,13 @@ rules:
 - apiGroups:
   - memgraph.com
   resources:
-  - memgraphclusters/finalizers
+  - memgraphdbclusters/finalizers
   verbs:
   - update
 - apiGroups:
   - memgraph.com
   resources:
-  - memgraphclusters/status
+  - memgraphdbclusters/status
   verbs:
   - get
   - patch

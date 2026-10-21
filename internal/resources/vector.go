@@ -89,12 +89,12 @@ if level == "warning" {
 
 // VectorConfigName is the name of the ConfigMap holding the sidecar's
 // configuration for a cluster that asks for one.
-func VectorConfigName(cluster *memgraphcomv1alpha1.MemgraphCluster) string {
+func VectorConfigName(cluster *memgraphcomv1alpha1.MemgraphDBCluster) string {
 	return cluster.Name + "-" + vectorComponent + "-config"
 }
 
 // UsesVector reports whether the cluster asked for the Vector sidecar.
-func UsesVector(cluster *memgraphcomv1alpha1.MemgraphCluster) bool {
+func UsesVector(cluster *memgraphcomv1alpha1.MemgraphDBCluster) bool {
 	return cluster.Spec.Monitoring != nil && cluster.Spec.Monitoring.VectorRemote != nil
 }
 
@@ -161,7 +161,7 @@ type vectorEncoding struct {
 // front of VictoriaLogs need not answer Loki's ready endpoint.
 //
 // The builder is only called for a cluster whose spec carries the block.
-func VectorConfigMap(cluster *memgraphcomv1alpha1.MemgraphCluster) *corev1.ConfigMap {
+func VectorConfigMap(cluster *memgraphcomv1alpha1.MemgraphDBCluster) *corev1.ConfigMap {
 	spec := normalize(cluster.Spec)
 	block := spec.monitoring.vector
 
@@ -276,7 +276,7 @@ func vectorSidecar(component string, spec normalizedSpec) corev1.Container {
 
 // vectorVolumes are the sidecar's two volumes: its configuration and its
 // state directory.
-func vectorVolumes(cluster *memgraphcomv1alpha1.MemgraphCluster) []corev1.Volume {
+func vectorVolumes(cluster *memgraphcomv1alpha1.MemgraphDBCluster) []corev1.Volume {
 	return []corev1.Volume{
 		{
 			Name: vectorConfigVolume,

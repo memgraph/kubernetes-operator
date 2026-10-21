@@ -115,7 +115,7 @@ const (
 // keeps this builder pure. DeclaredCoordinators is the count for a cluster that
 // is not shrinking.
 func CoordinatorStatefulSet(
-	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	cluster *memgraphcomv1alpha1.MemgraphDBCluster,
 	replicas int32,
 ) *appsv1.StatefulSet {
 	spec := normalize(cluster.Spec)
@@ -153,7 +153,7 @@ func CoordinatorStatefulSet(
 // DataStatefulSet builds the single StatefulSet running all data instances. The
 // replica count is an argument for the reason CoordinatorStatefulSet documents;
 // DeclaredDataInstances is the count for a cluster that is not shrinking.
-func DataStatefulSet(cluster *memgraphcomv1alpha1.MemgraphCluster, replicas int32) *appsv1.StatefulSet {
+func DataStatefulSet(cluster *memgraphcomv1alpha1.MemgraphDBCluster, replicas int32) *appsv1.StatefulSet {
 	spec := normalize(cluster.Spec)
 	role := spec.dataRole
 
@@ -181,7 +181,7 @@ func DataStatefulSet(cluster *memgraphcomv1alpha1.MemgraphCluster, replicas int3
 // Service. Every other argument is forwarded by "$@" — only the derived ones
 // are written into the script.
 func coordinatorStartScript(
-	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	cluster *memgraphcomv1alpha1.MemgraphDBCluster,
 	spec normalizedSpec,
 ) string {
 	fqdnSuffix := podFQDNSuffix(cluster, CoordinatorName(cluster), spec)
@@ -548,7 +548,7 @@ func volumeMounts(spec normalizedSpec, role normalizedRole) []corev1.VolumeMount
 // A Secret carrying more keys mounts fine, and one missing a key keeps the pod
 // from starting, which is how a missing license Secret is reported too.
 func podVolumes(
-	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	cluster *memgraphcomv1alpha1.MemgraphDBCluster,
 	spec normalizedSpec,
 	role normalizedRole,
 	flagsConfigMap string,
@@ -676,7 +676,7 @@ func podInitContainers(spec normalizedSpec, role normalizedRole) []corev1.Contai
 }
 
 func statefulSet(
-	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	cluster *memgraphcomv1alpha1.MemgraphDBCluster,
 	component, name string,
 	spec normalizedSpec,
 	role normalizedRole,
@@ -771,7 +771,7 @@ func statefulSet(
 // the spread the cluster was created with. A role with neither carries no
 // affinity at all.
 func podAffinity(
-	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	cluster *memgraphcomv1alpha1.MemgraphDBCluster,
 	component string,
 	spec normalizedSpec,
 	role normalizedRole,
@@ -817,7 +817,7 @@ func podAffinity(
 // the labels are the operator's, so asking the user to repeat them would only
 // invite a typo that spreads nothing.
 func spreadConstraints(
-	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	cluster *memgraphcomv1alpha1.MemgraphDBCluster,
 	component string,
 	role normalizedRole,
 ) []corev1.TopologySpreadConstraint {

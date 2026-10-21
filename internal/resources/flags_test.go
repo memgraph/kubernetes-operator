@@ -199,7 +199,7 @@ func TestFlagsAnnotationFollowsStartupFlagsOnly(t *testing.T) {
 // environment variable and the image — changes it, so a pod is restarted for
 // that whatever its flags say.
 func TestTemplateHashIgnoresOnlyTheFlags(t *testing.T) {
-	hashOf := func(mutate func(*memgraphcomv1alpha1.MemgraphCluster)) string {
+	hashOf := func(mutate func(*memgraphcomv1alpha1.MemgraphDBCluster)) string {
 		cluster := minimalCluster()
 		mutate(cluster)
 		template := coordinatorStatefulSet(cluster).Spec.Template
@@ -210,22 +210,22 @@ func TestTemplateHashIgnoresOnlyTheFlags(t *testing.T) {
 		return got
 	}
 
-	base := hashOf(func(*memgraphcomv1alpha1.MemgraphCluster) {})
+	base := hashOf(func(*memgraphcomv1alpha1.MemgraphDBCluster) {})
 	if base == "" {
 		t.Fatal("template carries no template hash")
 	}
-	if got := hashOf(func(c *memgraphcomv1alpha1.MemgraphCluster) {
+	if got := hashOf(func(c *memgraphcomv1alpha1.MemgraphDBCluster) {
 		c.Spec.Flags.Coordinators = map[string]memgraphcomv1alpha1.FlagValue{
 			"enabled_reads_on_main": flagOn, memoryLimitFlag: "2048", logLevelFlag: infoLevel,
 		}
 	}); got != base {
 		t.Errorf("hash changed to %q for a flags-only change, want %q", got, base)
 	}
-	for name, mutate := range map[string]func(*memgraphcomv1alpha1.MemgraphCluster){
-		"an environment variable": func(c *memgraphcomv1alpha1.MemgraphCluster) {
+	for name, mutate := range map[string]func(*memgraphcomv1alpha1.MemgraphDBCluster){
+		"an environment variable": func(c *memgraphcomv1alpha1.MemgraphDBCluster) {
 			c.Spec.ExtraEnv.Coordinators = []memgraphcomv1alpha1.EnvVar{{Name: "E2E", Value: "1"}}
 		},
-		"the image tag": func(c *memgraphcomv1alpha1.MemgraphCluster) {
+		"the image tag": func(c *memgraphcomv1alpha1.MemgraphDBCluster) {
 			c.Spec.Image.Tag = "3.14.0"
 		},
 	} {

@@ -1110,9 +1110,9 @@ func TestRegistered(t *testing.T) {
 // whose registration commands carry the fixed ports and configured domain that
 // the coordinators use to reach every instance.
 func TestPlanUsesFixedPortsAndConfiguredClusterDomain(t *testing.T) {
-	cluster := &memgraphcomv1alpha1.MemgraphCluster{
+	cluster := &memgraphcomv1alpha1.MemgraphDBCluster{
 		ObjectMeta: metav1.ObjectMeta{Name: "example", Namespace: "memgraph-test"},
-		Spec: memgraphcomv1alpha1.MemgraphClusterSpec{
+		Spec: memgraphcomv1alpha1.MemgraphDBClusterSpec{
 			Coordinators:  ptr.To(int32(1)),
 			DataInstances: ptr.To(int32(1)),
 			ClusterDomain: "k8s.example.com",
@@ -1146,9 +1146,9 @@ func TestPlanUsesFixedPortsAndConfiguredClusterDomain(t *testing.T) {
 // A cluster already registered on the fixed addresses is converged: the
 // planner must not re-issue registrations.
 func TestPlanConvergedOnFixedPorts(t *testing.T) {
-	cluster := &memgraphcomv1alpha1.MemgraphCluster{
+	cluster := &memgraphcomv1alpha1.MemgraphDBCluster{
 		ObjectMeta: metav1.ObjectMeta{Name: "example", Namespace: "memgraph-test"},
-		Spec: memgraphcomv1alpha1.MemgraphClusterSpec{
+		Spec: memgraphcomv1alpha1.MemgraphDBClusterSpec{
 			Coordinators:  ptr.To(int32(1)),
 			DataInstances: ptr.To(int32(1)),
 			ClusterDomain: "k8s.example.com",

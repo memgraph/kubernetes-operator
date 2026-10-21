@@ -45,7 +45,7 @@ const (
 
 // vmagentCluster asks for a vmagent with every knob set, so the golden tests
 // pin each one.
-func vmagentCluster() *memgraphcomv1alpha1.MemgraphCluster {
+func vmagentCluster() *memgraphcomv1alpha1.MemgraphDBCluster {
 	cluster := minimalCluster()
 	cluster.Spec.Monitoring = &memgraphcomv1alpha1.MonitoringSpec{
 		VMAgentRemote: &memgraphcomv1alpha1.VMAgentRemoteSpec{

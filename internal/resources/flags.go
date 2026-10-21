@@ -81,13 +81,13 @@ const (
 
 // CoordinatorFlagsName and DataFlagsName are the names of the ConfigMaps
 // holding each role's flag file.
-func CoordinatorFlagsName(cluster *memgraphcomv1alpha1.MemgraphCluster) string {
+func CoordinatorFlagsName(cluster *memgraphcomv1alpha1.MemgraphDBCluster) string {
 	return CoordinatorName(cluster) + "-" + flagsComponent
 }
 
 // DataFlagsName is the name of the ConfigMap holding the data instances'
 // flag file.
-func DataFlagsName(cluster *memgraphcomv1alpha1.MemgraphCluster) string {
+func DataFlagsName(cluster *memgraphcomv1alpha1.MemgraphDBCluster) string {
 	return DataName(cluster) + "-" + flagsComponent
 }
 
@@ -95,31 +95,31 @@ func DataFlagsName(cluster *memgraphcomv1alpha1.MemgraphCluster) string {
 // file, by canonical gflags name: the operator's own defaults with the role's
 // spec.flags merged over them. It is the view the controller diffs an
 // instance's run-time settings against.
-func CoordinatorFlags(cluster *memgraphcomv1alpha1.MemgraphCluster) map[string]string {
+func CoordinatorFlags(cluster *memgraphcomv1alpha1.MemgraphDBCluster) map[string]string {
 	return roleFlags(normalize(cluster.Spec).coordinatorRole)
 }
 
 // DataFlags is the same for the data instance pods.
-func DataFlags(cluster *memgraphcomv1alpha1.MemgraphCluster) map[string]string {
+func DataFlags(cluster *memgraphcomv1alpha1.MemgraphDBCluster) map[string]string {
 	return roleFlags(normalize(cluster.Spec).dataRole)
 }
 
 // CoordinatorFlagsConfigMap builds the ConfigMap holding the coordinators'
 // flag file.
-func CoordinatorFlagsConfigMap(cluster *memgraphcomv1alpha1.MemgraphCluster) *corev1.ConfigMap {
+func CoordinatorFlagsConfigMap(cluster *memgraphcomv1alpha1.MemgraphDBCluster) *corev1.ConfigMap {
 	spec := normalize(cluster.Spec)
 	return flagsConfigMap(cluster, coordinatorComponent, CoordinatorFlagsName(cluster), spec.coordinatorRole)
 }
 
 // DataFlagsConfigMap builds the ConfigMap holding the data instances' flag
 // file.
-func DataFlagsConfigMap(cluster *memgraphcomv1alpha1.MemgraphCluster) *corev1.ConfigMap {
+func DataFlagsConfigMap(cluster *memgraphcomv1alpha1.MemgraphDBCluster) *corev1.ConfigMap {
 	spec := normalize(cluster.Spec)
 	return flagsConfigMap(cluster, dataComponent, DataFlagsName(cluster), spec.dataRole)
 }
 
 func flagsConfigMap(
-	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	cluster *memgraphcomv1alpha1.MemgraphDBCluster,
 	component, name string,
 	role normalizedRole,
 ) *corev1.ConfigMap {

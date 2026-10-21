@@ -73,18 +73,18 @@ const (
 
 // VMAgentName is the name of the vmagent Deployment the operator runs for a
 // cluster that asks for one.
-func VMAgentName(cluster *memgraphcomv1alpha1.MemgraphCluster) string {
+func VMAgentName(cluster *memgraphcomv1alpha1.MemgraphDBCluster) string {
 	return cluster.Name + "-" + vmagentComponent
 }
 
 // VMAgentConfigName is the name of the ConfigMap holding that vmagent's scrape
 // config.
-func VMAgentConfigName(cluster *memgraphcomv1alpha1.MemgraphCluster) string {
+func VMAgentConfigName(cluster *memgraphcomv1alpha1.MemgraphDBCluster) string {
 	return VMAgentName(cluster) + "-config"
 }
 
 // UsesVMAgent reports whether the cluster asked for a vmagent.
-func UsesVMAgent(cluster *memgraphcomv1alpha1.MemgraphCluster) bool {
+func UsesVMAgent(cluster *memgraphcomv1alpha1.MemgraphDBCluster) bool {
 	return cluster.Spec.Monitoring != nil && cluster.Spec.Monitoring.VMAgentRemote != nil
 }
 
@@ -125,7 +125,7 @@ type staticConfig struct {
 //
 // The builder is only called for a cluster whose spec carries the block.
 func VMAgentConfigMap(
-	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	cluster *memgraphcomv1alpha1.MemgraphDBCluster,
 	coordinatorReplicas, dataReplicas int32,
 ) *corev1.ConfigMap {
 	spec := normalize(cluster.Spec)
@@ -182,7 +182,7 @@ func VMAgentConfigMap(
 // it mounts no ServiceAccount token.
 //
 // The builder is only called for a cluster whose spec carries the block.
-func VMAgentDeployment(cluster *memgraphcomv1alpha1.MemgraphCluster) *appsv1.Deployment {
+func VMAgentDeployment(cluster *memgraphcomv1alpha1.MemgraphDBCluster) *appsv1.Deployment {
 	spec := normalize(cluster.Spec)
 	block := spec.monitoring.vmagent
 

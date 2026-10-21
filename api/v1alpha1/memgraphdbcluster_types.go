@@ -162,19 +162,19 @@ const (
 
 // StorageRetentionPolicy decides what happens to a PersistentVolumeClaim of
 // this cluster once nothing runs on it any more: either because the
-// MemgraphCluster was deleted, or because a lowered replica count retired the
+// MemgraphDBCluster was deleted, or because a lowered replica count retired the
 // pod that used it.
 // +kubebuilder:validation:Enum=Retain;Delete
 type StorageRetentionPolicy string
 
 const (
 	// RetentionPolicyRetain leaves the PVCs behind, so the data survives both an
-	// accidental deletion of the MemgraphCluster and an accidental scale-down —
+	// accidental deletion of the MemgraphDBCluster and an accidental scale-down —
 	// raising the count again reattaches the retained volume.
 	RetentionPolicyRetain StorageRetentionPolicy = "Retain"
 
 	// RetentionPolicyDelete lets the StatefulSet controller garbage-collect the
-	// PVCs: all of them when the MemgraphCluster is deleted, and a retiring
+	// PVCs: all of them when the MemgraphDBCluster is deleted, and a retiring
 	// pod's when a replica count is lowered. The data is not recoverable.
 	RetentionPolicyDelete StorageRetentionPolicy = "Delete"
 )
@@ -212,7 +212,7 @@ const (
 	CorePatternNode CorePatternOwner = "Node"
 )
 
-// Condition types reported on MemgraphCluster status. All four use
+// Condition types reported on MemgraphDBCluster status. All four use
 // normal-True polarity: True is the healthy state. Converged, Updated and
 // LicenseApplied each answer one question; Ready is their summary, the one
 // condition tools that know nothing about Memgraph read (kstatus, and with it
@@ -260,7 +260,7 @@ const (
 	ConditionLicenseApplied = "LicenseApplied"
 )
 
-// Condition reasons reported on MemgraphCluster status. Reasons are CamelCase
+// Condition reasons reported on MemgraphDBCluster status. Reasons are CamelCase
 // per Kubernetes API conventions and are stable enough for tooling to gate on.
 const (
 	// ReasonApplyFailed is set when the API server rejected one of the desired
@@ -450,7 +450,7 @@ const (
 
 // InitializeConditions sets every condition the resource reports to Unknown,
 // leaving those already present untouched.
-func (c *MemgraphCluster) InitializeConditions() {
+func (c *MemgraphDBCluster) InitializeConditions() {
 	for _, condType := range []string{
 		ConditionReady, ConditionConverged, ConditionUpdated, ConditionLicenseApplied,
 	} {
@@ -594,7 +594,7 @@ type AWSCredentialsSpec struct {
 // refusal is reported on Converged.
 //
 // Everything else here is pinned by a transition rule: changing it on a live
-// MemgraphCluster is refused at admission with the procedure that works,
+// MemgraphDBCluster is refused at admission with the procedure that works,
 // rather than accepted and then rejected by the API server on every apply
 // forever. Recreating the StatefulSet is not an answer for those: a class or
 // an access mode cannot change on an existing claim, and adding or removing a
@@ -607,9 +607,9 @@ type AWSCredentialsSpec struct {
 // The has() guards keep every rule evaluable against the block's empty object
 // default, which the API server checks before nested field defaults apply.
 //
-// +kubebuilder:validation:XValidation:rule="has(self.libStorageClassName) == has(oldSelf.libStorageClassName) && (!has(self.libStorageClassName) || self.libStorageClassName == oldSelf.libStorageClassName)",message="libStorageClassName cannot be changed on a live cluster: it is part of a StatefulSet volumeClaimTemplate, which Kubernetes forbids changing in place. Delete the MemgraphCluster (its claims are retained under the default retention policy) and recreate it with the new value"
+// +kubebuilder:validation:XValidation:rule="has(self.libStorageClassName) == has(oldSelf.libStorageClassName) && (!has(self.libStorageClassName) || self.libStorageClassName == oldSelf.libStorageClassName)",message="libStorageClassName cannot be changed on a live cluster: it is part of a StatefulSet volumeClaimTemplate, which Kubernetes forbids changing in place. Delete the MemgraphDBCluster (its claims are retained under the default retention policy) and recreate it with the new value"
 // +kubebuilder:validation:XValidation:rule="has(self.libPVCSize) == has(oldSelf.libPVCSize) && (!has(self.libPVCSize) || quantity(string(self.libPVCSize)).compareTo(quantity(string(oldSelf.libPVCSize))) >= 0)",message="libPVCSize cannot shrink: Kubernetes cannot shrink a volume. It can only grow"
-// +kubebuilder:validation:XValidation:rule="has(self.libStorageAccessMode) == has(oldSelf.libStorageAccessMode) && (!has(self.libStorageAccessMode) || self.libStorageAccessMode == oldSelf.libStorageAccessMode)",message="libStorageAccessMode cannot be changed on a live cluster: it is part of a StatefulSet volumeClaimTemplate, which Kubernetes forbids changing in place. Delete the MemgraphCluster (its claims are retained under the default retention policy) and recreate it with the new value"
+// +kubebuilder:validation:XValidation:rule="has(self.libStorageAccessMode) == has(oldSelf.libStorageAccessMode) && (!has(self.libStorageAccessMode) || self.libStorageAccessMode == oldSelf.libStorageAccessMode)",message="libStorageAccessMode cannot be changed on a live cluster: it is part of a StatefulSet volumeClaimTemplate, which Kubernetes forbids changing in place. Delete the MemgraphDBCluster (its claims are retained under the default retention policy) and recreate it with the new value"
 type RoleStorageSpec struct {
 	// libPVCSize is the requested size of the lib storage claim, which backs
 	// Memgraph's data directory (snapshots, WAL, and durability metadata). It
@@ -657,7 +657,7 @@ type RoleStorageSpec struct {
 // claim once nothing runs on it any more.
 type StorageSpec struct {
 	// retentionPolicy decides whether a PersistentVolumeClaim of this cluster
-	// survives being orphaned, which happens two ways: the MemgraphCluster is
+	// survives being orphaned, which happens two ways: the MemgraphDBCluster is
 	// deleted, or a lowered replica count retires the pod that used it. Both are
 	// the same question — keep this cluster's data, or do not — so the policy
 	// maps onto both halves of the StatefulSets'
@@ -798,16 +798,16 @@ type CoreDumpsUploaderSpec struct {
 // The has() guards keep the rules evaluable against the block's empty object
 // default, which the API server checks before nested field defaults apply.
 //
-// +kubebuilder:validation:XValidation:rule="has(self.coordinators) == has(oldSelf.coordinators)",message="coreDumps.coordinators cannot be added or removed on a live cluster: the core dumps volume is a StatefulSet volumeClaimTemplate, which Kubernetes forbids adding or removing in place. Delete the MemgraphCluster (its claims are retained under the default retention policy) and recreate it with the new setting"
-// +kubebuilder:validation:XValidation:rule="has(self.data) == has(oldSelf.data)",message="coreDumps.data cannot be added or removed on a live cluster: the core dumps volume is a StatefulSet volumeClaimTemplate, which Kubernetes forbids adding or removing in place. Delete the MemgraphCluster (its claims are retained under the default retention policy) and recreate it with the new setting"
+// +kubebuilder:validation:XValidation:rule="has(self.coordinators) == has(oldSelf.coordinators)",message="coreDumps.coordinators cannot be added or removed on a live cluster: the core dumps volume is a StatefulSet volumeClaimTemplate, which Kubernetes forbids adding or removing in place. Delete the MemgraphDBCluster (its claims are retained under the default retention policy) and recreate it with the new setting"
+// +kubebuilder:validation:XValidation:rule="has(self.data) == has(oldSelf.data)",message="coreDumps.data cannot be added or removed on a live cluster: the core dumps volume is a StatefulSet volumeClaimTemplate, which Kubernetes forbids adding or removing in place. Delete the MemgraphDBCluster (its claims are retained under the default retention policy) and recreate it with the new setting"
 // +kubebuilder:validation:XValidation:rule="!has(self.uploader) || has(self.coordinators) || has(self.data)",message="uploader requires core dumps for at least one role — there would be no volume for it to read"
-// +kubebuilder:validation:XValidation:rule="!(has(self.coordinators) || has(self.data)) || (has(self.storageClassName) == has(oldSelf.storageClassName) && (!has(self.storageClassName) || self.storageClassName == oldSelf.storageClassName))",message="coreDumps storageClassName cannot be changed on a live cluster while a role collects dumps: it is part of a StatefulSet volumeClaimTemplate, which Kubernetes forbids changing in place. Delete the MemgraphCluster (its claims are retained under the default retention policy) and recreate it with the new value"
+// +kubebuilder:validation:XValidation:rule="!(has(self.coordinators) || has(self.data)) || (has(self.storageClassName) == has(oldSelf.storageClassName) && (!has(self.storageClassName) || self.storageClassName == oldSelf.storageClassName))",message="coreDumps storageClassName cannot be changed on a live cluster while a role collects dumps: it is part of a StatefulSet volumeClaimTemplate, which Kubernetes forbids changing in place. Delete the MemgraphDBCluster (its claims are retained under the default retention policy) and recreate it with the new value"
 type CoreDumpsSpec struct {
 	// coordinators, when present, makes every coordinator pod collect dumps
 	// onto a volume of the size it names. It is a create-time choice: once the
 	// cluster exists the block cannot be added or removed, and an edit that
 	// tries is rejected at admission with the procedure that works — delete the
-	// MemgraphCluster, whose claims the default Retain policy keeps, and
+	// MemgraphDBCluster, whose claims the default Retain policy keeps, and
 	// recreate it.
 	// +optional
 	Coordinators *RoleCoreDumpsSpec `json:"coordinators,omitempty"`
@@ -849,7 +849,7 @@ type CoreDumpsSpec struct {
 	// the operator mounts the core dumps volume into the sidecar read-only,
 	// passes the directory as CORE_DUMPS_DIR, and gives it the same locked-down
 	// security context as the Memgraph container. See
-	// config/samples/v1alpha1_memgraphcluster.yaml for an S3 uploader
+	// config/samples/v1alpha1_memgraphdbcluster.yaml for an S3 uploader
 	// equivalent to the Helm chart's.
 	//
 	// One definition serves both roles — the destination and credentials do not
@@ -2027,7 +2027,7 @@ type TLSSpec struct {
 	IntraCluster *IntraClusterTLSSpec `json:"intraCluster,omitempty"`
 }
 
-// MemgraphClusterSpec defines the desired state of MemgraphCluster.
+// MemgraphDBClusterSpec defines the desired state of MemgraphDBCluster.
 //
 // The one rule here spans two blocks: with type Gateway every data instance
 // gets a listener on gateway.dataPortBase + ordinal, so the declared count
@@ -2040,9 +2040,9 @@ type TLSSpec struct {
 // had no tls block, or removing the whole block, would slip past it.
 //
 // +kubebuilder:validation:XValidation:rule="!has(self.externalAccess) || !has(self.externalAccess.gateway) || !has(self.externalAccess.gateway.dataPortBase) || !has(self.dataInstances) || self.externalAccess.gateway.dataPortBase + self.dataInstances <= 65536",message="externalAccess.gateway.dataPortBase + dataInstances must not exceed 65536: every data instance listens on dataPortBase + its ordinal"
-// +kubebuilder:validation:XValidation:rule="(has(self.tls) && has(self.tls.intraCluster)) == (has(oldSelf.tls) && has(oldSelf.tls.intraCluster))",message="tls.intraCluster cannot be added or removed on a live cluster: a member with intra-cluster TLS cannot talk to one without it, so restarting pods one at a time would deadlock waiting for replication that can no longer happen. Delete the MemgraphCluster (its claims are retained under the default retention policy) and recreate it with the new setting"
+// +kubebuilder:validation:XValidation:rule="(has(self.tls) && has(self.tls.intraCluster)) == (has(oldSelf.tls) && has(oldSelf.tls.intraCluster))",message="tls.intraCluster cannot be added or removed on a live cluster: a member with intra-cluster TLS cannot talk to one without it, so restarting pods one at a time would deadlock waiting for replication that can no longer happen. Delete the MemgraphDBCluster (its claims are retained under the default retention policy) and recreate it with the new setting"
 // +kubebuilder:validation:XValidation:rule="!has(self.fixOwnershipInitContainer) || !has(self.securityContext) || (has(self.securityContext.runAsUser) && (has(self.securityContext.runAsGroup) || has(self.securityContext.fsGroup)))",message="fixOwnershipInitContainer needs securityContext to name runAsUser and one of runAsGroup or fsGroup: the container can only chown the volumes to an identity the cluster names, not to one the platform assigns at admission"
-type MemgraphClusterSpec struct {
+type MemgraphDBClusterSpec struct {
 	// coordinators is the number of Raft coordinator instances. It must be odd
 	// so the Raft quorum cannot split, and at least three, which is the
 	// smallest quorum that survives losing a coordinator — this operator
@@ -2230,11 +2230,11 @@ type ExternalAccessStatus struct {
 	Data []ExternalAddress `json:"data,omitempty"`
 }
 
-// MemgraphClusterStatus defines the observed state of MemgraphCluster.
+// MemgraphDBClusterStatus defines the observed state of MemgraphDBCluster.
 //
 // Status is observation only: it carries no secret material and is never read
 // back as reconcile input state.
-type MemgraphClusterStatus struct {
+type MemgraphDBClusterStatus struct {
 	// main is the name of the data instance currently observed as MAIN, as
 	// reported by SHOW INSTANCES on the coordinator leader. It is empty before
 	// the initial MAIN is elected and updates when the Raft coordinators fail
@@ -2262,7 +2262,7 @@ type MemgraphClusterStatus struct {
 	// +optional
 	ExternalAccess *ExternalAccessStatus `json:"externalAccess,omitempty"`
 
-	// conditions represent the current state of the MemgraphCluster resource.
+	// conditions represent the current state of the MemgraphDBCluster resource.
 	// Each condition has a unique type and reflects the status of a specific aspect of the resource.
 	//
 	// Standard condition types include:
@@ -2279,7 +2279,7 @@ type MemgraphClusterStatus struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// +kubebuilder:resource:shortName=mgc
+// +kubebuilder:resource:shortName=mgdbc,categories=memgraph
 // +kubebuilder:printcolumn:name="Coordinators",type=integer,JSONPath=`.spec.coordinators`
 // +kubebuilder:printcolumn:name="Data",type=integer,JSONPath=`.spec.dataInstances`
 // +kubebuilder:printcolumn:name="Registered-Coordinators",type=integer,JSONPath=`.status.coordinators`,priority=1
@@ -2289,35 +2289,35 @@ type MemgraphClusterStatus struct {
 // +kubebuilder:printcolumn:name="Converged",type=string,JSONPath=`.status.conditions[?(@.type=="Converged")].status`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
-// MemgraphCluster is the Schema for the memgraphclusters API
-type MemgraphCluster struct {
+// MemgraphDBCluster is the Schema for the memgraphdbclusters API
+type MemgraphDBCluster struct {
 	metav1.TypeMeta `json:",inline"`
 
 	// metadata is a standard object metadata
 	// +optional
 	metav1.ObjectMeta `json:"metadata,omitzero"`
 
-	// spec defines the desired state of MemgraphCluster
+	// spec defines the desired state of MemgraphDBCluster
 	// +required
-	Spec MemgraphClusterSpec `json:"spec"`
+	Spec MemgraphDBClusterSpec `json:"spec"`
 
-	// status defines the observed state of MemgraphCluster
+	// status defines the observed state of MemgraphDBCluster
 	// +optional
-	Status MemgraphClusterStatus `json:"status,omitzero"`
+	Status MemgraphDBClusterStatus `json:"status,omitzero"`
 }
 
 // +kubebuilder:object:root=true
 
-// MemgraphClusterList contains a list of MemgraphCluster
-type MemgraphClusterList struct {
+// MemgraphDBClusterList contains a list of MemgraphDBCluster
+type MemgraphDBClusterList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitzero"`
-	Items           []MemgraphCluster `json:"items"`
+	Items           []MemgraphDBCluster `json:"items"`
 }
 
 func init() {
 	SchemeBuilder.Register(func(s *runtime.Scheme) error {
-		s.AddKnownTypes(SchemeGroupVersion, &MemgraphCluster{}, &MemgraphClusterList{})
+		s.AddKnownTypes(SchemeGroupVersion, &MemgraphDBCluster{}, &MemgraphDBClusterList{})
 		return nil
 	})
 }

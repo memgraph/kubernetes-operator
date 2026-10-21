@@ -191,7 +191,7 @@ CHART_NAMESPACE ?= memgraph-operator-system
 # The CRDs are templates, not files under crds/: Helm installs crds/ once and
 # never upgrades it. Each is wrapped in crds.enabled, labelled like the rest of
 # the release, and annotated helm.sh/resource-policy: keep, because deleting
-# the CRD on helm uninstall would delete every MemgraphCluster with it.
+# the CRD on helm uninstall would delete every MemgraphDBCluster with it.
 .PHONY: chart-sync
 chart-sync: manifests ## Regenerate the chart's CRDs and RBAC rules from the Go sources.
 	mkdir -p "$(CHART_DIR)/templates/crds"
@@ -277,7 +277,7 @@ helm-install: ## Install the operator from the local chart, running the image sp
 .PHONY: helm-uninstall
 helm-uninstall: ## Uninstall the operator, including the CRD the chart keeps on uninstall.
 	"$(HELM)" uninstall "$(CHART_RELEASE)" --namespace "$(CHART_NAMESPACE)" --ignore-not-found
-	"$(KUBECTL)" delete --ignore-not-found=true crd memgraphclusters.memgraph.com
+	"$(KUBECTL)" delete --ignore-not-found=true crd memgraphdbclusters.memgraph.com
 
 ##@ Release
 

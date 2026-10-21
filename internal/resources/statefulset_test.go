@@ -110,11 +110,11 @@ const (
 	platformTeam = "platform"
 )
 
-// minimalCluster returns a MemgraphCluster as a client would minimally create
+// minimalCluster returns a MemgraphDBCluster as a client would minimally create
 // it, deliberately without CRD schema defaults applied: builders must resolve
 // defaults themselves on specs that never passed admission.
-func minimalCluster() *memgraphcomv1alpha1.MemgraphCluster {
-	return &memgraphcomv1alpha1.MemgraphCluster{
+func minimalCluster() *memgraphcomv1alpha1.MemgraphDBCluster {
+	return &memgraphcomv1alpha1.MemgraphDBCluster{
 		ObjectMeta: metav1.ObjectMeta{Name: clusterName, Namespace: testNamespace},
 	}
 }
@@ -124,11 +124,11 @@ func minimalCluster() *memgraphcomv1alpha1.MemgraphCluster {
 // cluster that is growing or holding its size. The count a shrinking cluster is
 // held at is the controller's decision, so the cases that cover it pass it to
 // the builder directly.
-func coordinatorStatefulSet(cluster *memgraphcomv1alpha1.MemgraphCluster) *appsv1.StatefulSet {
+func coordinatorStatefulSet(cluster *memgraphcomv1alpha1.MemgraphDBCluster) *appsv1.StatefulSet {
 	return resources.CoordinatorStatefulSet(cluster, resources.DeclaredCoordinators(cluster))
 }
 
-func dataStatefulSet(cluster *memgraphcomv1alpha1.MemgraphCluster) *appsv1.StatefulSet {
+func dataStatefulSet(cluster *memgraphcomv1alpha1.MemgraphDBCluster) *appsv1.StatefulSet {
 	return resources.DataStatefulSet(cluster, resources.DeclaredDataInstances(cluster))
 }
 
@@ -136,10 +136,10 @@ func endpoint(host string, port int32) string {
 	return fmt.Sprintf("%s:%d", host, port)
 }
 
-func specifiedCluster() *memgraphcomv1alpha1.MemgraphCluster {
-	return &memgraphcomv1alpha1.MemgraphCluster{
+func specifiedCluster() *memgraphcomv1alpha1.MemgraphDBCluster {
+	return &memgraphcomv1alpha1.MemgraphDBCluster{
 		ObjectMeta: metav1.ObjectMeta{Name: clusterName, Namespace: testNamespace},
-		Spec: memgraphcomv1alpha1.MemgraphClusterSpec{
+		Spec: memgraphcomv1alpha1.MemgraphDBClusterSpec{
 			Coordinators:  ptr.To(int32(5)),
 			DataInstances: ptr.To(int32(3)),
 			Image: memgraphcomv1alpha1.ImageSpec{
@@ -159,9 +159,9 @@ func specifiedCluster() *memgraphcomv1alpha1.MemgraphCluster {
 // Non-default cluster domain shared by the tuning tests.
 const customClusterDomain = "k8s.example.com"
 
-// tunedCluster returns a MemgraphCluster with every pod-tuning knob set away
+// tunedCluster returns a MemgraphDBCluster with every pod-tuning knob set away
 // from its default, so the golden tests can pin what each one lands on.
-func tunedCluster() *memgraphcomv1alpha1.MemgraphCluster {
+func tunedCluster() *memgraphcomv1alpha1.MemgraphDBCluster {
 	cluster := minimalCluster()
 	cluster.Spec.ClusterDomain = customClusterDomain
 	cluster.Spec.ReadinessProbe = memgraphcomv1alpha1.ReadinessProbeSpec{
@@ -336,7 +336,7 @@ func expectedFixOwnershipInitContainer(owner string, mounts ...corev1.VolumeMoun
 
 // sysctlCluster is a minimal cluster with the sysctlInitContainer block
 // present and empty, the way the quickstart example carries it.
-func sysctlCluster() *memgraphcomv1alpha1.MemgraphCluster {
+func sysctlCluster() *memgraphcomv1alpha1.MemgraphDBCluster {
 	cluster := minimalCluster()
 	cluster.Spec.SysctlInitContainer = &memgraphcomv1alpha1.SysctlInitContainerSpec{}
 	return cluster
@@ -933,7 +933,7 @@ func TestStatefulSetFixOwnershipInitContainer(t *testing.T) {
 	libMount := corev1.VolumeMount{Name: libVolume, MountPath: libPath}
 	coreDumpsMount := corev1.VolumeMount{Name: coreDumpsVolume, MountPath: coreDumpsPath}
 
-	withBlock := func() *memgraphcomv1alpha1.MemgraphCluster {
+	withBlock := func() *memgraphcomv1alpha1.MemgraphDBCluster {
 		cluster := minimalCluster()
 		cluster.Spec.FixOwnershipInitContainer = &memgraphcomv1alpha1.FixOwnershipInitContainerSpec{}
 		return cluster

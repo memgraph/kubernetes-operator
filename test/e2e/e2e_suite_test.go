@@ -62,7 +62,7 @@ func TestE2E(t *testing.T) {
 // users' install path — the same chart, the same CRDs, the same
 // least-privilege RBAC — so every scenario below runs against exactly the
 // permissions a real installation grants. Scenario containers (Describe
-// blocks) then only exercise MemgraphCluster behavior, so a new scenario is a
+// blocks) then only exercise MemgraphDBCluster behavior, so a new scenario is a
 // new test case, never new pipeline or deployment plumbing.
 var _ = BeforeSuite(func() {
 	By("building the manager image")
@@ -109,7 +109,7 @@ var _ = AfterSuite(func() {
 	// The chart keeps its CRD on uninstall, so the documented uninstall ends
 	// with deleting it explicitly.
 	By("uninstalling CRDs")
-	cmd = exec.Command("kubectl", "delete", "crd", "memgraphclusters.memgraph.com", "--ignore-not-found=true")
+	cmd = exec.Command("kubectl", "delete", "crd", "memgraphdbclusters.memgraph.com", "--ignore-not-found=true")
 	_, _ = utils.Run(cmd)
 
 	By("removing manager namespace")

@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package resources contains pure builders from a MemgraphCluster spec to the
+// Package resources contains pure builders from a MemgraphDBCluster spec to the
 // desired Kubernetes objects. Builders make no API calls and have no side
 // effects; the controller server-side-applies their output.
 package resources
@@ -64,13 +64,13 @@ const (
 
 // CoordinatorName is the name shared by the coordinator StatefulSet and its
 // headless Service.
-func CoordinatorName(cluster *memgraphcomv1alpha1.MemgraphCluster) string {
+func CoordinatorName(cluster *memgraphcomv1alpha1.MemgraphDBCluster) string {
 	return cluster.Name + "-" + coordinatorComponent
 }
 
 // DataName is the name shared by the data-instance StatefulSet and its
 // headless Service.
-func DataName(cluster *memgraphcomv1alpha1.MemgraphCluster) string {
+func DataName(cluster *memgraphcomv1alpha1.MemgraphDBCluster) string {
 	return cluster.Name + "-" + dataComponent
 }
 
@@ -86,7 +86,7 @@ type LicenseSecret struct {
 // read: the same resolution the StatefulSets' environment uses, so the
 // operator applies on a running pod exactly what the pod would read on a
 // restart.
-func LicenseSecretOf(cluster *memgraphcomv1alpha1.MemgraphCluster) LicenseSecret {
+func LicenseSecretOf(cluster *memgraphcomv1alpha1.MemgraphDBCluster) LicenseSecret {
 	spec := normalize(cluster.Spec)
 	return LicenseSecret{Name: spec.secretName, LicenseKey: spec.licenseKey, OrganizationKey: spec.organizationKey}
 }
@@ -94,7 +94,7 @@ func LicenseSecretOf(cluster *memgraphcomv1alpha1.MemgraphCluster) LicenseSecret
 // AWSCredentialsSecretOf returns the name of the Secret the data instances
 // read their AWS credentials from, and an empty string for a cluster that
 // names none.
-func AWSCredentialsSecretOf(cluster *memgraphcomv1alpha1.MemgraphCluster) string {
+func AWSCredentialsSecretOf(cluster *memgraphcomv1alpha1.MemgraphDBCluster) string {
 	return normalize(cluster.Spec).awsCredentialsSecret
 }
 
@@ -103,7 +103,7 @@ func AWSCredentialsSecretOf(cluster *memgraphcomv1alpha1.MemgraphCluster) string
 // always win a key collision, so a custom label can never detach an object
 // from its cluster.
 func labels(
-	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	cluster *memgraphcomv1alpha1.MemgraphDBCluster,
 	component string,
 	custom map[string]string,
 ) map[string]string {
@@ -117,12 +117,12 @@ func labels(
 // CoordinatorPodSelector matches the pods of this cluster's coordinator
 // StatefulSet, and DataPodSelector those of its data StatefulSet. Both are the
 // StatefulSets' own selectors, so they cannot drift from the pods they describe.
-func CoordinatorPodSelector(cluster *memgraphcomv1alpha1.MemgraphCluster) map[string]string {
+func CoordinatorPodSelector(cluster *memgraphcomv1alpha1.MemgraphDBCluster) map[string]string {
 	return selectorLabels(cluster, coordinatorComponent)
 }
 
 // DataPodSelector matches the pods of this cluster's data StatefulSet.
-func DataPodSelector(cluster *memgraphcomv1alpha1.MemgraphCluster) map[string]string {
+func DataPodSelector(cluster *memgraphcomv1alpha1.MemgraphDBCluster) map[string]string {
 	return selectorLabels(cluster, dataComponent)
 }
 
@@ -135,7 +135,7 @@ const (
 
 // selectorLabels returns the immutable subset of labels used as StatefulSet
 // and Service selectors.
-func selectorLabels(cluster *memgraphcomv1alpha1.MemgraphCluster, component string) map[string]string {
+func selectorLabels(cluster *memgraphcomv1alpha1.MemgraphDBCluster, component string) map[string]string {
 	return map[string]string{
 		NameLabel:      NameValue,
 		instanceLabel:  cluster.Name,
@@ -163,7 +163,7 @@ func ClusterNameOfMemgraphPod(labels map[string]string) string {
 	return ""
 }
 
-// normalizedSpec is a MemgraphClusterSpec with every optional field resolved
+// normalizedSpec is a MemgraphDBClusterSpec with every optional field resolved
 // to its default, so builders behave correctly on specs that never passed
 // admission. Most defaults are CRD schema defaults mirrored as Go constants;
 // the readiness probe timings are Go-only.
@@ -357,7 +357,7 @@ type normalizedStorage struct {
 	fileLogging   bool
 }
 
-func normalize(spec memgraphcomv1alpha1.MemgraphClusterSpec) normalizedSpec {
+func normalize(spec memgraphcomv1alpha1.MemgraphDBClusterSpec) normalizedSpec {
 	n := normalizedSpec{
 		coordinators:    memgraphcomv1alpha1.DefaultCoordinatorCount,
 		dataInstances:   memgraphcomv1alpha1.DefaultDataInstanceCount,

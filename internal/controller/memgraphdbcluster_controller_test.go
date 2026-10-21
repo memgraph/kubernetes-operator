@@ -133,13 +133,13 @@ func (c laggingCache) Get(ctx context.Context, key client.ObjectKey, obj client.
 	return c.Client.Get(ctx, key, obj, opts...)
 }
 
-var _ = Describe("MemgraphCluster Controller", func() {
+var _ = Describe("MemgraphDBCluster Controller", func() {
 	const resourceNamespace = "default"
 
 	ctx := context.Background()
 
 	var (
-		reconciler *MemgraphClusterReconciler
+		reconciler *MemgraphDBClusterReconciler
 		fake       *fakeMemgraph
 		recorded   *recordedEvents
 	)
@@ -147,7 +147,7 @@ var _ = Describe("MemgraphCluster Controller", func() {
 	BeforeEach(func() {
 		fake = newFakeMemgraph()
 		recorded = &recordedEvents{}
-		reconciler = &MemgraphClusterReconciler{
+		reconciler = &MemgraphDBClusterReconciler{
 			Client:            k8sClient,
 			Scheme:            k8sClient.Scheme(),
 			APIReader:         k8sClient,
@@ -195,7 +195,7 @@ var _ = Describe("MemgraphCluster Controller", func() {
 	// other condition, so a serving MAIN alone does not make it True.
 	expectServingButNotReady := func(name, reason string) {
 		GinkgoHelper()
-		cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+		cluster := &memgraphcomv1alpha1.MemgraphDBCluster{}
 		get(name, cluster)
 		Expect(cluster.Status.Main).NotTo(BeEmpty(), "a MAIN keeps serving")
 		ready := apimeta.FindStatusCondition(cluster.Status.Conditions, memgraphcomv1alpha1.ConditionReady)
@@ -237,23 +237,23 @@ var _ = Describe("MemgraphCluster Controller", func() {
 		}
 	}
 
-	expectControlledBy := func(obj client.Object, cluster *memgraphcomv1alpha1.MemgraphCluster) {
+	expectControlledBy := func(obj client.Object, cluster *memgraphcomv1alpha1.MemgraphDBCluster) {
 		GinkgoHelper()
 		ref := metav1.GetControllerOf(obj)
 		Expect(ref).NotTo(BeNil(), "expected %s to carry a controller owner reference", obj.GetName())
-		Expect(ref.Kind).To(Equal("MemgraphCluster"))
+		Expect(ref.Kind).To(Equal("MemgraphDBCluster"))
 		Expect(ref.Name).To(Equal(cluster.Name))
 		Expect(ref.UID).To(Equal(cluster.UID))
 		Expect(ref.Controller).To(HaveValue(BeTrue()))
 	}
 
-	Context("when reconciling a minimal MemgraphCluster", func() {
+	Context("when reconciling a minimal MemgraphDBCluster", func() {
 		const resourceName = "mgc-minimal"
 
-		cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+		cluster := &memgraphcomv1alpha1.MemgraphDBCluster{}
 
 		BeforeEach(func() {
-			resource := &memgraphcomv1alpha1.MemgraphCluster{
+			resource := &memgraphcomv1alpha1.MemgraphDBCluster{
 				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: resourceNamespace},
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
@@ -340,10 +340,10 @@ var _ = Describe("MemgraphCluster Controller", func() {
 		// Deleting storage is the StatefulSet machinery's job alone. An
 		// operator-owned finalizer would be a second, undeclared deleter — and
 		// one that can wedge a deletion when the operator is down.
-		It("should claim no finalizer on the MemgraphCluster", func() {
+		It("should claim no finalizer on the MemgraphDBCluster", func() {
 			reconcileCluster(resourceName)
 
-			stored := &memgraphcomv1alpha1.MemgraphCluster{}
+			stored := &memgraphcomv1alpha1.MemgraphDBCluster{}
 			get(resourceName, stored)
 			Expect(stored.Finalizers).To(BeEmpty())
 		})
@@ -376,15 +376,15 @@ var _ = Describe("MemgraphCluster Controller", func() {
 		})
 	})
 
-	Context("when reconciling a fully specified MemgraphCluster", func() {
+	Context("when reconciling a fully specified MemgraphDBCluster", func() {
 		const resourceName = "mgc-custom"
 
-		cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+		cluster := &memgraphcomv1alpha1.MemgraphDBCluster{}
 
 		BeforeEach(func() {
-			cr := &memgraphcomv1alpha1.MemgraphCluster{
+			cr := &memgraphcomv1alpha1.MemgraphDBCluster{
 				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: resourceNamespace},
-				Spec: memgraphcomv1alpha1.MemgraphClusterSpec{
+				Spec: memgraphcomv1alpha1.MemgraphDBClusterSpec{
 					Coordinators:  ptr.To(int32(3)),
 					DataInstances: ptr.To(int32(1)),
 					Image: memgraphcomv1alpha1.ImageSpec{
@@ -491,14 +491,14 @@ var _ = Describe("MemgraphCluster Controller", func() {
 		}
 
 		BeforeEach(func() {
-			resource := &memgraphcomv1alpha1.MemgraphCluster{
+			resource := &memgraphcomv1alpha1.MemgraphDBCluster{
 				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: resourceNamespace},
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
 		})
 
 		AfterEach(func() {
-			cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+			cluster := &memgraphcomv1alpha1.MemgraphDBCluster{}
 			get(resourceName, cluster)
 			Expect(k8sClient.Delete(ctx, cluster)).To(Succeed())
 			deleteOwned(resourceName)
@@ -778,9 +778,9 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			return convergedWith(2, mainOrdinal)
 		}
 
-		status := func() memgraphcomv1alpha1.MemgraphClusterStatus {
+		status := func() memgraphcomv1alpha1.MemgraphDBClusterStatus {
 			GinkgoHelper()
-			cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+			cluster := &memgraphcomv1alpha1.MemgraphDBCluster{}
 			get(resourceName, cluster)
 			return cluster.Status
 		}
@@ -793,7 +793,7 @@ var _ = Describe("MemgraphCluster Controller", func() {
 		// setCounts edits the declared topology of the live cluster.
 		setCounts := func(coordinators, dataInstances int32) {
 			GinkgoHelper()
-			cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+			cluster := &memgraphcomv1alpha1.MemgraphDBCluster{}
 			get(resourceName, cluster)
 			cluster.Spec.Coordinators = ptr.To(coordinators)
 			cluster.Spec.DataInstances = ptr.To(dataInstances)
@@ -817,7 +817,7 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			markWorkloadsReady(resourceName)
 			reconcileCluster(resourceName)
 			reconcileCluster(resourceName)
-			cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+			cluster := &memgraphcomv1alpha1.MemgraphDBCluster{}
 			get(resourceName, cluster)
 			Expect(apimeta.IsStatusConditionTrue(cluster.Status.Conditions,
 				memgraphcomv1alpha1.ConditionConverged)).To(BeTrue())
@@ -834,14 +834,14 @@ var _ = Describe("MemgraphCluster Controller", func() {
 		}
 
 		BeforeEach(func() {
-			resource := &memgraphcomv1alpha1.MemgraphCluster{
+			resource := &memgraphcomv1alpha1.MemgraphDBCluster{
 				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: resourceNamespace},
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
 		})
 
 		AfterEach(func() {
-			cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+			cluster := &memgraphcomv1alpha1.MemgraphDBCluster{}
 			get(resourceName, cluster)
 			Expect(k8sClient.Delete(ctx, cluster)).To(Succeed())
 			deleteOwned(resourceName)
@@ -1401,9 +1401,9 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			}
 		}
 
-		status := func() memgraphcomv1alpha1.MemgraphClusterStatus {
+		status := func() memgraphcomv1alpha1.MemgraphDBClusterStatus {
 			GinkgoHelper()
-			cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+			cluster := &memgraphcomv1alpha1.MemgraphDBCluster{}
 			get(resourceName, cluster)
 			return cluster.Status
 		}
@@ -1414,14 +1414,14 @@ var _ = Describe("MemgraphCluster Controller", func() {
 		}
 
 		BeforeEach(func() {
-			resource := &memgraphcomv1alpha1.MemgraphCluster{
+			resource := &memgraphcomv1alpha1.MemgraphDBCluster{
 				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: resourceNamespace},
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
 		})
 
 		AfterEach(func() {
-			cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+			cluster := &memgraphcomv1alpha1.MemgraphDBCluster{}
 			get(resourceName, cluster)
 			Expect(k8sClient.Delete(ctx, cluster)).To(Succeed())
 			deleteOwned(resourceName)
@@ -1491,7 +1491,7 @@ var _ = Describe("MemgraphCluster Controller", func() {
 		// changing a StatefulSet's volumeClaimTemplates, so the apply that would
 		// bring it onto the declared spec is refused.
 		It("should report the API server's rejection when applying a workload fails", func() {
-			cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+			cluster := &memgraphcomv1alpha1.MemgraphDBCluster{}
 			get(resourceName, cluster)
 			preexisting := resources.DataStatefulSet(cluster, resources.DeclaredDataInstances(cluster))
 			preexisting.Spec.VolumeClaimTemplates[0].Spec.AccessModes =
@@ -1627,7 +1627,7 @@ var _ = Describe("MemgraphCluster Controller", func() {
 		})
 
 		It("should update status through the subresource without modifying spec", func() {
-			cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+			cluster := &memgraphcomv1alpha1.MemgraphDBCluster{}
 			get(resourceName, cluster)
 			specBefore := cluster.Spec.DeepCopy()
 
@@ -1707,7 +1707,7 @@ var _ = Describe("MemgraphCluster Controller", func() {
 		}
 		condition := func(condType string) *metav1.Condition {
 			GinkgoHelper()
-			cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+			cluster := &memgraphcomv1alpha1.MemgraphDBCluster{}
 			get(resourceName, cluster)
 			return apimeta.FindStatusCondition(cluster.Status.Conditions, condType)
 		}
@@ -1779,7 +1779,7 @@ var _ = Describe("MemgraphCluster Controller", func() {
 		}
 
 		BeforeEach(func() {
-			resource := &memgraphcomv1alpha1.MemgraphCluster{
+			resource := &memgraphcomv1alpha1.MemgraphDBCluster{
 				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: resourceNamespace},
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
@@ -1791,7 +1791,7 @@ var _ = Describe("MemgraphCluster Controller", func() {
 		})
 
 		AfterEach(func() {
-			cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+			cluster := &memgraphcomv1alpha1.MemgraphDBCluster{}
 			get(resourceName, cluster)
 			Expect(k8sClient.Delete(ctx, cluster)).To(Succeed())
 			deleteOwned(resourceName)
@@ -1978,7 +1978,7 @@ var _ = Describe("MemgraphCluster Controller", func() {
 		}
 		condition := func(condType string) *metav1.Condition {
 			GinkgoHelper()
-			cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+			cluster := &memgraphcomv1alpha1.MemgraphDBCluster{}
 			get(resourceName, cluster)
 			return apimeta.FindStatusCondition(cluster.Status.Conditions, condType)
 		}
@@ -2097,7 +2097,7 @@ var _ = Describe("MemgraphCluster Controller", func() {
 		}
 		growLib := func(size string) {
 			GinkgoHelper()
-			cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+			cluster := &memgraphcomv1alpha1.MemgraphDBCluster{}
 			get(resourceName, cluster)
 			cluster.Spec.Storage.Data.LibPVCSize = ptr.To(resource.MustParse(size))
 			Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
@@ -2124,9 +2124,9 @@ var _ = Describe("MemgraphCluster Controller", func() {
 
 		createCluster := func(class string) {
 			GinkgoHelper()
-			resource := &memgraphcomv1alpha1.MemgraphCluster{
+			resource := &memgraphcomv1alpha1.MemgraphDBCluster{
 				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: resourceNamespace},
-				Spec: memgraphcomv1alpha1.MemgraphClusterSpec{Storage: memgraphcomv1alpha1.StorageSpec{
+				Spec: memgraphcomv1alpha1.MemgraphDBClusterSpec{Storage: memgraphcomv1alpha1.StorageSpec{
 					Data: memgraphcomv1alpha1.RoleStorageSpec{
 						LibPVCSize:          ptr.To(resource.MustParse("1Gi")),
 						LibStorageClassName: ptr.To(class),
@@ -2160,7 +2160,7 @@ var _ = Describe("MemgraphCluster Controller", func() {
 		})
 
 		AfterEach(func() {
-			cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+			cluster := &memgraphcomv1alpha1.MemgraphDBCluster{}
 			get(resourceName, cluster)
 			Expect(k8sClient.Delete(ctx, cluster)).To(Succeed())
 			for _, suffix := range []string{coordinatorSuffix, dataSuffix} {
@@ -2274,7 +2274,7 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			reconcileCluster(resourceName)
 			Expect(dataSet().DeletionTimestamp).NotTo(BeNil())
 
-			cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+			cluster := &memgraphcomv1alpha1.MemgraphDBCluster{}
 			get(resourceName, cluster)
 			cluster.Spec.DataInstances = ptr.To(int32(1))
 			Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
@@ -2399,7 +2399,7 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			secondInstance = "instance_1"
 		)
 
-		cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+		cluster := &memgraphcomv1alpha1.MemgraphDBCluster{}
 
 		podAddress := func(suffix string, ordinal int) string {
 			return fmt.Sprintf("%s%s-%d.%s%s.%s.svc.cluster.local:%d",
@@ -2494,9 +2494,9 @@ var _ = Describe("MemgraphCluster Controller", func() {
 		}
 
 		BeforeEach(func() {
-			resource := &memgraphcomv1alpha1.MemgraphCluster{
+			resource := &memgraphcomv1alpha1.MemgraphDBCluster{
 				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: resourceNamespace},
-				Spec: memgraphcomv1alpha1.MemgraphClusterSpec{
+				Spec: memgraphcomv1alpha1.MemgraphDBClusterSpec{
 					Flags: memgraphcomv1alpha1.FlagsSpec{
 						Data: map[string]memgraphcomv1alpha1.FlagValue{
 							logLevelFlag:       debugLevel,
@@ -2692,7 +2692,7 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			licenseSetting = `SET DATABASE SETTING "enterprise.license"`
 		)
 
-		cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+		cluster := &memgraphcomv1alpha1.MemgraphDBCluster{}
 
 		podName := func(suffix string, ordinal int) string {
 			return fmt.Sprintf("%s%s-%d", resourceName, suffix, ordinal)
@@ -2785,9 +2785,9 @@ var _ = Describe("MemgraphCluster Controller", func() {
 
 		BeforeEach(func() {
 			putSecret(startupLicense, startupOrganization)
-			resource := &memgraphcomv1alpha1.MemgraphCluster{
+			resource := &memgraphcomv1alpha1.MemgraphDBCluster{
 				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: resourceNamespace},
-				Spec: memgraphcomv1alpha1.MemgraphClusterSpec{
+				Spec: memgraphcomv1alpha1.MemgraphDBClusterSpec{
 					Secrets: memgraphcomv1alpha1.SecretsSpec{Name: secretName},
 				},
 			}
@@ -2959,7 +2959,7 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			coordsComponent = "coordinator"
 		)
 
-		cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+		cluster := &memgraphcomv1alpha1.MemgraphDBCluster{}
 
 		podName := func(suffix string, ordinal int) string {
 			return fmt.Sprintf("%s%s-%d", resourceName, suffix, ordinal)
@@ -3058,9 +3058,9 @@ var _ = Describe("MemgraphCluster Controller", func() {
 
 		BeforeEach(func() {
 			putSecret(credentials(accessKey, secretKey, ""))
-			resource := &memgraphcomv1alpha1.MemgraphCluster{
+			resource := &memgraphcomv1alpha1.MemgraphDBCluster{
 				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: resourceNamespace},
-				Spec: memgraphcomv1alpha1.MemgraphClusterSpec{
+				Spec: memgraphcomv1alpha1.MemgraphDBClusterSpec{
 					AWSCredentials: &memgraphcomv1alpha1.AWSCredentialsSpec{SecretRef: memgraphcomv1alpha1.SecretReference{Name: secretName}},
 				},
 			}
@@ -3254,7 +3254,7 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			newRevision  = "mgc-flag-restarts-77b4c8f9d"
 		)
 
-		cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+		cluster := &memgraphcomv1alpha1.MemgraphDBCluster{}
 		// startedWith is each role's template annotations as the pods were
 		// started: the flags and the hash of everything else.
 		startedWith := map[string]map[string]string{}
@@ -3345,7 +3345,7 @@ var _ = Describe("MemgraphCluster Controller", func() {
 		// says why. A role whose template is back where its pods started is
 		// declared at the pods' revision again, as the StatefulSet controller
 		// reuses the old ControllerRevision.
-		changeSpec := func(mutate func(*memgraphcomv1alpha1.MemgraphClusterSpec)) {
+		changeSpec := func(mutate func(*memgraphcomv1alpha1.MemgraphDBClusterSpec)) {
 			GinkgoHelper()
 			get(resourceName, cluster)
 			mutate(&cluster.Spec)
@@ -3361,7 +3361,7 @@ var _ = Describe("MemgraphCluster Controller", func() {
 		}
 		changeFlags := func(flags memgraphcomv1alpha1.FlagsSpec) {
 			GinkgoHelper()
-			changeSpec(func(spec *memgraphcomv1alpha1.MemgraphClusterSpec) { spec.Flags = flags })
+			changeSpec(func(spec *memgraphcomv1alpha1.MemgraphDBClusterSpec) { spec.Flags = flags })
 		}
 		podAddress := func(suffix string, ordinal int) string {
 			return fmt.Sprintf("%s%s-%d.%s%s.%s.svc.cluster.local:%d",
@@ -3369,7 +3369,7 @@ var _ = Describe("MemgraphCluster Controller", func() {
 		}
 
 		BeforeEach(func() {
-			resource := &memgraphcomv1alpha1.MemgraphCluster{
+			resource := &memgraphcomv1alpha1.MemgraphDBCluster{
 				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: resourceNamespace},
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
@@ -3471,7 +3471,7 @@ var _ = Describe("MemgraphCluster Controller", func() {
 
 		It("should still restart for anything else that changed beside a coordinator setting", func() {
 			before := podUIDs()
-			changeSpec(func(spec *memgraphcomv1alpha1.MemgraphClusterSpec) {
+			changeSpec(func(spec *memgraphcomv1alpha1.MemgraphDBClusterSpec) {
 				spec.Flags.Coordinators = map[string]memgraphcomv1alpha1.FlagValue{readsOnMainSetting: settingOn}
 				spec.ExtraEnv.Coordinators = []memgraphcomv1alpha1.EnvVar{{Name: "E2E_ROLL", Value: "1"}}
 			})
@@ -3534,7 +3534,7 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			firstInstance = "instance_0"
 		)
 
-		cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+		cluster := &memgraphcomv1alpha1.MemgraphDBCluster{}
 
 		observedCoordinator := func(id int, role string) memgraph.Instance {
 			host := fmt.Sprintf("%s-coordinator-%d.%s-coordinator.%s.svc.cluster.local",
@@ -3569,9 +3569,9 @@ var _ = Describe("MemgraphCluster Controller", func() {
 		}
 
 		BeforeEach(func() {
-			resource := &memgraphcomv1alpha1.MemgraphCluster{
+			resource := &memgraphcomv1alpha1.MemgraphDBCluster{
 				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: resourceNamespace},
-				Spec: memgraphcomv1alpha1.MemgraphClusterSpec{
+				Spec: memgraphcomv1alpha1.MemgraphDBClusterSpec{
 					Flags: memgraphcomv1alpha1.FlagsSpec{Coordinators: map[string]memgraphcomv1alpha1.FlagValue{
 						downTimeoutSetting:   "7",
 						"sync_failover_only": settingOn,
@@ -3717,7 +3717,7 @@ var _ = Describe("MemgraphCluster Controller", func() {
 
 		externalServices := func() []corev1.Service {
 			GinkgoHelper()
-			cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+			cluster := &memgraphcomv1alpha1.MemgraphDBCluster{}
 			get(resourceName, cluster)
 			var services corev1.ServiceList
 			Expect(k8sClient.List(ctx, &services, client.InNamespace(resourceNamespace),
@@ -3747,9 +3747,9 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			return ""
 		}
 
-		status := func() memgraphcomv1alpha1.MemgraphClusterStatus {
+		status := func() memgraphcomv1alpha1.MemgraphDBClusterStatus {
 			GinkgoHelper()
-			cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+			cluster := &memgraphcomv1alpha1.MemgraphDBCluster{}
 			get(resourceName, cluster)
 			return cluster.Status
 		}
@@ -3758,9 +3758,9 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			return apimeta.FindStatusCondition(status().Conditions, memgraphcomv1alpha1.ConditionConverged)
 		}
 
-		updateSpec := func(mutate func(*memgraphcomv1alpha1.MemgraphClusterSpec)) {
+		updateSpec := func(mutate func(*memgraphcomv1alpha1.MemgraphDBClusterSpec)) {
 			GinkgoHelper()
-			cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+			cluster := &memgraphcomv1alpha1.MemgraphDBCluster{}
 			get(resourceName, cluster)
 			mutate(&cluster.Spec)
 			Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
@@ -3791,9 +3791,9 @@ var _ = Describe("MemgraphCluster Controller", func() {
 		}
 
 		BeforeEach(func() {
-			resource := &memgraphcomv1alpha1.MemgraphCluster{
+			resource := &memgraphcomv1alpha1.MemgraphDBCluster{
 				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: resourceNamespace},
-				Spec: memgraphcomv1alpha1.MemgraphClusterSpec{
+				Spec: memgraphcomv1alpha1.MemgraphDBClusterSpec{
 					ExternalAccess: &memgraphcomv1alpha1.ExternalAccessSpec{
 						Type: memgraphcomv1alpha1.ExternalAccessLoadBalancer,
 					},
@@ -3808,7 +3808,7 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			for _, service := range externalServices() {
 				Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, &service))).To(Succeed())
 			}
-			cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+			cluster := &memgraphcomv1alpha1.MemgraphDBCluster{}
 			get(resourceName, cluster)
 			Expect(k8sClient.Delete(ctx, cluster)).To(Succeed())
 			deleteOwned(resourceName)
@@ -3818,7 +3818,7 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			reconcileCluster(resourceName)
 
 			Expect(externalServiceNames()).To(ConsistOf(coordinatorsService, dataService(0), dataService(1)))
-			cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+			cluster := &memgraphcomv1alpha1.MemgraphDBCluster{}
 			get(resourceName, cluster)
 			for _, service := range externalServices() {
 				Expect(service.Spec.Type).To(Equal(corev1.ServiceTypeLoadBalancer))
@@ -3901,7 +3901,7 @@ var _ = Describe("MemgraphCluster Controller", func() {
 		})
 
 		It("should announce the external-dns hostname over whatever the LoadBalancer reports", func() {
-			updateSpec(func(spec *memgraphcomv1alpha1.MemgraphClusterSpec) {
+			updateSpec(func(spec *memgraphcomv1alpha1.MemgraphDBClusterSpec) {
 				spec.ExternalAccess.Coordinators.Annotations = map[string]string{externalDNSAnnotation: "memgraph.example.com"}
 				spec.ExternalAccess.Data.Annotations = map[string]string{
 					externalDNSAnnotation: dataHostnamePattern,
@@ -3926,7 +3926,7 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			addressed()
 			Expect(apimeta.IsStatusConditionTrue(status().Conditions, memgraphcomv1alpha1.ConditionConverged)).To(BeTrue())
 
-			updateSpec(func(spec *memgraphcomv1alpha1.MemgraphClusterSpec) { spec.DataInstances = ptr.To(int32(3)) })
+			updateSpec(func(spec *memgraphcomv1alpha1.MemgraphDBClusterSpec) { spec.DataInstances = ptr.To(int32(3)) })
 			// The widening pass creates the new instance's Service ahead of its pod.
 			reconcileCluster(resourceName)
 			Expect(externalServiceNames()).To(ContainElement(dataService(2)))
@@ -3936,7 +3936,7 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			Expect(announced("instance_2")).To(Equal(bolt(thirdDataAddress)))
 			Expect(fake.executedCommands()).NotTo(ContainElement(ContainSubstring("UPDATE CONFIG")))
 
-			updateSpec(func(spec *memgraphcomv1alpha1.MemgraphClusterSpec) { spec.DataInstances = ptr.To(int32(2)) })
+			updateSpec(func(spec *memgraphcomv1alpha1.MemgraphDBClusterSpec) { spec.DataInstances = ptr.To(int32(2)) })
 			// Unregister, then shed the pod, then the pass that sees the shrunk
 			// StatefulSet drops the Service: the instance keeps its LoadBalancer for
 			// as long as it keeps its pod.
@@ -3953,7 +3953,7 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			addressed()
 			baseline := len(fake.executedCommands())
 
-			updateSpec(func(spec *memgraphcomv1alpha1.MemgraphClusterSpec) { spec.ExternalAccess = nil })
+			updateSpec(func(spec *memgraphcomv1alpha1.MemgraphDBClusterSpec) { spec.ExternalAccess = nil })
 			reconcileCluster(resourceName)
 
 			Expect(externalServiceNames()).To(BeEmpty())
@@ -3988,12 +3988,12 @@ var _ = Describe("MemgraphCluster Controller", func() {
 	Context("when serving Bolt over TLS", func() {
 		const resourceName = "mgc-bolt-tls"
 
-		cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+		cluster := &memgraphcomv1alpha1.MemgraphDBCluster{}
 
 		BeforeEach(func() {
-			resource := &memgraphcomv1alpha1.MemgraphCluster{
+			resource := &memgraphcomv1alpha1.MemgraphDBCluster{
 				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: resourceNamespace},
-				Spec: memgraphcomv1alpha1.MemgraphClusterSpec{
+				Spec: memgraphcomv1alpha1.MemgraphDBClusterSpec{
 					TLS: &memgraphcomv1alpha1.TLSSpec{
 						Bolt: &memgraphcomv1alpha1.BoltTLSSpec{SecretRef: memgraphcomv1alpha1.SecretReference{Name: "bolt-tls"}},
 					},
@@ -4079,7 +4079,7 @@ var _ = Describe("MemgraphCluster Controller", func() {
 
 		externalSelector := func() client.MatchingLabels {
 			GinkgoHelper()
-			cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+			cluster := &memgraphcomv1alpha1.MemgraphDBCluster{}
 			get(resourceName, cluster)
 			return client.MatchingLabels(resources.ExternalServicesSelector(cluster))
 		}
@@ -4112,9 +4112,9 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			return ""
 		}
 
-		status := func() memgraphcomv1alpha1.MemgraphClusterStatus {
+		status := func() memgraphcomv1alpha1.MemgraphDBClusterStatus {
 			GinkgoHelper()
-			cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+			cluster := &memgraphcomv1alpha1.MemgraphDBCluster{}
 			get(resourceName, cluster)
 			return cluster.Status
 		}
@@ -4123,9 +4123,9 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			return apimeta.FindStatusCondition(status().Conditions, memgraphcomv1alpha1.ConditionConverged)
 		}
 
-		updateSpec := func(mutate func(*memgraphcomv1alpha1.MemgraphClusterSpec)) {
+		updateSpec := func(mutate func(*memgraphcomv1alpha1.MemgraphDBClusterSpec)) {
 			GinkgoHelper()
-			cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+			cluster := &memgraphcomv1alpha1.MemgraphDBCluster{}
 			get(resourceName, cluster)
 			mutate(&cluster.Spec)
 			Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
@@ -4163,9 +4163,9 @@ var _ = Describe("MemgraphCluster Controller", func() {
 		}
 
 		BeforeEach(func() {
-			resource := &memgraphcomv1alpha1.MemgraphCluster{
+			resource := &memgraphcomv1alpha1.MemgraphDBCluster{
 				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: resourceNamespace},
-				Spec: memgraphcomv1alpha1.MemgraphClusterSpec{
+				Spec: memgraphcomv1alpha1.MemgraphDBClusterSpec{
 					ExternalAccess: &memgraphcomv1alpha1.ExternalAccessSpec{
 						Type: memgraphcomv1alpha1.ExternalAccessGateway,
 						Gateway: memgraphcomv1alpha1.ExternalAccessGatewaySpec{
@@ -4180,7 +4180,7 @@ var _ = Describe("MemgraphCluster Controller", func() {
 
 		AfterEach(func() {
 			cleanupExternal()
-			cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+			cluster := &memgraphcomv1alpha1.MemgraphDBCluster{}
 			get(resourceName, cluster)
 			Expect(k8sClient.Delete(ctx, cluster)).To(Succeed())
 			deleteOwned(resourceName)
@@ -4189,7 +4189,7 @@ var _ = Describe("MemgraphCluster Controller", func() {
 		It("should provision one Gateway, one route per way in and ClusterIP Services behind them", func() {
 			reconcileCluster(resourceName)
 
-			cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+			cluster := &memgraphcomv1alpha1.MemgraphDBCluster{}
 			get(resourceName, cluster)
 			gateway := &gatewayv1.Gateway{}
 			get(gatewayName, gateway)
@@ -4253,7 +4253,7 @@ var _ = Describe("MemgraphCluster Controller", func() {
 		})
 
 		It("should announce a route's external-dns hostname over the Gateway's address", func() {
-			updateSpec(func(spec *memgraphcomv1alpha1.MemgraphClusterSpec) {
+			updateSpec(func(spec *memgraphcomv1alpha1.MemgraphDBClusterSpec) {
 				spec.ExternalAccess.Data.Annotations = map[string]string{
 					externalDNSAnnotation: dataHostnamePattern,
 				}
@@ -4277,7 +4277,7 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			addressed()
 			Expect(apimeta.IsStatusConditionTrue(status().Conditions, memgraphcomv1alpha1.ConditionConverged)).To(BeTrue())
 
-			updateSpec(func(spec *memgraphcomv1alpha1.MemgraphClusterSpec) {
+			updateSpec(func(spec *memgraphcomv1alpha1.MemgraphDBClusterSpec) {
 				spec.ExternalAccess.Type = memgraphcomv1alpha1.ExternalAccessLoadBalancer
 				spec.ExternalAccess.Gateway = memgraphcomv1alpha1.ExternalAccessGatewaySpec{}
 			})
@@ -4292,7 +4292,7 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			reconcileCluster(resourceName)
 			Expect(convergedCondition().Reason).To(Equal(memgraphcomv1alpha1.ReasonExternalAddressPending))
 
-			updateSpec(func(spec *memgraphcomv1alpha1.MemgraphClusterSpec) {
+			updateSpec(func(spec *memgraphcomv1alpha1.MemgraphDBClusterSpec) {
 				spec.ExternalAccess.Type = memgraphcomv1alpha1.ExternalAccessGateway
 				spec.ExternalAccess.Gateway = memgraphcomv1alpha1.ExternalAccessGatewaySpec{GatewayClassName: "eg"}
 			})
@@ -4324,9 +4324,9 @@ var _ = Describe("MemgraphCluster Controller", func() {
 	Context("when asked for a ServiceMonitor", func() {
 		const resourceName = "mgc-monitored"
 
-		status := func() memgraphcomv1alpha1.MemgraphClusterStatus {
+		status := func() memgraphcomv1alpha1.MemgraphDBClusterStatus {
 			GinkgoHelper()
-			cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+			cluster := &memgraphcomv1alpha1.MemgraphDBCluster{}
 			get(resourceName, cluster)
 			return cluster.Status
 		}
@@ -4334,9 +4334,9 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			GinkgoHelper()
 			return apimeta.FindStatusCondition(status().Conditions, memgraphcomv1alpha1.ConditionConverged)
 		}
-		updateSpec := func(mutate func(*memgraphcomv1alpha1.MemgraphClusterSpec)) {
+		updateSpec := func(mutate func(*memgraphcomv1alpha1.MemgraphDBClusterSpec)) {
 			GinkgoHelper()
-			cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+			cluster := &memgraphcomv1alpha1.MemgraphDBCluster{}
 			get(resourceName, cluster)
 			mutate(&cluster.Spec)
 			Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
@@ -4364,9 +4364,9 @@ var _ = Describe("MemgraphCluster Controller", func() {
 		}
 
 		BeforeEach(func() {
-			resource := &memgraphcomv1alpha1.MemgraphCluster{
+			resource := &memgraphcomv1alpha1.MemgraphDBCluster{
 				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: resourceNamespace},
-				Spec: memgraphcomv1alpha1.MemgraphClusterSpec{
+				Spec: memgraphcomv1alpha1.MemgraphDBClusterSpec{
 					Monitoring: &memgraphcomv1alpha1.MonitoringSpec{
 						ServiceMonitor: &memgraphcomv1alpha1.ServiceMonitorSpec{
 							Labels:   map[string]string{"release": "kube-prometheus-stack"},
@@ -4380,7 +4380,7 @@ var _ = Describe("MemgraphCluster Controller", func() {
 
 		AfterEach(func() {
 			cleanupMonitoring()
-			cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+			cluster := &memgraphcomv1alpha1.MemgraphDBCluster{}
 			get(resourceName, cluster)
 			Expect(k8sClient.Delete(ctx, cluster)).To(Succeed())
 			deleteOwned(resourceName)
@@ -4389,7 +4389,7 @@ var _ = Describe("MemgraphCluster Controller", func() {
 		It("should create one ServiceMonitor selecting the cluster's Services on the metrics port", func() {
 			reconcileCluster(resourceName)
 
-			cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+			cluster := &memgraphcomv1alpha1.MemgraphDBCluster{}
 			get(resourceName, cluster)
 			monitor := &monitoringv1.ServiceMonitor{}
 			get(resourceName, monitor)
@@ -4421,14 +4421,14 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			Expect(serviceMonitors()).To(HaveLen(1))
 			Expect(convergedCondition().Status).To(Equal(metav1.ConditionTrue))
 
-			updateSpec(func(spec *memgraphcomv1alpha1.MemgraphClusterSpec) {
+			updateSpec(func(spec *memgraphcomv1alpha1.MemgraphDBClusterSpec) {
 				spec.Monitoring = nil
 			})
 			reconcileCluster(resourceName)
 			Expect(serviceMonitors()).To(BeEmpty(), "removing the block takes the object away")
 			Expect(convergedCondition().Status).To(Equal(metav1.ConditionTrue))
 
-			updateSpec(func(spec *memgraphcomv1alpha1.MemgraphClusterSpec) {
+			updateSpec(func(spec *memgraphcomv1alpha1.MemgraphDBClusterSpec) {
 				spec.Monitoring = &memgraphcomv1alpha1.MonitoringSpec{
 					ServiceMonitor: &memgraphcomv1alpha1.ServiceMonitorSpec{},
 				}
@@ -4454,7 +4454,7 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			Expect(converged.Message).To(ContainSubstring("Prometheus Operator"),
 				"the message names what installs it")
 
-			updateSpec(func(spec *memgraphcomv1alpha1.MemgraphClusterSpec) {
+			updateSpec(func(spec *memgraphcomv1alpha1.MemgraphDBClusterSpec) {
 				spec.Monitoring = nil
 			})
 			reconcileCluster(resourceName)
@@ -4467,9 +4467,9 @@ var _ = Describe("MemgraphCluster Controller", func() {
 		const resourceName = "mgc-dashboard"
 		const dashboardName = resourceName + "-grafana-dashboard"
 
-		updateSpec := func(mutate func(*memgraphcomv1alpha1.MemgraphClusterSpec)) {
+		updateSpec := func(mutate func(*memgraphcomv1alpha1.MemgraphDBClusterSpec)) {
 			GinkgoHelper()
-			cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+			cluster := &memgraphcomv1alpha1.MemgraphDBCluster{}
 			get(resourceName, cluster)
 			mutate(&cluster.Spec)
 			Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
@@ -4489,9 +4489,9 @@ var _ = Describe("MemgraphCluster Controller", func() {
 		}
 
 		BeforeEach(func() {
-			resource := &memgraphcomv1alpha1.MemgraphCluster{
+			resource := &memgraphcomv1alpha1.MemgraphDBCluster{
 				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: resourceNamespace},
-				Spec: memgraphcomv1alpha1.MemgraphClusterSpec{
+				Spec: memgraphcomv1alpha1.MemgraphDBClusterSpec{
 					Monitoring: &memgraphcomv1alpha1.MonitoringSpec{
 						GrafanaDashboard: &memgraphcomv1alpha1.GrafanaDashboardSpec{},
 					},
@@ -4502,7 +4502,7 @@ var _ = Describe("MemgraphCluster Controller", func() {
 
 		AfterEach(func() {
 			cleanupDashboards()
-			cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+			cluster := &memgraphcomv1alpha1.MemgraphDBCluster{}
 			get(resourceName, cluster)
 			Expect(k8sClient.Delete(ctx, cluster)).To(Succeed())
 			deleteOwned(resourceName)
@@ -4511,7 +4511,7 @@ var _ = Describe("MemgraphCluster Controller", func() {
 		It("should create the dashboard ConfigMap with the sidecar's default label", func() {
 			reconcileCluster(resourceName)
 
-			cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+			cluster := &memgraphcomv1alpha1.MemgraphDBCluster{}
 			get(resourceName, cluster)
 			// The CRD default applied at admission, so an empty block arrived
 			// with the label already in it.
@@ -4527,7 +4527,7 @@ var _ = Describe("MemgraphCluster Controller", func() {
 		})
 
 		It("should replace the default label with the block's own and file it by annotation", func() {
-			updateSpec(func(spec *memgraphcomv1alpha1.MemgraphClusterSpec) {
+			updateSpec(func(spec *memgraphcomv1alpha1.MemgraphDBClusterSpec) {
 				spec.Monitoring.GrafanaDashboard.Labels = map[string]string{"my_sidecar": "yes"}
 				spec.Monitoring.GrafanaDashboard.Annotations = map[string]string{"grafana_folder": "Memgraph"}
 			})
@@ -4545,13 +4545,13 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			reconcileCluster(resourceName)
 			Expect(dashboards()).To(HaveLen(1))
 
-			updateSpec(func(spec *memgraphcomv1alpha1.MemgraphClusterSpec) {
+			updateSpec(func(spec *memgraphcomv1alpha1.MemgraphDBClusterSpec) {
 				spec.Monitoring.GrafanaDashboard = nil
 			})
 			reconcileCluster(resourceName)
 			Expect(dashboards()).To(BeEmpty(), "removing the block takes the object away")
 
-			updateSpec(func(spec *memgraphcomv1alpha1.MemgraphClusterSpec) {
+			updateSpec(func(spec *memgraphcomv1alpha1.MemgraphDBClusterSpec) {
 				spec.Monitoring = nil
 			})
 			reconcileCluster(resourceName)
@@ -4564,9 +4564,9 @@ var _ = Describe("MemgraphCluster Controller", func() {
 		const vmagentName = resourceName + "-vmagent"
 		const remoteWriteURL = "http://vmsingle.monitoring.svc.cluster.local:8428/api/v1/write"
 
-		updateSpec := func(mutate func(*memgraphcomv1alpha1.MemgraphClusterSpec)) {
+		updateSpec := func(mutate func(*memgraphcomv1alpha1.MemgraphDBClusterSpec)) {
 			GinkgoHelper()
-			cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+			cluster := &memgraphcomv1alpha1.MemgraphDBCluster{}
 			get(resourceName, cluster)
 			mutate(&cluster.Spec)
 			Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
@@ -4606,9 +4606,9 @@ var _ = Describe("MemgraphCluster Controller", func() {
 		}
 
 		BeforeEach(func() {
-			resource := &memgraphcomv1alpha1.MemgraphCluster{
+			resource := &memgraphcomv1alpha1.MemgraphDBCluster{
 				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: resourceNamespace},
-				Spec: memgraphcomv1alpha1.MemgraphClusterSpec{
+				Spec: memgraphcomv1alpha1.MemgraphDBClusterSpec{
 					Monitoring: &memgraphcomv1alpha1.MonitoringSpec{
 						ServiceMonitor: &memgraphcomv1alpha1.ServiceMonitorSpec{},
 						VMAgentRemote: &memgraphcomv1alpha1.VMAgentRemoteSpec{
@@ -4626,7 +4626,7 @@ var _ = Describe("MemgraphCluster Controller", func() {
 
 		AfterEach(func() {
 			cleanupMonitoring()
-			cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+			cluster := &memgraphcomv1alpha1.MemgraphDBCluster{}
 			get(resourceName, cluster)
 			Expect(k8sClient.Delete(ctx, cluster)).To(Succeed())
 			deleteOwned(resourceName)
@@ -4635,7 +4635,7 @@ var _ = Describe("MemgraphCluster Controller", func() {
 		It("should run one vmagent scraping every applied pod and writing to the endpoint", func() {
 			reconcileCluster(resourceName)
 
-			cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+			cluster := &memgraphcomv1alpha1.MemgraphDBCluster{}
 			get(resourceName, cluster)
 			// The CRD defaults applied at admission, so the block arrived with
 			// the image and the interval filled in.
@@ -4679,7 +4679,7 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			Expect(configMaps()).To(HaveLen(1))
 			Expect(serviceMonitors()).To(HaveLen(1))
 
-			updateSpec(func(spec *memgraphcomv1alpha1.MemgraphClusterSpec) {
+			updateSpec(func(spec *memgraphcomv1alpha1.MemgraphDBClusterSpec) {
 				spec.Monitoring.VMAgentRemote = nil
 			})
 			reconcileCluster(resourceName)
@@ -4694,9 +4694,9 @@ var _ = Describe("MemgraphCluster Controller", func() {
 		const configName = resourceName + "-vector-config"
 		const logsEndpoint = "http://victoria-logs.monitoring.svc.cluster.local:9428/insert"
 
-		updateSpec := func(mutate func(*memgraphcomv1alpha1.MemgraphClusterSpec)) {
+		updateSpec := func(mutate func(*memgraphcomv1alpha1.MemgraphDBClusterSpec)) {
 			GinkgoHelper()
-			cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+			cluster := &memgraphcomv1alpha1.MemgraphDBCluster{}
 			get(resourceName, cluster)
 			mutate(&cluster.Spec)
 			Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
@@ -4720,9 +4720,9 @@ var _ = Describe("MemgraphCluster Controller", func() {
 		}
 
 		BeforeEach(func() {
-			resource := &memgraphcomv1alpha1.MemgraphCluster{
+			resource := &memgraphcomv1alpha1.MemgraphDBCluster{
 				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: resourceNamespace},
-				Spec: memgraphcomv1alpha1.MemgraphClusterSpec{
+				Spec: memgraphcomv1alpha1.MemgraphDBClusterSpec{
 					Monitoring: &memgraphcomv1alpha1.MonitoringSpec{
 						VectorRemote: &memgraphcomv1alpha1.VectorRemoteSpec{
 							LogsEndpoint: logsEndpoint,
@@ -4739,7 +4739,7 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			for _, item := range configMaps() {
 				Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, &item))).To(Succeed())
 			}
-			cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+			cluster := &memgraphcomv1alpha1.MemgraphDBCluster{}
 			get(resourceName, cluster)
 			Expect(k8sClient.Delete(ctx, cluster)).To(Succeed())
 			deleteOwned(resourceName)
@@ -4748,7 +4748,7 @@ var _ = Describe("MemgraphCluster Controller", func() {
 		It("should put the sidecar in both roles' pods on one shared configuration", func() {
 			reconcileCluster(resourceName)
 
-			cluster := &memgraphcomv1alpha1.MemgraphCluster{}
+			cluster := &memgraphcomv1alpha1.MemgraphDBCluster{}
 			get(resourceName, cluster)
 			// The CRD defaults applied at admission, so the block arrived with
 			// the image filled in.
@@ -4783,7 +4783,7 @@ var _ = Describe("MemgraphCluster Controller", func() {
 			reconcileCluster(resourceName)
 			Expect(configMaps()).To(HaveLen(1))
 
-			updateSpec(func(spec *memgraphcomv1alpha1.MemgraphClusterSpec) {
+			updateSpec(func(spec *memgraphcomv1alpha1.MemgraphDBClusterSpec) {
 				spec.Monitoring = nil
 			})
 			reconcileCluster(resourceName)
@@ -4850,7 +4850,7 @@ var _ = Describe("MemgraphCluster Controller", func() {
 
 var _ = Describe("Pod watch", func() {
 	const podNamespace = "default"
-	cluster := &memgraphcomv1alpha1.MemgraphCluster{
+	cluster := &memgraphcomv1alpha1.MemgraphDBCluster{
 		ObjectMeta: metav1.ObjectMeta{Name: "mgc-pods", Namespace: podNamespace},
 	}
 	dataLabels := resources.DataStatefulSet(cluster, 2).Spec.Template.Labels

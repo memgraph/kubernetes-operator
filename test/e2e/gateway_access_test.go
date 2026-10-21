@@ -40,7 +40,7 @@ import (
 // its address by MetalLB, with the coordinators on the bolt port and every data
 // instance on a port of its own. The proof is the same — a routing driver on the
 // host, handed the Gateway's address alone, writes and reads through it.
-var _ = Describe("MemgraphCluster exposed through a Gateway", Ordered, func() {
+var _ = Describe("MemgraphDBCluster exposed through a Gateway", Ordered, func() {
 	const gatewayNamespace = "memgraph-e2e-gateway"
 	const gatewayClusterName = "gated"
 
@@ -64,9 +64,9 @@ var _ = Describe("MemgraphCluster exposed through a Gateway", Ordered, func() {
 		By("creating the enterprise license Secret")
 		createLicenseSecret(gatewayNamespace, license, organization)
 
-		By("applying a MemgraphCluster exposed through a Gateway")
+		By("applying a MemgraphDBCluster exposed through a Gateway")
 		manifest := fmt.Sprintf(`apiVersion: memgraph.com/v1alpha1
-kind: MemgraphCluster
+kind: MemgraphDBCluster
 metadata:
   name: %s
   namespace: %s
@@ -101,7 +101,7 @@ spec:
 			example.Spec.Image.Repository, example.Spec.Image.Tag, licenseSecretName, gatewayClass, dataPortBase)
 		cmd := exec.Command("kubectl", "apply", "-f", "-")
 		_, err := utils.RunWithInput(cmd, manifest)
-		Expect(err).NotTo(HaveOccurred(), "Failed to apply the MemgraphCluster")
+		Expect(err).NotTo(HaveOccurred(), "Failed to apply the MemgraphDBCluster")
 	})
 
 	AfterAll(func() {
@@ -191,7 +191,7 @@ spec:
 
 	It("takes the Gateway away and re-announces pod addresses when the block is removed", func() {
 		By("removing the externalAccess block")
-		cmd := exec.Command("kubectl", "patch", "memgraphcluster", gatewayClusterName,
+		cmd := exec.Command("kubectl", "patch", "memgraphdbcluster", gatewayClusterName,
 			"-n", gatewayNamespace, "--type=merge", "-p", `{"spec":{"externalAccess":null}}`)
 		_, err := utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred())

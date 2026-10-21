@@ -372,8 +372,8 @@ jobs:
             echo "::error::The chart installed ${actual}, expected ${EXPECTED}."
             exit 1
           fi
-          kubectl get crd memgraphclusters.memgraph.com >/dev/null
-          echo "Installed ${actual}, with the MemgraphCluster CRD."
+          kubectl get crd memgraphdbclusters.memgraph.com >/dev/null
+          echo "Installed ${actual}, with the MemgraphDBCluster CRD."
 
       - name: Uninstall
         if: always()

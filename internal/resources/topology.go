@@ -27,13 +27,13 @@ import (
 // DeclaredCoordinators is the number of coordinators the spec declares, with
 // the CRD's schema default resolved so a spec that never passed admission reads
 // the same as one that did.
-func DeclaredCoordinators(cluster *memgraphcomv1alpha1.MemgraphCluster) int32 {
+func DeclaredCoordinators(cluster *memgraphcomv1alpha1.MemgraphDBCluster) int32 {
 	return normalize(cluster.Spec).coordinators
 }
 
 // DeclaredDataInstances is the number of data instances the spec declares, with
 // the CRD's schema default resolved.
-func DeclaredDataInstances(cluster *memgraphcomv1alpha1.MemgraphCluster) int32 {
+func DeclaredDataInstances(cluster *memgraphcomv1alpha1.MemgraphDBCluster) int32 {
 	return normalize(cluster.Spec).dataInstances
 }
 
@@ -103,7 +103,7 @@ func DataInstanceOrdinal(name string) (int32, error) {
 // the current addresses on every pass, so the announced address follows the
 // external one as it appears, changes or goes away.
 func DeclaredTopology(
-	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	cluster *memgraphcomv1alpha1.MemgraphDBCluster,
 	external ExternalAddresses,
 ) planner.Topology {
 	spec := normalize(cluster.Spec)
@@ -149,7 +149,7 @@ type Endpoint struct {
 // carried out, the retiring ones too, since a retiring coordinator can hold
 // Raft leadership until it yields it. `running` is the replica count the
 // operator's own apply left on the coordinator StatefulSet.
-func CoordinatorEndpoints(cluster *memgraphcomv1alpha1.MemgraphCluster, running int32) []Endpoint {
+func CoordinatorEndpoints(cluster *memgraphcomv1alpha1.MemgraphDBCluster, running int32) []Endpoint {
 	return endpoints(cluster, CoordinatorName(cluster), running, CoordinatorInstanceName)
 }
 
@@ -157,12 +157,12 @@ func CoordinatorEndpoints(cluster *memgraphcomv1alpha1.MemgraphCluster, running 
 // ordinal order, retiring ones included for the reason CoordinatorEndpoints
 // gives: a retiring instance keeps serving until its pod is shed, and its
 // run-time settings are kept in line until then like everyone else's.
-func DataEndpoints(cluster *memgraphcomv1alpha1.MemgraphCluster, running int32) []Endpoint {
+func DataEndpoints(cluster *memgraphcomv1alpha1.MemgraphDBCluster, running int32) []Endpoint {
 	return endpoints(cluster, DataName(cluster), running, DataInstanceName)
 }
 
 func endpoints(
-	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	cluster *memgraphcomv1alpha1.MemgraphDBCluster,
 	statefulSet string,
 	running int32,
 	instanceName func(ordinal int32) string,
@@ -188,7 +188,7 @@ func endpoints(
 // Because the count must stay odd, a shrink always retires an even number of
 // coordinators, so the surviving Raft cluster keeps an odd membership throughout.
 func RetiringCoordinators(
-	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	cluster *memgraphcomv1alpha1.MemgraphDBCluster,
 	applied int32,
 ) []memgraph.CoordinatorSpec {
 	spec := normalize(cluster.Spec)
@@ -212,7 +212,7 @@ func RetiringCoordinators(
 // ordinals and nothing else, so the range is fully determined by the two counts —
 // which is also what keeps an instance the operator did not create out of it.
 func RetiringDataInstances(
-	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	cluster *memgraphcomv1alpha1.MemgraphDBCluster,
 	applied int32,
 ) []memgraph.DataInstanceSpec {
 	spec := normalize(cluster.Spec)
@@ -235,7 +235,7 @@ func RetiringDataInstances(
 // with no external address, because the planner never follows the announced
 // address of a member on its way out.
 func coordinator(
-	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	cluster *memgraphcomv1alpha1.MemgraphDBCluster,
 	spec normalizedSpec,
 	ordinal int32,
 	externalBolt string,
@@ -254,7 +254,7 @@ func coordinator(
 // when there is one. Retiring instances are described the same way as declared
 // ones, for the reason coordinators are.
 func dataInstance(
-	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	cluster *memgraphcomv1alpha1.MemgraphDBCluster,
 	spec normalizedSpec,
 	ordinal int32,
 	externalBolt string,
@@ -281,7 +281,7 @@ func announcedBolt(fqdn, externalBolt string) string {
 // the given headless Service: "<service>.<namespace>.svc.<domain>", where the
 // domain is the configured cluster domain.
 func podFQDNSuffix(
-	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	cluster *memgraphcomv1alpha1.MemgraphDBCluster,
 	serviceName string,
 	spec normalizedSpec,
 ) string {
@@ -291,7 +291,7 @@ func podFQDNSuffix(
 // podFQDN returns the stable DNS name of the pod with the given ordinal in
 // the StatefulSet backed by the given headless Service (both share one name).
 func podFQDN(
-	cluster *memgraphcomv1alpha1.MemgraphCluster,
+	cluster *memgraphcomv1alpha1.MemgraphDBCluster,
 	serviceName string,
 	spec normalizedSpec,
 	ordinal int32,

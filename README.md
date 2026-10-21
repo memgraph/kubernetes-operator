@@ -1,6 +1,6 @@
 # Memgraph Kubernetes Operator
 
-A Kubernetes operator for running [Memgraph](https://memgraph.com) high-availability clusters. It exposes a `MemgraphCluster` custom resource (API group `memgraph.com/v1alpha1`, short name `mgc`): declare the cluster topology in a single resource and the operator provisions the workloads, bootstraps HA registration, and continuously reconciles registration state.
+A Kubernetes operator for running [Memgraph](https://memgraph.com) high-availability clusters. It exposes a `MemgraphDBCluster` custom resource (API group `memgraph.com/v1alpha1`, short name `mgdbc`): declare the cluster topology in a single resource and the operator provisions the workloads, bootstraps HA registration, and continuously reconciles registration state.
 
 > **Status: early development (v1alpha1).** The API and its guarantees can still change between releases. Read [what v1alpha1 does and does not do](#what-v1alpha1-does-and-does-not-do) before running it anywhere that matters. The previous attempt at this operator is preserved on the `archive/pre-operator-mvp` branch.
 
@@ -16,7 +16,7 @@ From an empty cluster to a registered, MAIN-elected Memgraph HA cluster.
 
 ### 1. Install the operator
 
-The install chart ships the `MemgraphCluster` CRD, a least-privilege RBAC set, and the controller Deployment. One release per cluster is enough — the operator watches every namespace.
+The install chart ships the `MemgraphDBCluster` CRD, a least-privilege RBAC set, and the controller Deployment. One release per cluster is enough — the operator watches every namespace.
 
 ```sh
 helm repo add memgraph https://memgraph.github.io/helm-charts
@@ -27,7 +27,7 @@ helm install memgraph-operator memgraph/memgraph-operator \
 
 ### 2. Create the license Secret
 
-The cluster reads its license from a Secret you own; no license material ever goes into the `MemgraphCluster` resource, which keeps it safe to commit to git.
+The cluster reads its license from a Secret you own; no license material ever goes into the `MemgraphDBCluster` resource, which keeps it safe to commit to git.
 
 ```sh
 kubectl create namespace memgraph
@@ -43,7 +43,7 @@ This is the whole resource — counts, image, and the Secret from the previous s
 
 ```yaml
 apiVersion: memgraph.com/v1alpha1
-kind: MemgraphCluster
+kind: MemgraphDBCluster
 metadata:
   name: memgraph
 spec:
@@ -72,7 +72,7 @@ If your Secret has a different name, or stores the license under different keys,
 The operator creates one StatefulSet and one headless Service per role, waits for the pods to become ready, then registers the coordinators and data instances with each other and promotes the initial MAIN. On a cluster that has to pull the Memgraph image, expect a few minutes.
 
 ```sh
-kubectl get mgc -n memgraph -w
+kubectl get mgdbc -n memgraph -w
 ```
 
 While the pods are still starting, `MAIN` is empty and both conditions are `False`; the converged cluster looks like this:
@@ -86,16 +86,16 @@ memgraph   3              2      instance_0   True    True        4m12s
 - **`READY`** is True once the cluster both serves and runs its spec: a MAIN is elected, and `Converged`, `Updated` and `LicenseApplied` are all True. Otherwise its reason says what is unfinished, the cluster not serving first; a MAIN keeps serving through a roll, a scale or a resize, so `MAIN` is what says whether writes are accepted.
 - **`CONVERGED`** is True once every declared coordinator and data instance is registered and reported healthy, and both StatefulSets run the declared number of replicas.
 
-`kubectl get mgc -n memgraph -o wide` adds how many of each role's declared members the cluster actually has registered (`REGISTERED-COORDINATORS`, `REGISTERED-DATA`), which is what a scale is watched through.
+`kubectl get mgdbc -n memgraph -o wide` adds how many of each role's declared members the cluster actually has registered (`REGISTERED-COORDINATORS`, `REGISTERED-DATA`), which is what a scale is watched through.
 
 To block a script or a GitOps step on the cluster being done (Flux and other tools built on kstatus read the same condition):
 
 ```sh
 kubectl wait --namespace memgraph --for=condition=Ready \
-  memgraphcluster/memgraph --timeout=10m
+  memgraphdbcluster/memgraph --timeout=10m
 ```
 
-If it does not converge, `kubectl describe mgc memgraph -n memgraph` gives the condition messages (which pods are not ready, whether a coordinator is unreachable, or — with reason `ApplyFailed` — what the API server refused about the workloads), and the operator logs the rest:
+If it does not converge, `kubectl describe mgdbc memgraph -n memgraph` gives the condition messages (which pods are not ready, whether a coordinator is unreachable, or — with reason `ApplyFailed` — what the API server refused about the workloads), and the operator logs the rest:
 
 ```sh
 kubectl logs -n memgraph-operator-system deploy/memgraph-operator-controller-manager
@@ -131,7 +131,7 @@ EOF
 Writes only succeed against the MAIN — the other data instances are replicas and accept reads. Check `.status.main` to find it:
 
 ```sh
-kubectl get mgc memgraph -n memgraph -o jsonpath='{.status.main}'
+kubectl get mgdbc memgraph -n memgraph -o jsonpath='{.status.main}'
 ```
 
 Applications inside the cluster reach an instance at its stable DNS name in the role's headless Service:
@@ -151,7 +151,7 @@ kubectl port-forward -n memgraph pod/memgraph-data-0 7687:7687
 ### 6. Clean up
 
 ```sh
-kubectl delete mgc memgraph -n memgraph
+kubectl delete mgdbc memgraph -n memgraph
 ```
 
 Deleting the resource removes the StatefulSets and Services through garbage collection, but **the PersistentVolumeClaims are kept** — the default retention policy protects data against an accidental delete, and is what a volume-snapshot restore builds on. Remove them (and with them the data) explicitly, or set `spec.storage.retentionPolicy: Delete` on dev clusters that should clean up after themselves:
@@ -161,13 +161,13 @@ kubectl delete pvc -n memgraph --all
 kubectl delete namespace memgraph
 ```
 
-Uninstall the operator with `helm uninstall memgraph-operator --namespace memgraph-operator-system`. The chart keeps the CRD on uninstall, so `kubectl delete crd memgraphclusters.memgraph.com` once no cluster needs it — see the [chart README](charts/memgraph-operator/README.md) for the values.
+Uninstall the operator with `helm uninstall memgraph-operator --namespace memgraph-operator-system`. The chart keeps the CRD on uninstall, so `kubectl delete crd memgraphdbclusters.memgraph.com` once no cluster needs it — see the [chart README](charts/memgraph-operator/README.md) for the values.
 
 ## Configuration
 
 Beyond the quickstart's fields, v1alpha1 exposes storage (PVC size, access mode, storage class, whether Memgraph also writes log files onto the claim, retention) per role, with every size growable on a live cluster without restarting a pod, optional core dump collection with an uploader sidecar of your choice per role, the HA chart's `sysctlInitContainer` raising the node's `vm.max_map_count` from a privileged init container (unlike the chart it runs only when the block is written; the quickstart leaves it out because it is proven under the restricted Pod Security Standard, so add it wherever privileged containers are allowed), the pod identity (`securityContext`: `runAsUser`, `runAsGroup`, `fsGroup`, the chart's `memgraphUserId` and `memgraphGroupId`; absent, the images' 101 and 103, and an empty block leaves all three to the platform, see [OpenShift](#openshift)), the chart's `fixOwnershipInitContainer` chowning every pod's volumes to that identity from a root init container for storage drivers that ignore `fsGroup` (off when absent, as in the chart), resource requests and limits per role, readiness probe timings, custom labels on pods, StatefulSets and Services, scheduling (an anti-affinity rule the operator writes and, per role, node selector, tolerations, topology spread constraints, extra anti-affinity and priority class), the cluster domain used in advertised addresses, [external access](#external-access) through LoadBalancers or a Gateway API Gateway, a ServiceMonitor, a Grafana dashboard ConfigMap and the vmagent and Vector sidecars that push the metrics and the logs to Memgraph for remote monitoring, TLS for clients and between members from certificates you supply, Memgraph flags per role (a flag Memgraph can change live is applied to every instance without a restart; any other flag change rolls the pods) and the cluster-wide coordinator settings written to Raft once, and a freeform passthrough per role for environment variables, extra volumes and volume mounts, containers of your own beside Memgraph (the HA chart's `userContainers`), and init containers of your own ahead of it (the chart's `initContainers`). Internal ports are fixed: Bolt 7687, management 10000, replication 20000, coordinator 12000, and metrics 9091.
 
-[`config/samples/v1alpha1_memgraphcluster.yaml`](config/samples/v1alpha1_memgraphcluster.yaml) spells the full surface out with every default and the reasoning behind it. `kubectl explain mgc.spec --recursive` documents the same fields from the installed CRD.
+[`config/samples/v1alpha1_memgraphdbcluster.yaml`](config/samples/v1alpha1_memgraphdbcluster.yaml) spells the full surface out with every default and the reasoning behind it. `kubectl explain mgdbc.spec --recursive` documents the same fields from the installed CRD.
 
 ### OpenShift
 
@@ -203,8 +203,8 @@ spec:
 Either way, wait for `Converged` and read the addresses off the status:
 
 ```sh
-kubectl wait --namespace memgraph --for=condition=Converged memgraphcluster/memgraph --timeout=10m
-kubectl get mgc memgraph -n memgraph -o jsonpath='{.status.externalAccess}'
+kubectl wait --namespace memgraph --for=condition=Converged memgraphdbcluster/memgraph --timeout=10m
+kubectl get mgdbc memgraph -n memgraph -o jsonpath='{.status.externalAccess}'
 ```
 
 ```json
@@ -238,8 +238,8 @@ The MVP is deliberately "provision, bootstrap, observe". It does:
 Scaling is one edit, and `Converged` tells you when it is finished:
 
 ```sh
-kubectl patch mgc memgraph -n memgraph --type=merge -p '{"spec":{"coordinators":5,"dataInstances":3}}'
-kubectl wait --namespace memgraph --for=condition=Converged memgraphcluster/memgraph --timeout=10m
+kubectl patch mgdbc memgraph -n memgraph --type=merge -p '{"spec":{"coordinators":5,"dataInstances":3}}'
+kubectl wait --namespace memgraph --for=condition=Converged memgraphdbcluster/memgraph --timeout=10m
 ```
 
 Both counts have a floor the schema enforces at creation and on every update: `coordinators` must stay odd and at or above three, `dataInstances` at or above one. A scale-down reports `Converged=False` with reason `RetirementInProgress`, naming the members on their way out, until their pods are gone. Three things to know about it:

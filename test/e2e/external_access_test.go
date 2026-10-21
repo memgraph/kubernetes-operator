@@ -44,7 +44,7 @@ import (
 // feature — that the routing table the coordinators hand a client names
 // addresses that client can reach, and that it stops doing so when the block is
 // removed.
-var _ = Describe("MemgraphCluster exposed through LoadBalancers", Ordered, func() {
+var _ = Describe("MemgraphDBCluster exposed through LoadBalancers", Ordered, func() {
 	const externalNamespace = "memgraph-e2e-external"
 	const externalClusterName = "exposed"
 
@@ -65,9 +65,9 @@ var _ = Describe("MemgraphCluster exposed through LoadBalancers", Ordered, func(
 		By("creating the enterprise license Secret")
 		createLicenseSecret(externalNamespace, license, organization)
 
-		By("applying a MemgraphCluster exposed through LoadBalancers")
+		By("applying a MemgraphDBCluster exposed through LoadBalancers")
 		manifest := fmt.Sprintf(`apiVersion: memgraph.com/v1alpha1
-kind: MemgraphCluster
+kind: MemgraphDBCluster
 metadata:
   name: %s
   namespace: %s
@@ -105,7 +105,7 @@ spec:
 			example.Spec.Image.Repository, example.Spec.Image.Tag, licenseSecretName, ordinalAnnotation)
 		cmd := exec.Command("kubectl", "apply", "-f", "-")
 		_, err := utils.RunWithInput(cmd, manifest)
-		Expect(err).NotTo(HaveOccurred(), "Failed to apply the MemgraphCluster")
+		Expect(err).NotTo(HaveOccurred(), "Failed to apply the MemgraphDBCluster")
 	})
 
 	AfterAll(func() {
@@ -197,7 +197,7 @@ spec:
 
 	It("takes the LoadBalancers away and re-announces pod addresses when the block is removed", func() {
 		By("removing the externalAccess block")
-		cmd := exec.Command("kubectl", "patch", "memgraphcluster", externalClusterName,
+		cmd := exec.Command("kubectl", "patch", "memgraphdbcluster", externalClusterName,
 			"-n", externalNamespace, "--type=merge", "-p", `{"spec":{"externalAccess":null}}`)
 		_, err := utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred())
@@ -223,7 +223,7 @@ spec:
 		}, 3*time.Minute, 5*time.Second).Should(Succeed())
 
 		exposed.awaitConverged(3 * time.Minute)
-		cmd = exec.Command("kubectl", "get", "memgraphcluster", externalClusterName, "-n", externalNamespace,
+		cmd = exec.Command("kubectl", "get", "memgraphdbcluster", externalClusterName, "-n", externalNamespace,
 			"-o", "jsonpath={.status.externalAccess}")
 		out, err := utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred())
@@ -257,7 +257,7 @@ func (c clusterUnderTest) loadBalancerAddress(service string) string {
 // resource's status.
 func (c clusterUnderTest) externalAccessStatus() memgraphcomv1alpha1.ExternalAccessStatus {
 	GinkgoHelper()
-	cmd := exec.Command("kubectl", "get", "memgraphcluster", c.name, "-n", c.namespace,
+	cmd := exec.Command("kubectl", "get", "memgraphdbcluster", c.name, "-n", c.namespace,
 		"-o", "jsonpath={.status.externalAccess}")
 	out, err := utils.Run(cmd)
 	Expect(err).NotTo(HaveOccurred())

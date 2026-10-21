@@ -2,12 +2,12 @@
 # data instances, a pinned Memgraph image, and a reference to the Secret
 # holding the enterprise license. Everything else — storage, ports, probes,
 # resources, cluster domain — takes its default; config/samples/
-# v1alpha1_memgraphcluster.yaml spells the full surface out.
+# v1alpha1_memgraphdbcluster.yaml spells the full surface out.
 #
 # The e2e suite applies this file verbatim, so it is the manifest CI proves
 # boots a registered, MAIN-elected cluster.
 apiVersion: memgraph.com/v1alpha1
-kind: MemgraphCluster
+kind: MemgraphDBCluster
 metadata:
   name: memgraph
 spec:
