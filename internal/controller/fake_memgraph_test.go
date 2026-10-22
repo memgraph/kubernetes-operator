@@ -49,9 +49,6 @@ type fakeMemgraph struct {
 	// exceptional state a test opts into.
 	behind          map[string]int64
 	connectAttempts int
-	// systemUserPasswords is the system user password each Connect was
-	// given, in order; empty for one dialed without.
-	systemUserPasswords []string
 	// tlsConnectAttempts counts the connects the operator asked to be over
 	// TLS, which is the whole of what the fake can say about the mode: it
 	// speaks neither.
@@ -100,11 +97,10 @@ func newFakeMemgraph() *fakeMemgraph {
 	return &fakeMemgraph{}
 }
 
-func (f *fakeMemgraph) Connect(ctx context.Context, address string, tls bool) (memgraph.Client, error) {
+func (f *fakeMemgraph) Connect(_ context.Context, address string, tls bool) (memgraph.Client, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.connectAttempts++
-	f.systemUserPasswords = append(f.systemUserPasswords, memgraph.SystemUserPassword(ctx))
 	if tls {
 		f.tlsConnectAttempts++
 	}

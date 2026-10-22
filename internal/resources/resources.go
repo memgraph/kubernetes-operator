@@ -200,8 +200,6 @@ type normalizedSpec struct {
 	// fixOwnership is whether every pod chowns its volume mount points to the
 	// pod's identity from a root init container before Memgraph starts.
 	fixOwnership bool
-	// fips is whether every instance runs in FIPS 140-3 approved mode.
-	fips bool
 	// securityContext is the identity every pod runs under, resolved to the
 	// images' uid and gid for a cluster that named none.
 	securityContext normalizedSecurityContext
@@ -373,7 +371,6 @@ func normalize(spec memgraphcomv1alpha1.MemgraphDBClusterSpec) normalizedSpec {
 		readinessProbe:  normalizeProbe(spec.ReadinessProbe),
 		maxMapCount:     normalizeMaxMapCount(spec.SysctlInitContainer),
 		fixOwnership:    spec.FixOwnershipInitContainer != nil,
-		fips:            spec.FIPS != nil,
 		securityContext: normalizeSecurityContext(spec.SecurityContext),
 		coordinatorRole: normalizeRole(roleSpec{
 			storage:        spec.Storage.Coordinators,

@@ -143,17 +143,11 @@ func flagsConfigMap(
 // also_log_to_stderr is written with an explicit value on purpose. A bare
 // --flag is a boolean on the command line, but inside a flag file gflags
 // reads it as a flag missing its value and ignores it.
-//
-// The system user's hash file is the one default a user can't override
-// (admission denies it in spec.flags). It sits here rather than with the
-// pinned command-line flags because Memgraph before 3.15 doesn't know it, and
-// only a flag file tolerates an unknown name.
 func defaultFlags() map[string]string {
 	return map[string]string{
 		"log_level":          "INFO",
 		"also_log_to_stderr": "true",
 		"log_retention_days": "35",
-		systemUserHashFlag:   systemUserMountPath + "/" + SystemUserHashKey,
 	}
 }
 
