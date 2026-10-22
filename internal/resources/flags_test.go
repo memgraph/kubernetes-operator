@@ -41,10 +41,9 @@ const (
 )
 
 // defaultFlagFile is the flag file of a role without spec.flags: the HA
-// chart's logging defaults and the system user's hash file, every flag in
-// gflags' underscore spelling with an explicit value, sorted by name.
-const defaultFlagFile = "--also_log_to_stderr=true\n--log_level=INFO\n--log_retention_days=35\n" +
-	"--system_user_internal_hash_file=/etc/memgraph/system-user/hash\n"
+// chart's logging defaults, every flag in gflags' underscore spelling with an
+// explicit value, sorted by name.
+const defaultFlagFile = "--also_log_to_stderr=true\n--log_level=INFO\n--log_retention_days=35\n"
 
 // TestFlagsConfigMapDefaults pins the two ConfigMaps a cluster without
 // spec.flags gets: one per role, labelled like the role's other objects so the
@@ -96,8 +95,7 @@ func TestFlagsConfigMapMergesTheRole(t *testing.T) {
 		"--log_retention_days=35\n" +
 		"--memory_limit=2048\n" +
 		"--storage_snapshot_interval=\n" +
-		"--storage_snapshot_on_exit=false\n" +
-		"--system_user_internal_hash_file=/etc/memgraph/system-user/hash\n"
+		"--storage_snapshot_on_exit=false\n"
 	if got := resources.DataFlagsConfigMap(cluster).Data[resources.FlagFileKey]; got != wantData {
 		t.Errorf("data flag file:\n%s\nwant:\n%s", got, wantData)
 	}
@@ -107,13 +105,12 @@ func TestFlagsConfigMapMergesTheRole(t *testing.T) {
 
 	// The same view, as the controller diffs an instance's settings against it.
 	wantFlags := map[string]string{
-		"also_log_to_stderr":             string(flagOn),
-		"log_level":                      string(infoLevel),
-		retentionKey:                     "35",
-		"memory_limit":                   "2048",
-		"storage_snapshot_interval":      "",
-		"storage_snapshot_on_exit":       string(flagOff),
-		"system_user_internal_hash_file": "/etc/memgraph/system-user/hash",
+		"also_log_to_stderr":        string(flagOn),
+		"log_level":                 string(infoLevel),
+		retentionKey:                "35",
+		"memory_limit":              "2048",
+		"storage_snapshot_interval": "",
+		"storage_snapshot_on_exit":  string(flagOff),
 	}
 	if diff := cmp.Diff(wantFlags, resources.DataFlags(cluster)); diff != "" {
 		t.Errorf("DataFlags mismatch (-want +got):\n%s", diff)
@@ -184,7 +181,7 @@ func TestFlagsAnnotationFollowsStartupFlagsOnly(t *testing.T) {
 		t.Errorf("ChangedFlags of identical annotations = %v, want none", got)
 	}
 	// A pod from before the annotation existed differs in every current key.
-	if diff := cmp.Diff([]string{retentionKey, "system_user_internal_hash_file"}, resources.ChangedFlags("", base)); diff != "" {
+	if diff := cmp.Diff([]string{retentionKey}, resources.ChangedFlags("", base)); diff != "" {
 		t.Errorf("ChangedFlags from an empty annotation mismatch (-want +got):\n%s", diff)
 	}
 

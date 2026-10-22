@@ -18,19 +18,14 @@ package controller
 
 import (
 	"context"
-	"crypto/pbkdf2"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"maps"
-	"slices"
 	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	"golang.org/x/crypto/bcrypt"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
@@ -223,10 +218,6 @@ var _ = Describe("MemgraphDBCluster Controller", func() {
 				Name: clusterName + suffix, Namespace: resourceNamespace,
 			}}
 			Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, svc))).To(Succeed())
-		}
-		for _, name := range []string{clusterName + "-system-user", clusterName + "-system-user-hash"} {
-			secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: resourceNamespace}}
-			Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, secret))).To(Succeed())
 		}
 	}
 
@@ -543,9 +534,6 @@ var _ = Describe("MemgraphDBCluster Controller", func() {
 			coordinatorPod := func(ordinal int) string { return fmt.Sprintf("[%s%s-%d]", resourceName, coordinatorSuffix, ordinal) }
 			dataPod := func(ordinal int) string { return fmt.Sprintf("[%s%s-%d]", resourceName, dataSuffix, ordinal) }
 			Expect(recorded.all()).To(Equal([]string{
-				// The cluster's first pass generates the password the operator logs in with.
-				"Normal SystemUserCreated Generated the password of system user memgraph_internal in Secret " +
-					"mgc-bootstrap-system-user [mgc-bootstrap-system-user]",
 				"Normal CoordinatorAdded Added coordinator coordinator_0 to the Raft cluster " + coordinatorPod(0),
 				"Normal CoordinatorAdded Added coordinator coordinator_1 to the Raft cluster " + coordinatorPod(1),
 				"Normal CoordinatorAdded Added coordinator coordinator_2 to the Raft cluster " + coordinatorPod(2),
@@ -558,7 +546,7 @@ var _ = Describe("MemgraphDBCluster Controller", func() {
 			result = reconcileCluster(resourceName)
 			Expect(fake.executedCommands()).To(HaveLen(6),
 				"a converged cluster must not receive further commands")
-			Expect(recorded.all()).To(HaveLen(7), "a pass that does nothing records nothing")
+			Expect(recorded.all()).To(HaveLen(6), "a pass that does nothing records nothing")
 			Expect(result.RequeueAfter).To(Equal(resyncInterval),
 				"a converged cluster must still reschedule a resync to catch registration drift")
 		})
@@ -2551,14 +2539,12 @@ var _ = Describe("MemgraphDBCluster Controller", func() {
 			get(resourceName+dataSuffix+"-flags", data)
 			expectControlledBy(data, cluster)
 			Expect(data.Data[resources.FlagFileKey]).To(Equal(
-				"--also_log_to_stderr=true\n--log_level=DEBUG\n--log_retention_days=35\n--storage_snapshot_on_exit=false\n" +
-					"--system_user_internal_hash_file=/etc/memgraph/system-user/hash\n"))
+				"--also_log_to_stderr=true\n--log_level=DEBUG\n--log_retention_days=35\n--storage_snapshot_on_exit=false\n"))
 
 			coordinators := &corev1.ConfigMap{}
 			get(resourceName+coordinatorSuffix+"-flags", coordinators)
 			Expect(coordinators.Data[resources.FlagFileKey]).To(Equal(
-				"--also_log_to_stderr=true\n--log_level=INFO\n--log_retention_days=35\n"+
-					"--system_user_internal_hash_file=/etc/memgraph/system-user/hash\n"),
+				"--also_log_to_stderr=true\n--log_level=INFO\n--log_retention_days=35\n"),
 				"the data flags are not the coordinators'")
 
 			sts := &appsv1.StatefulSet{}
@@ -2698,218 +2684,6 @@ var _ = Describe("MemgraphDBCluster Controller", func() {
 			Expect(settings).To(HaveKeyWithValue("log.level", "INFO"),
 				"a removed flag the operator has a default for goes back to the default, which the flag file now says")
 			Expect(condition(memgraphcomv1alpha1.ConditionConverged).Status).To(Equal(metav1.ConditionTrue))
-		})
-	})
-
-	Context("when logging in as the system user", func() {
-		const (
-			resourceName   = "mgc-system-user"
-			passwordSecret = resourceName + "-system-user"
-			hashSecret     = resourceName + "-system-user-hash"
-		)
-
-		cluster := &memgraphcomv1alpha1.MemgraphDBCluster{}
-
-		BeforeEach(func() {
-			resource := &memgraphcomv1alpha1.MemgraphDBCluster{
-				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: resourceNamespace},
-			}
-			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
-			get(resourceName, cluster)
-		})
-
-		AfterEach(func() {
-			Expect(k8sClient.Delete(ctx, cluster)).To(Succeed())
-			deleteOwned(resourceName)
-		})
-
-		password := func() string {
-			GinkgoHelper()
-			secret := &corev1.Secret{}
-			get(passwordSecret, secret)
-			return string(secret.Data[resources.SystemUserPasswordKey])
-		}
-		hash := func() string {
-			GinkgoHelper()
-			secret := &corev1.Secret{}
-			get(hashSecret, secret)
-			return string(secret.Data[resources.SystemUserHashKey])
-		}
-		expectHashOf := func(password string) {
-			GinkgoHelper()
-			bcryptHash, ok := strings.CutPrefix(hash(), "bcrypt:")
-			Expect(ok).To(BeTrue(), "Memgraph reads the hash as a pre-hashed bcrypt literal")
-			Expect(bcrypt.CompareHashAndPassword([]byte(bcryptHash), []byte(password))).To(Succeed())
-		}
-		eventsWithReason := func(reason string) []string {
-			var matching []string
-			for _, e := range recorded.all() {
-				if strings.HasPrefix(e, corev1.EventTypeNormal+" "+reason+" ") {
-					matching = append(matching, e)
-				}
-			}
-			return matching
-		}
-
-		It("should generate the password once and keep its hash stable", func() {
-			reconcileCluster(resourceName)
-
-			secret := &corev1.Secret{}
-			get(passwordSecret, secret)
-			expectControlledBy(secret, cluster)
-			generated := password()
-			Expect(generated).To(HaveLen(43), "256 random bits, base64url without padding")
-			get(hashSecret, secret)
-			expectControlledBy(secret, cluster)
-			expectHashOf(generated)
-			Expect(eventsWithReason(EventReasonSystemUserCreated)).To(ConsistOf(
-				ContainSubstring("[" + passwordSecret + "]")))
-
-			// Neither is rewritten by later passes: a second password would lock
-			// the operator out of every pod holding the first one's hash, and a
-			// fresh salt each pass would rewrite the file every pod mounts.
-			firstHash := hash()
-			reconcileCluster(resourceName)
-			reconcileCluster(resourceName)
-			Expect(password()).To(Equal(generated))
-			Expect(hash()).To(Equal(firstHash))
-			Expect(eventsWithReason(EventReasonSystemUserCreated)).To(HaveLen(1))
-		})
-
-		It("should log in as the system user on every connection", func() {
-			reconcileCluster(resourceName)
-			markWorkloadsReady(resourceName)
-			reconcileCluster(resourceName)
-
-			Expect(fake.systemUserPasswords).NotTo(BeEmpty(), "the pass dials the coordinators")
-			Expect(fake.systemUserPasswords).To(HaveEach(Equal(password())))
-		})
-
-		It("should follow a password edited in its Secret", func() {
-			reconcileCluster(resourceName)
-			secret := &corev1.Secret{}
-			get(passwordSecret, secret)
-			secret.Data[resources.SystemUserPasswordKey] = []byte("edited-by-hand")
-			Expect(k8sClient.Update(ctx, secret)).To(Succeed())
-
-			reconcileCluster(resourceName)
-			expectHashOf("edited-by-hand")
-			Expect(eventsWithReason(EventReasonSystemUserHashUpdated)).To(ConsistOf(
-				ContainSubstring("[" + hashSecret + "]")))
-		})
-
-		It("should generate a new password when its Secret is deleted", func() {
-			reconcileCluster(resourceName)
-			first := password()
-			Expect(k8sClient.Delete(ctx, &corev1.Secret{
-				ObjectMeta: metav1.ObjectMeta{Name: passwordSecret, Namespace: resourceNamespace},
-			})).To(Succeed())
-
-			reconcileCluster(resourceName)
-			Expect(password()).NotTo(Equal(first))
-			expectHashOf(password())
-			Expect(eventsWithReason(EventReasonSystemUserCreated)).To(HaveLen(2))
-		})
-
-		// FIPS mode refuses a bcrypt hash, so the hash moves to pbkdf2-sha256
-		// with the spec, keeping the password; it moves back only once no pod
-		// still runs in FIPS mode, because one restarting in place before the
-		// roll replaced it would refuse the bcrypt file and stall the roll.
-		It("should hash with pbkdf2-sha256 in FIPS mode and return to bcrypt once no pod runs in it", func() {
-			expectPBKDF2HashOf := func(password string) {
-				GinkgoHelper()
-				literal, ok := strings.CutPrefix(hash(), "pbkdf2-sha256:600000:")
-				Expect(ok).To(BeTrue(), "Memgraph reads the hash as a pre-hashed pbkdf2-sha256 literal at its own count")
-				saltHex, keyHex, ok := strings.Cut(literal, ":")
-				Expect(ok).To(BeTrue())
-				salt, err := hex.DecodeString(saltHex)
-				Expect(err).NotTo(HaveOccurred())
-				derived, err := pbkdf2.Key(sha256.New, password, salt, 600000, 32)
-				Expect(err).NotTo(HaveOccurred())
-				Expect(hex.EncodeToString(derived)).To(Equal(keyHex))
-			}
-			fipsArgs := func() []bool {
-				GinkgoHelper()
-				carries := make([]bool, 0, 2)
-				for _, suffix := range []string{coordinatorSuffix, dataSuffix} {
-					sts := &appsv1.StatefulSet{}
-					get(resourceName+suffix, sts)
-					carries = append(carries, slices.Contains(sts.Spec.Template.Spec.Containers[0].Args, "--fips-mode=true"))
-				}
-				return carries
-			}
-			setFIPS := func(on bool) {
-				GinkgoHelper()
-				get(resourceName, cluster)
-				cluster.Spec.FIPS = nil
-				if on {
-					cluster.Spec.FIPS = &memgraphcomv1alpha1.FIPSSpec{}
-				}
-				Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
-			}
-
-			reconcileCluster(resourceName)
-			generated := password()
-			expectHashOf(generated)
-			Expect(fipsArgs()).To(HaveEach(BeFalse()))
-
-			setFIPS(true)
-			reconcileCluster(resourceName)
-			Expect(password()).To(Equal(generated), "an instance holding the bcrypt hash keeps accepting the password")
-			expectPBKDF2HashOf(generated)
-			Expect(fipsArgs()).To(HaveEach(BeTrue()), "both roles start in FIPS mode")
-			Expect(eventsWithReason(EventReasonSystemUserHashUpdated)).To(ConsistOf(
-				ContainSubstring("a pbkdf2-sha256 hash")))
-			pbkdf2Hash := hash()
-			reconcileCluster(resourceName)
-			Expect(hash()).To(Equal(pbkdf2Hash), "a fresh salt each pass would rewrite the file every pod mounts")
-
-			// A data pod the roll has not replaced yet, still started in FIPS mode.
-			fipsPod := &corev1.Pod{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      resourceName + dataSuffix + "-0",
-					Namespace: resourceNamespace,
-					Labels:    resources.DataPodSelector(cluster),
-				},
-				Spec: corev1.PodSpec{Containers: []corev1.Container{{
-					Name: memgraphDbName, Image: memgraphDbName, Args: []string{"--fips-mode=true"},
-				}}},
-			}
-			Expect(k8sClient.Create(ctx, fipsPod)).To(Succeed())
-			DeferCleanup(func() {
-				Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, fipsPod, client.GracePeriodSeconds(0)))).To(Succeed())
-			})
-
-			setFIPS(false)
-			reconcileCluster(resourceName)
-			Expect(fipsArgs()).To(HaveEach(BeFalse()), "the roll out of FIPS mode starts")
-			Expect(hash()).To(Equal(pbkdf2Hash), "a pod still in FIPS mode would refuse a bcrypt hash")
-
-			Expect(k8sClient.Delete(ctx, fipsPod, client.GracePeriodSeconds(0))).To(Succeed())
-			Eventually(func() error {
-				return k8sClient.Get(ctx, client.ObjectKeyFromObject(fipsPod), &corev1.Pod{})
-			}).Should(Satisfy(apierrors.IsNotFound))
-			reconcileCluster(resourceName)
-			expectHashOf(generated)
-			Expect(eventsWithReason(EventReasonSystemUserHashUpdated)).To(ConsistOf(
-				ContainSubstring("a pbkdf2-sha256 hash"), ContainSubstring("a bcrypt hash")))
-		})
-
-		It("should mount the hash and point Memgraph at it on both roles", func() {
-			reconcileCluster(resourceName)
-
-			for _, suffix := range []string{coordinatorSuffix, dataSuffix} {
-				sts := &appsv1.StatefulSet{}
-				get(resourceName+suffix, sts)
-				Expect(sts.Spec.Template.Spec.Volumes).To(ContainElement(HaveField("Secret.SecretName", hashSecret)))
-				Expect(sts.Spec.Template.Spec.Containers[0].VolumeMounts).To(ContainElement(
-					HaveField("MountPath", "/etc/memgraph/system-user")))
-
-				flags := &corev1.ConfigMap{}
-				get(resourceName+suffix+"-flags", flags)
-				Expect(flags.Data[resources.FlagFileKey]).To(ContainSubstring(
-					"--system_user_internal_hash_file=/etc/memgraph/system-user/hash\n"))
-			}
 		})
 	})
 

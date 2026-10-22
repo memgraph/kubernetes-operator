@@ -75,8 +75,6 @@ const (
 	EventReasonStatefulSetShrunk             = "StatefulSetShrunk"
 	EventReasonVolumeExpansionRequested      = "VolumeExpansionRequested"
 	EventReasonStatefulSetOrphaned           = "StatefulSetOrphaned"
-	EventReasonSystemUserCreated             = "SystemUserCreated"
-	EventReasonSystemUserHashUpdated         = "SystemUserHashUpdated"
 )
 
 // Event actions, the events.k8s.io field saying what the operator did to the

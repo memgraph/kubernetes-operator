@@ -63,18 +63,12 @@ const (
 	flagsPath   = "/etc/memgraph-flags"
 	flagFile    = flagsPath + "/memgraph.flags"
 
-	// The system user's hash Secret every pod mounts, and where.
-	systemUserVolume = "system-user"
-	systemUserPath   = "/etc/memgraph/system-user"
-
 	// defaultFlagsAnnotation is the flags annotation of a role without
-	// spec.flags: the two startup-only defaults, log_retention_days and the
-	// system user's hash file, with the digest of each value (the first
-	// sixteen hex characters of sha256("35") and of
-	// sha256("/etc/memgraph/system-user/hash")). The two run-time defaults,
-	// log_level and also_log_to_stderr, are not part of it.
-	defaultFlagsAnnotation = "log_retention_days=9f14025af0065b30\n" +
-		"system_user_internal_hash_file=5f8283945eb61fe9\n"
+	// spec.flags: the one startup-only default, log_retention_days, with the
+	// digest of its value (the first sixteen hex characters of sha256("35")).
+	// The two run-time defaults, log_level and also_log_to_stderr, are not
+	// part of it.
+	defaultFlagsAnnotation = "log_retention_days=9f14025af0065b30\n"
 
 	// The Bolt TLS Secret a fixture names, and the volume the builder mounts
 	// it as.
@@ -329,7 +323,6 @@ func expectedVolumeMounts() []corev1.VolumeMount {
 	return []corev1.VolumeMount{
 		{Name: libVolume, MountPath: libPath},
 		{Name: flagsVolume, MountPath: flagsPath, ReadOnly: true},
-		{Name: systemUserVolume, MountPath: systemUserPath, ReadOnly: true},
 		{Name: tmpVolume, MountPath: "/tmp"},
 	}
 }
@@ -367,10 +360,8 @@ func expectedCoordinatorArgs(logDestination string, extra ...string) []string {
 	return append([]string{memgraphName}, expectedArgs(logDestination, extra...)...)
 }
 
-// expectedVolumes covers the role's flag file, the system user's hash and the
-// ephemeral scratch volume: lib storage is provisioned through a
-// volumeClaimTemplate. The hash volume is required, so a pod never starts
-// without it.
+// expectedVolumes covers the role's flag file and the ephemeral scratch
+// volume: lib storage is provisioned through a volumeClaimTemplate.
 func expectedVolumes(component string) []corev1.Volume {
 	return []corev1.Volume{
 		{
@@ -378,15 +369,6 @@ func expectedVolumes(component string) []corev1.Volume {
 			VolumeSource: corev1.VolumeSource{
 				ConfigMap: &corev1.ConfigMapVolumeSource{
 					LocalObjectReference: corev1.LocalObjectReference{Name: clusterName + "-" + component + "-flags"},
-				},
-			},
-		},
-		{
-			Name: systemUserVolume,
-			VolumeSource: corev1.VolumeSource{
-				Secret: &corev1.SecretVolumeSource{
-					SecretName: clusterName + "-system-user-hash",
-					Items:      []corev1.KeyToPath{{Key: "hash", Path: "hash"}},
 				},
 			},
 		},
@@ -1192,8 +1174,8 @@ func TestStatefulSetExtraVolumeWithoutMount(t *testing.T) {
 	}}
 
 	podSpec := coordinatorStatefulSet(cluster).Spec.Template.Spec
-	if len(podSpec.Volumes) != 4 {
-		t.Errorf("volumes = %v, want the scratch volume alongside flags, the system user's hash and tmp", podSpec.Volumes)
+	if len(podSpec.Volumes) != 3 {
+		t.Errorf("volumes = %v, want the scratch volume alongside flags and tmp", podSpec.Volumes)
 	}
 	if diff := cmp.Diff(expectedVolumeMounts(), podSpec.Containers[0].VolumeMounts); diff != "" {
 		t.Errorf("volume mounts mismatch (-want +got):\n%s", diff)
@@ -1892,7 +1874,7 @@ func TestStatefulSetBothTLSModes(t *testing.T) {
 	for _, volume := range podSpec.Volumes {
 		volumes = append(volumes, volume.Name)
 	}
-	if diff := cmp.Diff([]string{flagsVolume, systemUserVolume, tmpVolume, boltTLSVolume, intraTLSVolume}, volumes); diff != "" {
+	if diff := cmp.Diff([]string{flagsVolume, tmpVolume, boltTLSVolume, intraTLSVolume}, volumes); diff != "" {
 		t.Errorf("volume order mismatch (-want +got):\n%s", diff)
 	}
 
@@ -1919,50 +1901,6 @@ func TestStatefulSetBothTLSModes(t *testing.T) {
 	if diff := cmp.Diff(wantArgs, podSpec.Containers[0].Args); diff != "" {
 		t.Errorf("args mismatch (-want +got):\n%s", diff)
 	}
-}
-
-// TestStatefulSetFIPS pins that the fips block starts both roles' Memgraph
-// with --fips-mode=true on the command line, after every other pinned flag,
-// and that a cluster without the block carries no such flag. Nothing else
-// about the pod changes: the mode needs no volume of its own.
-func TestStatefulSetFIPS(t *testing.T) {
-	cluster := minimalCluster()
-	cluster.Spec.FIPS = &memgraphcomv1alpha1.FIPSSpec{}
-	const fipsFlag = "--fips-mode=true"
-
-	t.Run(dataComponent, func(t *testing.T) {
-		podSpec := dataStatefulSet(cluster).Spec.Template.Spec
-		if diff := cmp.Diff(expectedArgs(logFilePath, fipsFlag), podSpec.Containers[0].Args); diff != "" {
-			t.Errorf("args mismatch (-want +got):\n%s", diff)
-		}
-		if diff := cmp.Diff(expectedVolumes(dataComponent), podSpec.Volumes); diff != "" {
-			t.Errorf("volumes mismatch (-want +got):\n%s", diff)
-		}
-	})
-
-	t.Run(coordinatorComponent, func(t *testing.T) {
-		podSpec := coordinatorStatefulSet(cluster).Spec.Template.Spec
-		if diff := cmp.Diff(expectedCoordinatorArgs(logFilePath, fipsFlag), podSpec.Containers[0].Args); diff != "" {
-			t.Errorf("args mismatch (-want +got):\n%s", diff)
-		}
-	})
-
-	t.Run("absent", func(t *testing.T) {
-		for _, sts := range []*appsv1.StatefulSet{dataStatefulSet(minimalCluster()), coordinatorStatefulSet(minimalCluster())} {
-			if slices.Contains(sts.Spec.Template.Spec.Containers[0].Args, fipsFlag) {
-				t.Errorf("%s carries %s without the fips block", sts.Name, fipsFlag)
-			}
-		}
-	})
-
-	// The flag is part of the pod template, so adding or removing the block is
-	// a change the roll carries pod by pod.
-	t.Run("rolls", func(t *testing.T) {
-		if resources.PodTemplateHash(dataStatefulSet(cluster).Spec.Template) ==
-			resources.PodTemplateHash(dataStatefulSet(minimalCluster()).Spec.Template) {
-			t.Error("the fips block left the data pod template hash unchanged, so nothing would roll")
-		}
-	})
 }
 
 // TestStatefulSetCarriesNoSchedulingByDefault pins that a cluster without a

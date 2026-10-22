@@ -39,10 +39,8 @@ rules:
   resources:
   - secrets
   verbs:
-  - create
   - get
   - list
-  - patch
   - watch
 - apiGroups:
   - apps

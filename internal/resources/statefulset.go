@@ -18,7 +18,6 @@ package resources
 
 import (
 	"fmt"
-	"slices"
 	"strings"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -218,11 +217,6 @@ exec %s \
 // turn 9091 to https as well; nothing else about the args changes. A cluster
 // with intra-cluster TLS gets the three cluster flags after those: Memgraph
 // refuses to start with only some of them, so they always travel together.
-//
-// A cluster in FIPS mode gets --fips-mode=true last. It is on the command line
-// rather than in the flag file, like every flag the operator pins: a release
-// without it should refuse to start rather than run outside approved mode
-// while the spec says otherwise.
 func commonArgs(spec normalizedSpec, role normalizedRole) []string {
 	logDestination := logFile
 	if !role.storage.fileLogging {
@@ -259,26 +253,7 @@ func commonArgs(spec normalizedSpec, role normalizedRole) []string {
 			"--cluster-ca-file="+intraClusterTLSMountPath+"/"+caKey,
 		)
 	}
-	if spec.fips {
-		args = append(args, fipsModeArg)
-	}
 	return args
-}
-
-// fipsModeArg is the argument that starts Memgraph in FIPS 140-3 approved mode.
-const fipsModeArg = "--fips-mode=true"
-
-// RunsInFIPSMode reports whether the pod's Memgraph container was started in
-// FIPS 140-3 approved mode. A pod keeps the args it was created with until
-// the roll replaces it, so this is what the pod runs, whatever the spec says
-// now.
-func RunsInFIPSMode(pod *corev1.Pod) bool {
-	for _, container := range pod.Spec.Containers {
-		if container.Name == containerName {
-			return slices.Contains(container.Args, fipsModeArg)
-		}
-	}
-	return false
 }
 
 // memgraphContainer builds the parts of the Memgraph container shared by both
@@ -473,7 +448,7 @@ func uploaderSidecar(coreDumps normalizedCoreDumps) corev1.Container {
 }
 
 // volumeMounts are the Memgraph container's mounts: lib storage, the role's
-// flag file, the system user's hash, the scratch directory the read-only root filesystem needs, the
+// flag file, the scratch directory the read-only root filesystem needs, the
 // core dumps directory when the role collects dumps, the Bolt and
 // intra-cluster certificates when the cluster has those modes, and last the
 // role's own extra mounts.
@@ -481,7 +456,6 @@ func volumeMounts(spec normalizedSpec, role normalizedRole) []corev1.VolumeMount
 	mounts := []corev1.VolumeMount{
 		{Name: libVolumeName, MountPath: libMountPath},
 		{Name: flagsVolumeName, MountPath: flagsMountPath, ReadOnly: true},
-		systemUserVolumeMount(),
 		{Name: tmpVolumeName, MountPath: tmpMountPath},
 	}
 	if role.coreDumps.enabled {
@@ -499,8 +473,8 @@ func volumeMounts(spec normalizedSpec, role normalizedRole) []corev1.VolumeMount
 	return append(mounts, role.extraMounts...)
 }
 
-// podVolumes is the role's flag file, the system user's hash, the scratch
-// directory the read-only root filesystem needs, the certificate Secrets of the TLS modes the cluster has,
+// podVolumes is the role's flag file, the scratch directory the read-only root
+// filesystem needs, the certificate Secrets of the TLS modes the cluster has,
 // plus the role's extra volumes. Everything persistent comes from
 // volumeClaimTemplates instead.
 //
@@ -514,8 +488,8 @@ func podVolumes(
 	role normalizedRole,
 	flagsConfigMap string,
 ) []corev1.Volume {
-	volumes := make([]corev1.Volume, 0, 5+len(role.extraVolumes))
-	volumes = append(volumes, flagsVolume(flagsConfigMap), systemUserVolume(cluster), corev1.Volume{
+	volumes := make([]corev1.Volume, 0, 4+len(role.extraVolumes))
+	volumes = append(volumes, flagsVolume(flagsConfigMap), corev1.Volume{
 		Name: tmpVolumeName, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
 	})
 	if spec.boltTLSSecret != "" {
