@@ -1439,7 +1439,7 @@ type FlagsSpec struct {
 	// +kubebuilder:validation:XValidation:rule="self.all(k, !(k.replace('-', '_') in ['enabled_reads_on_main', 'sync_failover_only', 'global_read_only']) || self[k] in ['true', 'false'])",message="enabled_reads_on_main, sync_failover_only and global_read_only take \"true\" or \"false\""
 	// +kubebuilder:validation:XValidation:rule="self.all(k, !(k.replace('-', '_') in ['instance_down_timeout_sec', 'instance_health_check_frequency_sec', 'max_failover_replica_lag', 'max_replica_read_lag', 'deltas_batch_progress_size']) || self[k].matches('^[0-9]+$'))",message="instance_down_timeout_sec, instance_health_check_frequency_sec, max_failover_replica_lag, max_replica_read_lag and deltas_batch_progress_size take a non-negative integer"
 	// +kubebuilder:validation:XValidation:rule="self.all(k, k.matches('^[A-Za-z][A-Za-z0-9_-]*$'))",message="flags keys are flag names without leading dashes, such as log-level"
-	// +kubebuilder:validation:XValidation:rule="self.all(k, !k.replace('-', '_').matches('^(bolt_port|management_port|coordinator_port|coordinator_id|coordinator_hostname|data_directory|log_file|bolt_cert_file|bolt_key_file|cluster_cert_file|cluster_key_file|cluster_ca_file|metrics_format|metrics_port|monitoring_port|bolt_address|monitoring_address|aws_access_key|aws_secret_key|aws_region|aws_endpoint_url|license_key|organization_name)$'))",message="flags must not set a port, a listen address, the coordinator identity, the data directory, the log file, a TLS file, the metrics format, the license (license-key, organization-name) or the AWS configuration (aws-access-key, aws-secret-key, aws-region, aws-endpoint-url): the operator derives the former, and the latter come from the secrets and awsCredentials blocks"
+	// +kubebuilder:validation:XValidation:rule="self.all(k, !k.replace('-', '_').matches('^(bolt_port|management_port|coordinator_port|coordinator_id|coordinator_hostname|data_directory|log_file|bolt_cert_file|bolt_key_file|cluster_cert_file|cluster_key_file|cluster_ca_file|metrics_format|metrics_port|monitoring_port|bolt_address|monitoring_address|aws_access_key|aws_secret_key|aws_region|aws_endpoint_url|license_key|organization_name|system_user_internal_hash_file|fips_mode)$'))",message="flags must not set a port, a listen address, the coordinator identity, the data directory, the log file, a TLS file, the metrics format, the system user's hash file, FIPS mode (fips-mode), the license (license-key, organization-name) or the AWS configuration (aws-access-key, aws-secret-key, aws-region, aws-endpoint-url): the operator derives the former, and the latter come from the fips, secrets and awsCredentials blocks"
 	// +kubebuilder:validation:XValidation:rule="self.all(k, self.all(j, k == j || k.replace('-', '_') != j.replace('-', '_')))",message="two keys spell the same flag"
 	// +kubebuilder:validation:XValidation:rule="self.all(k, k.replace('-', '_') != 'log_level' || self[k] in ['TRACE', 'DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'])",message="log-level must be one of TRACE, DEBUG, INFO, WARNING, ERROR, CRITICAL"
 	// +optional
@@ -1449,7 +1449,7 @@ type FlagsSpec struct {
 	// +kubebuilder:validation:MaxProperties=64
 	// +kubebuilder:validation:XValidation:rule="self.all(k, !(k.replace('-', '_') in ['enabled_reads_on_main', 'sync_failover_only', 'global_read_only', 'instance_down_timeout_sec', 'instance_health_check_frequency_sec', 'max_failover_replica_lag', 'max_replica_read_lag', 'deltas_batch_progress_size']))",message="a coordinator setting is set under flags.coordinators, not flags.data"
 	// +kubebuilder:validation:XValidation:rule="self.all(k, k.matches('^[A-Za-z][A-Za-z0-9_-]*$'))",message="flags keys are flag names without leading dashes, such as log-level"
-	// +kubebuilder:validation:XValidation:rule="self.all(k, !k.replace('-', '_').matches('^(bolt_port|management_port|coordinator_port|coordinator_id|coordinator_hostname|data_directory|log_file|bolt_cert_file|bolt_key_file|cluster_cert_file|cluster_key_file|cluster_ca_file|metrics_format|metrics_port|monitoring_port|bolt_address|monitoring_address|aws_access_key|aws_secret_key|aws_region|aws_endpoint_url|license_key|organization_name)$'))",message="flags must not set a port, a listen address, the coordinator identity, the data directory, the log file, a TLS file, the metrics format, the license (license-key, organization-name) or the AWS configuration (aws-access-key, aws-secret-key, aws-region, aws-endpoint-url): the operator derives the former, and the latter come from the secrets and awsCredentials blocks"
+	// +kubebuilder:validation:XValidation:rule="self.all(k, !k.replace('-', '_').matches('^(bolt_port|management_port|coordinator_port|coordinator_id|coordinator_hostname|data_directory|log_file|bolt_cert_file|bolt_key_file|cluster_cert_file|cluster_key_file|cluster_ca_file|metrics_format|metrics_port|monitoring_port|bolt_address|monitoring_address|aws_access_key|aws_secret_key|aws_region|aws_endpoint_url|license_key|organization_name|system_user_internal_hash_file|fips_mode)$'))",message="flags must not set a port, a listen address, the coordinator identity, the data directory, the log file, a TLS file, the metrics format, the system user's hash file, FIPS mode (fips-mode), the license (license-key, organization-name) or the AWS configuration (aws-access-key, aws-secret-key, aws-region, aws-endpoint-url): the operator derives the former, and the latter come from the fips, secrets and awsCredentials blocks"
 	// +kubebuilder:validation:XValidation:rule="self.all(k, self.all(j, k == j || k.replace('-', '_') != j.replace('-', '_')))",message="two keys spell the same flag"
 	// +kubebuilder:validation:XValidation:rule="self.all(k, k.replace('-', '_') != 'log_level' || self[k] in ['TRACE', 'DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'])",message="log-level must be one of TRACE, DEBUG, INFO, WARNING, ERROR, CRITICAL"
 	// +optional
@@ -1991,6 +1991,29 @@ type IntraClusterTLSSpec struct {
 	SecretRef SecretReference `json:"secretRef"`
 }
 
+// FIPSSpec runs Memgraph in FIPS 140-3 approved mode: every instance of both
+// roles starts with --fips-mode=true, which restricts password hashing and TLS
+// to FIPS-approved algorithms and needs the OpenSSL FIPS provider only the
+// "-fips" Memgraph images ship, so image must name one. The flag is the
+// operator's to set, never spec.flags'.
+//
+// The block is presence-based like every other optional block of the
+// resource and has no fields: present, the mode is on; absent, off. It may be
+// added or removed on a live cluster: the change is a pod-template change
+// that rolls one pod at a time like an image upgrade, so for the length of the
+// roll some instances run in approved mode and some do not.
+//
+// FIPS mode is an enterprise feature. A new instance starts without a license
+// and accepts nothing but the license settings until the operator SETs them
+// from the secrets block, as it does on every ready pod anyway. The system
+// user the operator logs in as gets a pbkdf2-sha256 hash instead of bcrypt,
+// the one algorithm approved mode accepts. Users created with bcrypt or
+// sha256 passwords, the default, can no longer log in once their instance
+// runs in approved mode: reset their passwords before adding the block, on
+// instances started with password-encryption-algorithm set to pbkdf2-sha256
+// in flags.
+type FIPSSpec struct{}
+
 // TLSSpec holds the cluster's TLS modes, each an optional presence-based block
 // like externalAccess and monitoring: present, the mode is on; absent, off.
 // The two are independent: Bolt TLS faces clients, intra-cluster TLS faces
@@ -2178,6 +2201,12 @@ type MemgraphDBClusterSpec struct {
 	// removed on a live cluster; intraCluster may not.
 	// +optional
 	TLS *TLSSpec `json:"tls,omitempty"`
+
+	// fips runs every instance of both roles in FIPS 140-3 approved mode.
+	// Absent, they run in the normal mode. It needs a FIPS build of Memgraph:
+	// set image to the "-fips" tag of the release.
+	// +optional
+	FIPS *FIPSSpec `json:"fips,omitempty"`
 }
 
 // ExternalAddress is the external address one member, or the coordinators
