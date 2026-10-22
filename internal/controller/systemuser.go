@@ -40,9 +40,11 @@ import (
 )
 
 const (
-	// systemUserPasswordBytes is the entropy of a generated password: 256
-	// bits, encoded to 43 characters, well inside bcrypt's 72-byte input.
-	systemUserPasswordBytes = 32
+	// systemUserBcryptPasswordBytes is the entropy of a generated password:
+	// 256 bits, encoded to 43 characters, well inside bcrypt's 72-byte input.
+	// bcrypt is what bounds it; the pbkdf2-sha256 hash of FIPS mode takes the
+	// same password and has no such limit.
+	systemUserBcryptPasswordBytes = 32
 
 	// systemUserHashCost is bcrypt's cost for the hash Memgraph verifies on
 	// every login the operator makes. A work factor slows down guessing a
@@ -179,7 +181,7 @@ func (r *MemgraphDBClusterReconciler) createSystemUserSecret(
 	ctx context.Context,
 	cluster *memgraphcomv1alpha1.MemgraphDBCluster,
 ) (*corev1.Secret, error) {
-	random := make([]byte, systemUserPasswordBytes)
+	random := make([]byte, systemUserBcryptPasswordBytes)
 	if _, err := rand.Read(random); err != nil {
 		return nil, fmt.Errorf("generating the system user's password: %w", err)
 	}
