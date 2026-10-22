@@ -46,12 +46,12 @@ const (
 	// same password and has no such limit.
 	systemUserBcryptPasswordBytes = 32
 
-	// systemUserHashCost is bcrypt's cost for the hash Memgraph verifies on
+	// systemUserBcryptCost is bcrypt's cost for the hash Memgraph verifies on
 	// every login the operator makes. A work factor slows down guessing a
 	// password a person chose; nothing guesses 256 random bits, so the default
 	// cost buys no security over a lower one, and a higher one would only make
 	// each of the operator's logins slower.
-	systemUserHashCost = bcrypt.DefaultCost
+	systemUserBcryptCost = bcrypt.DefaultCost
 
 	// bcryptPrefix marks a pre-hashed bcrypt password for Memgraph.
 	bcryptPrefix = "bcrypt:"
@@ -246,7 +246,7 @@ func hashSystemUserPassword(password string, fips bool) (string, error) {
 		}
 		return pbkdf2Literal(salt, key), nil
 	}
-	hash, err := bcrypt.GenerateFromPassword([]byte(password), systemUserHashCost)
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), systemUserBcryptCost)
 	if err != nil {
 		return "", fmt.Errorf("hashing the system user's password: %w", err)
 	}
