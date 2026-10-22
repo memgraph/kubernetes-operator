@@ -18,9 +18,13 @@ package controller
 
 import (
 	"context"
+	"crypto/pbkdf2"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"maps"
+	"slices"
 	"strings"
 	"time"
 
@@ -2805,6 +2809,90 @@ var _ = Describe("MemgraphDBCluster Controller", func() {
 			Expect(password()).NotTo(Equal(first))
 			expectHashOf(password())
 			Expect(eventsWithReason(EventReasonSystemUserCreated)).To(HaveLen(2))
+		})
+
+		// FIPS mode refuses a bcrypt hash, so the hash moves to pbkdf2-sha256
+		// with the spec, keeping the password; it moves back only once no pod
+		// still runs in FIPS mode, because one restarting in place before the
+		// roll replaced it would refuse the bcrypt file and stall the roll.
+		It("should hash with pbkdf2-sha256 in FIPS mode and return to bcrypt once no pod runs in it", func() {
+			expectPBKDF2HashOf := func(password string) {
+				GinkgoHelper()
+				literal, ok := strings.CutPrefix(hash(), "pbkdf2-sha256:600000:")
+				Expect(ok).To(BeTrue(), "Memgraph reads the hash as a pre-hashed pbkdf2-sha256 literal at its own count")
+				saltHex, keyHex, ok := strings.Cut(literal, ":")
+				Expect(ok).To(BeTrue())
+				salt, err := hex.DecodeString(saltHex)
+				Expect(err).NotTo(HaveOccurred())
+				derived, err := pbkdf2.Key(sha256.New, password, salt, 600000, 32)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(hex.EncodeToString(derived)).To(Equal(keyHex))
+			}
+			fipsArgs := func() []bool {
+				GinkgoHelper()
+				carries := make([]bool, 0, 2)
+				for _, suffix := range []string{coordinatorSuffix, dataSuffix} {
+					sts := &appsv1.StatefulSet{}
+					get(resourceName+suffix, sts)
+					carries = append(carries, slices.Contains(sts.Spec.Template.Spec.Containers[0].Args, "--fips-mode=true"))
+				}
+				return carries
+			}
+			setFIPS := func(on bool) {
+				GinkgoHelper()
+				get(resourceName, cluster)
+				cluster.Spec.FIPS = nil
+				if on {
+					cluster.Spec.FIPS = &memgraphcomv1alpha1.FIPSSpec{}
+				}
+				Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
+			}
+
+			reconcileCluster(resourceName)
+			generated := password()
+			expectHashOf(generated)
+			Expect(fipsArgs()).To(HaveEach(BeFalse()))
+
+			setFIPS(true)
+			reconcileCluster(resourceName)
+			Expect(password()).To(Equal(generated), "an instance holding the bcrypt hash keeps accepting the password")
+			expectPBKDF2HashOf(generated)
+			Expect(fipsArgs()).To(HaveEach(BeTrue()), "both roles start in FIPS mode")
+			Expect(eventsWithReason(EventReasonSystemUserHashUpdated)).To(ConsistOf(
+				ContainSubstring("a pbkdf2-sha256 hash")))
+			pbkdf2Hash := hash()
+			reconcileCluster(resourceName)
+			Expect(hash()).To(Equal(pbkdf2Hash), "a fresh salt each pass would rewrite the file every pod mounts")
+
+			// A data pod the roll has not replaced yet, still started in FIPS mode.
+			fipsPod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      resourceName + dataSuffix + "-0",
+					Namespace: resourceNamespace,
+					Labels:    resources.DataPodSelector(cluster),
+				},
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{
+					Name: memgraphDbName, Image: memgraphDbName, Args: []string{"--fips-mode=true"},
+				}}},
+			}
+			Expect(k8sClient.Create(ctx, fipsPod)).To(Succeed())
+			DeferCleanup(func() {
+				Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, fipsPod, client.GracePeriodSeconds(0)))).To(Succeed())
+			})
+
+			setFIPS(false)
+			reconcileCluster(resourceName)
+			Expect(fipsArgs()).To(HaveEach(BeFalse()), "the roll out of FIPS mode starts")
+			Expect(hash()).To(Equal(pbkdf2Hash), "a pod still in FIPS mode would refuse a bcrypt hash")
+
+			Expect(k8sClient.Delete(ctx, fipsPod, client.GracePeriodSeconds(0))).To(Succeed())
+			Eventually(func() error {
+				return k8sClient.Get(ctx, client.ObjectKeyFromObject(fipsPod), &corev1.Pod{})
+			}).Should(Satisfy(apierrors.IsNotFound))
+			reconcileCluster(resourceName)
+			expectHashOf(generated)
+			Expect(eventsWithReason(EventReasonSystemUserHashUpdated)).To(ConsistOf(
+				ContainSubstring("a pbkdf2-sha256 hash"), ContainSubstring("a bcrypt hash")))
 		})
 
 		It("should mount the hash and point Memgraph at it on both roles", func() {

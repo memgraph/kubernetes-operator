@@ -26,9 +26,9 @@ import (
 // The operator authenticates to Memgraph as its internal system user,
 // memgraph_internal: a user no query can create, change or drop, which
 // Memgraph accepts on data instances and coordinators whether or not other
-// users or SSO are configured. Memgraph proves it against a bcrypt hash it
-// reads from the file --system-user-internal-hash-file names (Memgraph 3.15
-// and later).
+// users or SSO are configured. Memgraph proves it against a hash it reads
+// from the file --system-user-internal-hash-file names (Memgraph 3.15 and
+// later): bcrypt, or pbkdf2-sha256 for an instance in FIPS mode.
 //
 // The password lives in one Secret the operator generates and alone reads;
 // the hash in a second one, the only one the pods mount, so the password never
@@ -39,8 +39,8 @@ import (
 // connecting without credentials, as it always has.
 const (
 	// SystemUserPasswordKey is the key of the password in the generated
-	// Secret, and SystemUserHashKey the key of the hash ("bcrypt:$2a$...") in
-	// the Secret the pods mount.
+	// Secret, and SystemUserHashKey the key of the hash ("bcrypt:$2a$..." or
+	// "pbkdf2-sha256:600000:<salt>:<key>") in the Secret the pods mount.
 	SystemUserPasswordKey = "password"
 	SystemUserHashKey     = "hash"
 
@@ -73,8 +73,8 @@ func SystemUserSecret(cluster *memgraphcomv1alpha1.MemgraphDBCluster, password s
 	return systemUserSecret(cluster, SystemUserSecretName(cluster), SystemUserPasswordKey, password)
 }
 
-// SystemUserHashSecret is the Secret holding the hash of that password, in
-// the "bcrypt:<hash>" form Memgraph reads.
+// SystemUserHashSecret is the Secret holding the hash of that password, in a
+// pre-hashed form Memgraph reads.
 func SystemUserHashSecret(cluster *memgraphcomv1alpha1.MemgraphDBCluster, hash string) *corev1.Secret {
 	return systemUserSecret(cluster, SystemUserHashSecretName(cluster), SystemUserHashKey, hash)
 }

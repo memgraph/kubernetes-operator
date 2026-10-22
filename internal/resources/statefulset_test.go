@@ -1921,6 +1921,50 @@ func TestStatefulSetBothTLSModes(t *testing.T) {
 	}
 }
 
+// TestStatefulSetFIPS pins that the fips block starts both roles' Memgraph
+// with --fips-mode=true on the command line, after every other pinned flag,
+// and that a cluster without the block carries no such flag. Nothing else
+// about the pod changes: the mode needs no volume of its own.
+func TestStatefulSetFIPS(t *testing.T) {
+	cluster := minimalCluster()
+	cluster.Spec.FIPS = &memgraphcomv1alpha1.FIPSSpec{}
+	const fipsFlag = "--fips-mode=true"
+
+	t.Run(dataComponent, func(t *testing.T) {
+		podSpec := dataStatefulSet(cluster).Spec.Template.Spec
+		if diff := cmp.Diff(expectedArgs(logFilePath, fipsFlag), podSpec.Containers[0].Args); diff != "" {
+			t.Errorf("args mismatch (-want +got):\n%s", diff)
+		}
+		if diff := cmp.Diff(expectedVolumes(dataComponent), podSpec.Volumes); diff != "" {
+			t.Errorf("volumes mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run(coordinatorComponent, func(t *testing.T) {
+		podSpec := coordinatorStatefulSet(cluster).Spec.Template.Spec
+		if diff := cmp.Diff(expectedCoordinatorArgs(logFilePath, fipsFlag), podSpec.Containers[0].Args); diff != "" {
+			t.Errorf("args mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("absent", func(t *testing.T) {
+		for _, sts := range []*appsv1.StatefulSet{dataStatefulSet(minimalCluster()), coordinatorStatefulSet(minimalCluster())} {
+			if slices.Contains(sts.Spec.Template.Spec.Containers[0].Args, fipsFlag) {
+				t.Errorf("%s carries %s without the fips block", sts.Name, fipsFlag)
+			}
+		}
+	})
+
+	// The flag is part of the pod template, so adding or removing the block is
+	// a change the roll carries pod by pod.
+	t.Run("rolls", func(t *testing.T) {
+		if resources.PodTemplateHash(dataStatefulSet(cluster).Spec.Template) ==
+			resources.PodTemplateHash(dataStatefulSet(minimalCluster()).Spec.Template) {
+			t.Error("the fips block left the data pod template hash unchanged, so nothing would roll")
+		}
+	})
+}
+
 // TestStatefulSetCarriesNoSchedulingByDefault pins that a cluster without a
 // scheduling block leaves the whole surface unset: no affinity of any kind, no
 // node selector, no tolerations, no spread constraints, no priority class. The
