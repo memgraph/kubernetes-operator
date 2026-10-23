@@ -76,6 +76,7 @@ const (
 	EventReasonVolumeExpansionRequested      = "VolumeExpansionRequested"
 	EventReasonStatefulSetOrphaned           = "StatefulSetOrphaned"
 	EventReasonSystemUserCreated             = "SystemUserCreated"
+	EventReasonSystemUserHashCreated         = "SystemUserHashCreated"
 	EventReasonSystemUserHashUpdated         = "SystemUserHashUpdated"
 )
 

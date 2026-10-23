@@ -68,9 +68,9 @@ const (
 )
 
 // reconcileSystemUser returns the password of the system user the operator
-// logs in as, generating it on the cluster's first pass, and the Secret
-// holding its hash for the pass to apply before the StatefulSets that mount
-// it.
+// logs in as, generating it on the cluster's first pass, and applies the
+// Secret holding its hash. The pass calls it before anything else, so the
+// hash is in place before the StatefulSets that mount it are applied.
 //
 // The password Secret is created once and never rewritten: it is read
 // uncached, and a create that finds it already there reads it again, so a
@@ -88,17 +88,21 @@ const (
 // bcrypt only once the roll has replaced every FIPS pod: one of them
 // restarting in place before then would find a hash it refuses to load, never
 // turn ready, and stall the roll that was meant to replace it.
+//
+// A hash it writes is recorded as an Event only once the apply has landed,
+// so a pass that fails to write it records nothing and the next pass, which
+// still finds the old hash, writes and records it then.
 func (r *MemgraphDBClusterReconciler) reconcileSystemUser(
 	ctx context.Context,
 	cluster *memgraphcomv1alpha1.MemgraphDBCluster,
-) (string, *corev1.Secret, error) {
+) (string, error) {
 	password, err := r.systemUserPassword(ctx, cluster)
 	if err != nil {
-		return "", nil, err
+		return "", err
 	}
 	fips, err := r.systemUserNeedsPBKDF2(ctx, cluster)
 	if err != nil {
-		return "", nil, err
+		return "", err
 	}
 
 	hashKey := types.NamespacedName{Namespace: cluster.Namespace, Name: resources.SystemUserHashSecretName(cluster)}
@@ -107,25 +111,37 @@ func (r *MemgraphDBClusterReconciler) reconcileSystemUser(
 	switch {
 	case err == nil:
 		if hash := string(current.Data[resources.SystemUserHashKey]); systemUserHashMatches(hash, password, fips) {
-			return password, resources.SystemUserHashSecret(cluster, hash), nil
+			// Applied anyway, like every object the operator owns, so its labels
+			// and owner reference are restated; the hash itself is unchanged.
+			_, err := r.applyDesired(ctx, cluster, resources.SystemUserHashSecret(cluster, hash))
+			return password, err
 		}
 	case !apierrors.IsNotFound(err):
-		return "", nil, fmt.Errorf("reading Secret %s: %w", hashKey.Name, err)
+		return "", fmt.Errorf("reading Secret %s: %w", hashKey.Name, err)
 	}
 
 	hash, err := hashSystemUserPassword(password, fips)
 	if err != nil {
-		return "", nil, err
+		return "", err
 	}
-	if current.Name != "" {
+	secret := resources.SystemUserHashSecret(cluster, hash)
+	if _, err := r.applyDesired(ctx, cluster, secret); err != nil {
+		return "", err
+	}
+	if current.Name == "" {
+		// No hash Secret yet: the cluster's first pass, or one deleted since.
+		r.event(cluster, secret, EventReasonSystemUserHashCreated, "CreateSystemUserHash",
+			"Wrote a %s hash of the password of system user %s into the new Secret %s",
+			systemUserHashAlgorithm(fips), memgraph.SystemUserName, hashKey.Name)
+	} else {
 		// The hash was there but no longer matches: FIPS mode came or went, or
 		// the password changed, edited by hand or regenerated after its Secret
 		// was deleted.
-		r.event(cluster, current, EventReasonSystemUserHashUpdated, "UpdateSystemUserHash",
+		r.event(cluster, secret, EventReasonSystemUserHashUpdated, "UpdateSystemUserHash",
 			"Updated the hash of system user %s in Secret %s to a %s hash of its password",
 			memgraph.SystemUserName, hashKey.Name, systemUserHashAlgorithm(fips))
 	}
-	return password, resources.SystemUserHashSecret(cluster, hash), nil
+	return password, nil
 }
 
 // systemUserNeedsPBKDF2 reports whether the system user's hash must be

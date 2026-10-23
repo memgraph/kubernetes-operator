@@ -543,9 +543,12 @@ var _ = Describe("MemgraphDBCluster Controller", func() {
 			coordinatorPod := func(ordinal int) string { return fmt.Sprintf("[%s%s-%d]", resourceName, coordinatorSuffix, ordinal) }
 			dataPod := func(ordinal int) string { return fmt.Sprintf("[%s%s-%d]", resourceName, dataSuffix, ordinal) }
 			Expect(recorded.all()).To(Equal([]string{
-				// The cluster's first pass generates the password the operator logs in with.
+				// The cluster's first pass generates the password the operator logs in
+				// with, and writes the hash every pod mounts.
 				"Normal SystemUserCreated Generated the password of system user memgraph_internal in Secret " +
 					"mgc-bootstrap-system-user [mgc-bootstrap-system-user]",
+				"Normal SystemUserHashCreated Wrote a bcrypt hash of the password of system user memgraph_internal " +
+					"into the new Secret mgc-bootstrap-system-user-hash [mgc-bootstrap-system-user-hash]",
 				"Normal CoordinatorAdded Added coordinator coordinator_0 to the Raft cluster " + coordinatorPod(0),
 				"Normal CoordinatorAdded Added coordinator coordinator_1 to the Raft cluster " + coordinatorPod(1),
 				"Normal CoordinatorAdded Added coordinator coordinator_2 to the Raft cluster " + coordinatorPod(2),
@@ -558,7 +561,7 @@ var _ = Describe("MemgraphDBCluster Controller", func() {
 			result = reconcileCluster(resourceName)
 			Expect(fake.executedCommands()).To(HaveLen(6),
 				"a converged cluster must not receive further commands")
-			Expect(recorded.all()).To(HaveLen(7), "a pass that does nothing records nothing")
+			Expect(recorded.all()).To(HaveLen(8), "a pass that does nothing records nothing")
 			Expect(result.RequeueAfter).To(Equal(resyncInterval),
 				"a converged cluster must still reschedule a resync to catch registration drift")
 		})
@@ -2764,6 +2767,8 @@ var _ = Describe("MemgraphDBCluster Controller", func() {
 			expectHashOf(generated)
 			Expect(eventsWithReason(EventReasonSystemUserCreated)).To(ConsistOf(
 				ContainSubstring("[" + passwordSecret + "]")))
+			Expect(eventsWithReason(EventReasonSystemUserHashCreated)).To(ConsistOf(
+				ContainSubstring("[" + hashSecret + "]")))
 
 			// Neither is rewritten by later passes: a second password would lock
 			// the operator out of every pod holding the first one's hash, and a
@@ -2774,6 +2779,46 @@ var _ = Describe("MemgraphDBCluster Controller", func() {
 			Expect(password()).To(Equal(generated))
 			Expect(hash()).To(Equal(firstHash))
 			Expect(eventsWithReason(EventReasonSystemUserCreated)).To(HaveLen(1))
+			Expect(eventsWithReason(EventReasonSystemUserHashCreated)).To(HaveLen(1))
+			Expect(eventsWithReason(EventReasonSystemUserHashUpdated)).To(BeEmpty())
+		})
+
+		// A hash Secret deleted out of band is written again with the same
+		// password, and that is recorded like the first one was.
+		It("should rewrite a deleted hash Secret and record it", func() {
+			reconcileCluster(resourceName)
+			Expect(k8sClient.Delete(ctx, &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: hashSecret, Namespace: resourceNamespace},
+			})).To(Succeed())
+
+			reconcileCluster(resourceName)
+			expectHashOf(password())
+			Expect(eventsWithReason(EventReasonSystemUserHashCreated)).To(HaveLen(2))
+			Expect(eventsWithReason(EventReasonSystemUserHashUpdated)).To(BeEmpty())
+		})
+
+		// The Event says a hash was written, so a pass whose write is refused
+		// records none: here the Secret is immutable, so the apply cannot
+		// replace its stale hash.
+		It("should record no hash Event when the hash cannot be written", func() {
+			Expect(k8sClient.Create(ctx, &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: hashSecret, Namespace: resourceNamespace},
+				Immutable:  ptr.To(true),
+				Data:       map[string][]byte{resources.SystemUserHashKey: []byte("bcrypt:stale")},
+			})).To(Succeed())
+			DeferCleanup(func() {
+				Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, &corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{Name: hashSecret, Namespace: resourceNamespace},
+				}))).To(Succeed())
+			})
+
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: resourceName, Namespace: resourceNamespace},
+			})
+			Expect(err).To(MatchError(ContainSubstring(hashSecret)))
+			Expect(hash()).To(Equal("bcrypt:stale"))
+			Expect(eventsWithReason(EventReasonSystemUserHashUpdated)).To(BeEmpty())
+			Expect(eventsWithReason(EventReasonSystemUserHashCreated)).To(BeEmpty())
 		})
 
 		It("should log in as the system user on every connection", func() {

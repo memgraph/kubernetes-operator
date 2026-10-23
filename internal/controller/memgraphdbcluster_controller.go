@@ -273,8 +273,9 @@ func (r *MemgraphDBClusterReconciler) reconcileCluster(
 	}
 
 	// The system user comes before everything else: the pods mount its hash,
-	// and every connection the pass makes logs in with its password.
-	systemUserPassword, systemUserHash, err := r.reconcileSystemUser(ctx, cluster)
+	// which this applies, and every connection the pass makes logs in with its
+	// password.
+	systemUserPassword, err := r.reconcileSystemUser(ctx, cluster)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -309,11 +310,10 @@ func (r *MemgraphDBClusterReconciler) reconcileCluster(
 	desired := slices.Concat([]client.Object{
 		resources.CoordinatorHeadlessService(cluster),
 		resources.DataHeadlessService(cluster),
-		// The flag files and the system user's hash go before the StatefulSets
-		// that mount them, so a pod the apply creates finds them already there.
+		// The flag files go before the StatefulSets that mount them, so a pod
+		// the apply creates finds them already there.
 		resources.CoordinatorFlagsConfigMap(cluster),
 		resources.DataFlagsConfigMap(cluster),
-		systemUserHash,
 		coordinatorSet,
 		dataSet,
 	}, external, monitoring)
