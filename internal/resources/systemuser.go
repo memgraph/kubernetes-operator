@@ -44,8 +44,11 @@ const (
 	SystemUserPasswordKey = "password"
 	SystemUserHashKey     = "hash"
 
-	systemUserComponent  = "system-user"
-	systemUserVolumeName = "system-user"
+	// systemUserComponent is the Secrets' component label, the infix of both
+	// their names and the pods' volume name. Renaming it makes the operator
+	// generate a new password no running pod accepts, since each read the old
+	// hash at startup.
+	systemUserComponent = "system-user"
 	// systemUserMountPath is under /etc/memgraph like the TLS mounts, and a
 	// directory of its own so the mount shadows nothing of the image's.
 	systemUserMountPath = "/etc/memgraph/system-user"
@@ -97,7 +100,7 @@ func systemUserSecret(cluster *memgraphcomv1alpha1.MemgraphDBCluster, name, key,
 // without the system user and locking the operator out.
 func systemUserVolume(cluster *memgraphcomv1alpha1.MemgraphDBCluster) corev1.Volume {
 	return corev1.Volume{
-		Name: systemUserVolumeName,
+		Name: systemUserComponent,
 		VolumeSource: corev1.VolumeSource{
 			Secret: &corev1.SecretVolumeSource{
 				SecretName: SystemUserHashSecretName(cluster),
@@ -108,5 +111,5 @@ func systemUserVolume(cluster *memgraphcomv1alpha1.MemgraphDBCluster) corev1.Vol
 }
 
 func systemUserVolumeMount() corev1.VolumeMount {
-	return corev1.VolumeMount{Name: systemUserVolumeName, MountPath: systemUserMountPath, ReadOnly: true}
+	return corev1.VolumeMount{Name: systemUserComponent, MountPath: systemUserMountPath, ReadOnly: true}
 }
