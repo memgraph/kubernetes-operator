@@ -374,6 +374,18 @@ var _ = Describe("MemgraphDBCluster CRD validation", func() {
 				"an empty block must round-trip as present, or the container can never be asked for")
 		})
 
+		// The fips block is the same shape: presence is the whole signal.
+		It("should leave the fips block absent and keep it when present", func() {
+			absent := createAccepted("no-fips", memgraphcomv1alpha1.MemgraphDBClusterSpec{})
+			Expect(absent.Spec.FIPS).To(BeNil(), "the block is presence-based: no schema default may conjure it")
+
+			present := createAccepted("empty-fips", memgraphcomv1alpha1.MemgraphDBClusterSpec{
+				FIPS: &memgraphcomv1alpha1.FIPSSpec{},
+			})
+			Expect(present.Spec.FIPS).NotTo(BeNil(),
+				"an empty block must round-trip as present, or FIPS mode can never be asked for")
+		})
+
 		// The identity block is defaulted whole when absent, but no field in it
 		// has a default of its own: an empty block must round-trip as present
 		// and empty, since that is the OpenShift shape.
@@ -893,12 +905,12 @@ var _ = Describe("MemgraphDBCluster CRD validation", func() {
 				memgraphcomv1alpha1.MemgraphDBClusterSpec{
 					Flags: memgraphcomv1alpha1.FlagsSpec{Data: map[string]memgraphcomv1alpha1.FlagValue{"aws_region": "eu-west-1"}},
 				},
-				"come from the secrets and awsCredentials blocks"),
+				"come from the fips, secrets and awsCredentials blocks"),
 			Entry("a flag setting the AWS endpoint URL", "invalid-flags-aws-endpoint",
 				memgraphcomv1alpha1.MemgraphDBClusterSpec{
 					Flags: memgraphcomv1alpha1.FlagsSpec{Data: map[string]memgraphcomv1alpha1.FlagValue{"aws-endpoint-url": "http://minio:9000"}},
 				},
-				"come from the secrets and awsCredentials blocks"),
+				"come from the fips, secrets and awsCredentials blocks"),
 			// Keys are flag names, not command-line arguments: the dashes belong
 			// to the flag file the operator writes.
 			Entry("a flag key with leading dashes", "invalid-flags-leading-dashes",
@@ -951,6 +963,26 @@ var _ = Describe("MemgraphDBCluster CRD validation", func() {
 					Flags: memgraphcomv1alpha1.FlagsSpec{Coordinators: map[string]memgraphcomv1alpha1.FlagValue{"license-key": "hunter2"}},
 				},
 				"the license (license-key, organization-name)"),
+			// The operator points Memgraph at the system user's hash; a user
+			// setting the flag would lock the operator out or turn it off.
+			Entry("a flag naming the system user's hash file", "invalid-flags-system-user",
+				memgraphcomv1alpha1.MemgraphDBClusterSpec{
+					Flags: memgraphcomv1alpha1.FlagsSpec{Data: map[string]memgraphcomv1alpha1.FlagValue{"system-user-internal-hash-file": ""}},
+				},
+				"the system user's hash file"),
+			// FIPS mode comes from the fips block, which also moves the system
+			// user's hash to pbkdf2-sha256; the flag alone would leave an
+			// instance in approved mode with a bcrypt hash it refuses to load.
+			Entry("a flag turning on FIPS mode", "invalid-flags-fips",
+				memgraphcomv1alpha1.MemgraphDBClusterSpec{
+					Flags: memgraphcomv1alpha1.FlagsSpec{Coordinators: map[string]memgraphcomv1alpha1.FlagValue{"fips-mode": flagOn}},
+				},
+				"FIPS mode (fips-mode)"),
+			Entry("a flag turning on FIPS mode on the data role", "invalid-flags-fips-data",
+				memgraphcomv1alpha1.MemgraphDBClusterSpec{
+					Flags: memgraphcomv1alpha1.FlagsSpec{Data: map[string]memgraphcomv1alpha1.FlagValue{"fips_mode": flagOn}},
+				},
+				"FIPS mode (fips-mode)"),
 			// Two spellings of one flag would be two lines for one flag, with
 			// gflags silently taking whichever came last.
 			Entry("two keys spelling the same flag", "invalid-flags-duplicate",
@@ -1159,6 +1191,19 @@ var _ = Describe("MemgraphDBCluster CRD validation", func() {
 			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "expected an Invalid error, got %v", err)
 			Expect(err.Error()).To(ContainSubstring(wantMessage))
 		}
+
+		// FIPS mode is a pod-template change the roll carries one pod at a time,
+		// so unlike intra-cluster TLS nothing pins it: a live cluster may move
+		// into approved mode and back out of it.
+		It("should allow adding and removing the fips block", func() {
+			createAccepted("fips-toggle", memgraphcomv1alpha1.MemgraphDBClusterSpec{})
+			Expect(update("fips-toggle", func(c *memgraphcomv1alpha1.MemgraphDBCluster) {
+				c.Spec.FIPS = &memgraphcomv1alpha1.FIPSSpec{}
+			})).To(Succeed())
+			Expect(update("fips-toggle", func(c *memgraphcomv1alpha1.MemgraphDBCluster) {
+				c.Spec.FIPS = nil
+			})).To(Succeed())
+		})
 
 		// Intra-cluster TLS is all-or-nothing per process, and the operator's
 		// one-pod-at-a-time roll cannot carry a cluster across the line: the
