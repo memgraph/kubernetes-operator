@@ -68,6 +68,7 @@ const (
 	logLevelFlag       = "log-level"
 	logLevelUnderscore = "log_level"
 	snapshotOnExitFlag = "storage-snapshot-on-exit"
+	initFilePath       = "/init.cypherl"
 
 	debugLevel memgraphcomv1alpha1.FlagValue = "DEBUG"
 	flagOn     memgraphcomv1alpha1.FlagValue = "true"

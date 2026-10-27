@@ -3161,6 +3161,18 @@ spec:
                 the new setting'
               rule: (has(self.tls) && has(self.tls.intraCluster)) == (has(oldSelf.tls)
                 && has(oldSelf.tls.intraCluster))
+            - message: 'fips cannot be combined with init-file, init-data-file or
+                MEMGRAPH_HA_CLUSTER_INIT_QUERIES: an instance in FIPS mode starts
+                without a license, which the operator sets over Bolt once it runs,
+                and Memgraph refuses to start an unlicensed FIPS instance with init
+                queries it could not run'
+              rule: '!has(self.fips) || ((!has(self.flags) || ((!has(self.flags.coordinators)
+                || self.flags.coordinators.all(k, !(k.replace(''-'', ''_'') in [''init_file'',
+                ''init_data_file'']))) && (!has(self.flags.data) || self.flags.data.all(k,
+                !(k.replace(''-'', ''_'') in [''init_file'', ''init_data_file''])))))
+                && (!has(self.extraEnv) || ((!has(self.extraEnv.coordinators) || self.extraEnv.coordinators.all(e,
+                e.name != ''MEMGRAPH_HA_CLUSTER_INIT_QUERIES'')) && (!has(self.extraEnv.data)
+                || self.extraEnv.data.all(e, e.name != ''MEMGRAPH_HA_CLUSTER_INIT_QUERIES'')))))'
             - message: 'fixOwnershipInitContainer needs securityContext to name runAsUser
                 and one of runAsGroup or fsGroup: the container can only chown the
                 volumes to an identity the cluster names, not to one the platform

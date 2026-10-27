@@ -2005,7 +2005,10 @@ type IntraClusterTLSSpec struct {
 //
 // FIPS mode is an enterprise feature. A new instance starts without a license
 // and accepts nothing but the license settings until the operator SETs them
-// from the secrets block, as it does on every ready pod anyway. The system
+// from the secrets block, as it does on every ready pod anyway. Memgraph
+// refuses to start such an instance with init queries it could not run, so
+// the block cannot be combined with init-file or init-data-file in flags or
+// MEMGRAPH_HA_CLUSTER_INIT_QUERIES in extraEnv. The system
 // user the operator logs in as gets a pbkdf2-sha256 hash instead of bcrypt,
 // the one algorithm approved mode accepts. Users created with bcrypt or
 // sha256 passwords, the default, can no longer log in once their instance
@@ -2043,8 +2046,14 @@ type TLSSpec struct {
 // block existed before: adding tls with intraCluster inside to a cluster that
 // had no tls block, or removing the whole block, would slip past it.
 //
+// FIPS mode rules out init queries on both roles: an unlicensed instance in
+// approved mode refuses every query but the license ones, so Memgraph refuses
+// to start with an init source rather than skip it, and the operator delivers
+// the license only over Bolt, after the instance started.
+//
 // +kubebuilder:validation:XValidation:rule="!has(self.externalAccess) || !has(self.externalAccess.gateway) || !has(self.externalAccess.gateway.dataPortBase) || !has(self.dataInstances) || self.externalAccess.gateway.dataPortBase + self.dataInstances <= 65536",message="externalAccess.gateway.dataPortBase + dataInstances must not exceed 65536: every data instance listens on dataPortBase + its ordinal"
 // +kubebuilder:validation:XValidation:rule="(has(self.tls) && has(self.tls.intraCluster)) == (has(oldSelf.tls) && has(oldSelf.tls.intraCluster))",message="tls.intraCluster cannot be added or removed on a live cluster: a member with intra-cluster TLS cannot talk to one without it, so restarting pods one at a time would deadlock waiting for replication that can no longer happen. Delete the MemgraphDBCluster (its claims are retained under the default retention policy) and recreate it with the new setting"
+// +kubebuilder:validation:XValidation:rule="!has(self.fips) || ((!has(self.flags) || ((!has(self.flags.coordinators) || self.flags.coordinators.all(k, !(k.replace('-', '_') in ['init_file', 'init_data_file']))) && (!has(self.flags.data) || self.flags.data.all(k, !(k.replace('-', '_') in ['init_file', 'init_data_file']))))) && (!has(self.extraEnv) || ((!has(self.extraEnv.coordinators) || self.extraEnv.coordinators.all(e, e.name != 'MEMGRAPH_HA_CLUSTER_INIT_QUERIES')) && (!has(self.extraEnv.data) || self.extraEnv.data.all(e, e.name != 'MEMGRAPH_HA_CLUSTER_INIT_QUERIES')))))",message="fips cannot be combined with init-file, init-data-file or MEMGRAPH_HA_CLUSTER_INIT_QUERIES: an instance in FIPS mode starts without a license, which the operator sets over Bolt once it runs, and Memgraph refuses to start an unlicensed FIPS instance with init queries it could not run"
 // +kubebuilder:validation:XValidation:rule="!has(self.fixOwnershipInitContainer) || !has(self.securityContext) || (has(self.securityContext.runAsUser) && (has(self.securityContext.runAsGroup) || has(self.securityContext.fsGroup)))",message="fixOwnershipInitContainer needs securityContext to name runAsUser and one of runAsGroup or fsGroup: the container can only chown the volumes to an identity the cluster names, not to one the platform assigns at admission"
 type MemgraphDBClusterSpec struct {
 	// coordinators is the number of Raft coordinator instances. It must be odd

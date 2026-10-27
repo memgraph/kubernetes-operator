@@ -983,6 +983,27 @@ var _ = Describe("MemgraphDBCluster CRD validation", func() {
 					Flags: memgraphcomv1alpha1.FlagsSpec{Data: map[string]memgraphcomv1alpha1.FlagValue{"fips_mode": flagOn}},
 				},
 				"FIPS mode (fips-mode)"),
+			// An unlicensed FIPS instance refuses to start with an init source,
+			// and the operator licenses it only once it runs: every pod would
+			// crash-loop.
+			Entry("an init file in FIPS mode", "invalid-fips-init-file",
+				memgraphcomv1alpha1.MemgraphDBClusterSpec{
+					FIPS:  &memgraphcomv1alpha1.FIPSSpec{},
+					Flags: memgraphcomv1alpha1.FlagsSpec{Coordinators: map[string]memgraphcomv1alpha1.FlagValue{"init-file": initFilePath}},
+				},
+				"fips cannot be combined with init-file"),
+			Entry("an init data file in FIPS mode", "invalid-fips-init-data-file",
+				memgraphcomv1alpha1.MemgraphDBClusterSpec{
+					FIPS:  &memgraphcomv1alpha1.FIPSSpec{},
+					Flags: memgraphcomv1alpha1.FlagsSpec{Data: map[string]memgraphcomv1alpha1.FlagValue{"init_data_file": "/data.cypherl"}},
+				},
+				"fips cannot be combined with init-file"),
+			Entry("HA cluster init queries in FIPS mode", "invalid-fips-init-queries",
+				memgraphcomv1alpha1.MemgraphDBClusterSpec{
+					FIPS:     &memgraphcomv1alpha1.FIPSSpec{},
+					ExtraEnv: memgraphcomv1alpha1.ExtraEnvSpec{Coordinators: []memgraphcomv1alpha1.EnvVar{{Name: "MEMGRAPH_HA_CLUSTER_INIT_QUERIES", Value: initFilePath}}},
+				},
+				"fips cannot be combined with init-file"),
 			// Two spellings of one flag would be two lines for one flag, with
 			// gflags silently taking whichever came last.
 			Entry("two keys spelling the same flag", "invalid-flags-duplicate",
@@ -1203,6 +1224,18 @@ var _ = Describe("MemgraphDBCluster CRD validation", func() {
 			Expect(update("fips-toggle", func(c *memgraphcomv1alpha1.MemgraphDBCluster) {
 				c.Spec.FIPS = nil
 			})).To(Succeed())
+		})
+
+		// Init files are fine outside FIPS mode, and turning it on is refused
+		// while one is still set, since every restarted pod would crash-loop.
+		It("should accept an init file without the fips block and refuse adding the block beside it", func() {
+			createAccepted("fips-init-file", memgraphcomv1alpha1.MemgraphDBClusterSpec{
+				Flags: memgraphcomv1alpha1.FlagsSpec{Data: map[string]memgraphcomv1alpha1.FlagValue{"init-file": initFilePath}},
+			})
+			err := update("fips-init-file", func(c *memgraphcomv1alpha1.MemgraphDBCluster) {
+				c.Spec.FIPS = &memgraphcomv1alpha1.FIPSSpec{}
+			})
+			Expect(err).To(MatchError(ContainSubstring("fips cannot be combined with init-file")))
 		})
 
 		// Intra-cluster TLS is all-or-nothing per process, and the operator's
