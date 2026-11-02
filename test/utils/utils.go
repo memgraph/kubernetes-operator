@@ -141,19 +141,41 @@ func IsCertManagerCRDsInstalled() bool {
 	return false
 }
 
-// LoadImageToKindClusterWithName loads a local docker image to the kind cluster
+// LoadImageToKindClusterWithName loads a local docker image to the kind cluster.
+//
+// It saves only the Docker daemon's own platform and loads that archive,
+// instead of kind load docker-image. With Docker's containerd image store (the
+// default from Docker 29), docker save of a pulled multi-platform image writes
+// its whole index while holding only the host platform's blobs, and kind
+// imports with ctr --all-platforms, which fails on the first missing one
+// (kubernetes-sigs/kind#4224). Kind nodes run on the daemon's platform anyway.
 func LoadImageToKindClusterWithName(name string) error {
 	cluster := defaultKindCluster
 	if v, ok := os.LookupEnv("KIND_CLUSTER"); ok {
 		cluster = v
 	}
-	kindOptions := []string{"load", "docker-image", name, "--name", cluster}
 	kindBinary := defaultKindBinary
 	if v, ok := os.LookupEnv("KIND"); ok {
 		kindBinary = v
 	}
-	cmd := exec.Command(kindBinary, kindOptions...)
-	_, err := Run(cmd)
+
+	platform, err := Run(exec.Command("docker", "version", "--format", "{{.Server.Os}}/{{.Server.Arch}}"))
+	if err != nil {
+		return err
+	}
+	archive, err := os.CreateTemp("", "kind-image-*.tar")
+	if err != nil {
+		return err
+	}
+	_ = archive.Close()
+	defer func() { _ = os.Remove(archive.Name()) }()
+
+	cmd := exec.Command("docker", "save", "--platform", strings.TrimSpace(platform), "--output", archive.Name(), name)
+	if _, err := Run(cmd); err != nil {
+		return err
+	}
+	cmd = exec.Command(kindBinary, "load", "image-archive", archive.Name(), "--name", cluster)
+	_, err = Run(cmd)
 	return err
 }
 
