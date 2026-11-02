@@ -22,14 +22,16 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j/db"
 )
 
-// NewBoltConnector returns the production Connector dialing coordinators over
-// unauthenticated Bolt (Bolt auth is out of scope for v1alpha1).
+// NewBoltConnector returns the production Connector. It logs in as the
+// internal system user when the context carries its password (see
+// WithSystemUserPassword) and falls back to no credentials.
 func NewBoltConnector() Connector {
 	return boltConnector{timeout: callTimeout}
 }
@@ -48,9 +50,10 @@ type boltConnector struct {
 // The two URI schemes the connector dials with. bolt+ssc is TLS with the
 // certificate accepted unverified: the operator dials coordinators on pod DNS,
 // and verifying would force every Bolt certificate to carry a CA and pod-DNS
-// SANs while buying nothing on an unauthenticated Bolt — anyone positioned to
-// impersonate a coordinator to the operator can talk to the real one directly.
-// Bolt auth is the trigger for revisiting that.
+// SANs. That bought nothing while the operator connected without credentials —
+// anyone positioned to impersonate an instance to it could talk to the real
+// one directly. Logging in as the system user changes that: an impersonator
+// would now receive its password, so verification is worth revisiting.
 const (
 	schemePlain = "bolt"
 	schemeTLS   = "bolt+ssc"
@@ -67,19 +70,73 @@ func dialSchemes(tls bool) []string {
 	return []string{schemePlain, schemeTLS}
 }
 
+// SystemUserName is the internal system user the connector logs in as. It
+// is fixed in Memgraph.
+const SystemUserName = "memgraph_internal"
+
+type systemUserPasswordKey struct{}
+
+// WithSystemUserPassword returns a context under which Connect logs in as the
+// internal system user with password. The password belongs to one cluster and
+// one reconcile pass, so it travels with the pass rather than with the
+// connector every cluster shares.
+func WithSystemUserPassword(ctx context.Context, password string) context.Context {
+	return context.WithValue(ctx, systemUserPasswordKey{}, password)
+}
+
+// SystemUserPassword is the password WithSystemUserPassword put on ctx, and
+// empty when there is none.
+func SystemUserPassword(ctx context.Context) string {
+	password, _ := ctx.Value(systemUserPasswordKey{}).(string)
+	return password
+}
+
+// credentials is one way of logging in, named for the error it fails with.
+type credentials struct {
+	name  string
+	token neo4j.AuthToken
+}
+
+// dialCredentials is the order the connector logs in with: the internal
+// system user when the context carries its password, then no credentials. The
+// fallback is what keeps an instance that has no system user reachable: one on
+// a Memgraph release before 3.15, which ignores the hash-file flag, or a pod
+// not yet restarted onto a template that mounts the hash.
+func dialCredentials(ctx context.Context) []credentials {
+	none := credentials{name: "no credentials", token: neo4j.NoAuth()}
+	password := SystemUserPassword(ctx)
+	if password == "" {
+		return []credentials{none}
+	}
+	return []credentials{{name: SystemUserName, token: neo4j.BasicAuth(SystemUserName, password, "")}, none}
+}
+
+// isAuthenticationFailure reports whether Memgraph refused the credentials, as
+// opposed to the connection failing: only a refusal is worth retrying with the
+// next credentials, and a refused scheme moves on to the next scheme instead.
+func isAuthenticationFailure(err error) bool {
+	var neo4jErr *neo4j.Neo4jError
+	return errors.As(err, &neo4jErr) && strings.Contains(neo4jErr.Code, ".Security.")
+}
+
 func (b boltConnector) Connect(ctx context.Context, address string, tls bool) (Client, error) {
 	var errs []error
 	for _, scheme := range dialSchemes(tls) {
-		driver, err := neo4j.NewDriverWithContext(scheme+"://"+address, neo4j.NoAuth())
-		if err != nil {
-			return nil, fmt.Errorf("creating bolt driver for %s: %w", address, err)
-		}
-		if err := b.verify(ctx, driver); err != nil {
+		for _, creds := range dialCredentials(ctx) {
+			driver, err := neo4j.NewDriverWithContext(scheme+"://"+address, creds.token)
+			if err != nil {
+				return nil, fmt.Errorf("creating bolt driver for %s: %w", address, err)
+			}
+			err = b.verify(ctx, driver)
+			if err == nil {
+				return &boltClient{driver: driver, timeout: b.timeout}, nil
+			}
 			_ = driver.Close(ctx)
-			errs = append(errs, fmt.Errorf("%s: %w", scheme, err))
-			continue
+			errs = append(errs, fmt.Errorf("%s as %s: %w", scheme, creds.name, err))
+			if !isAuthenticationFailure(err) {
+				break
+			}
 		}
-		return &boltClient{driver: driver, timeout: b.timeout}, nil
 	}
 	return nil, fmt.Errorf("connecting to %s: %w", address, errors.Join(errs...))
 }

@@ -782,6 +782,12 @@ spec:
                     description: data are added to every data instance pod.
                     x-kubernetes-preserve-unknown-fields: true
                 type: object
+              fips:
+                description: |-
+                  fips runs every instance of both roles in FIPS 140-3 approved mode.
+                  Absent, they run in the normal mode. It needs a FIPS build of Memgraph:
+                  set image to the "-fips" tag of the release.
+                type: object
               fixOwnershipInitContainer:
                 description: |-
                   fixOwnershipInitContainer chowns every pod's volume mount points to the
@@ -828,11 +834,12 @@ spec:
                       rule: self.all(k, k.matches('^[A-Za-z][A-Za-z0-9_-]*$'))
                     - message: 'flags must not set a port, a listen address, the coordinator
                         identity, the data directory, the log file, a TLS file, the
-                        metrics format, the license (license-key, organization-name)
-                        or the AWS configuration (aws-access-key, aws-secret-key,
-                        aws-region, aws-endpoint-url): the operator derives the former,
-                        and the latter come from the secrets and awsCredentials blocks'
-                      rule: self.all(k, !k.replace('-', '_').matches('^(bolt_port|management_port|coordinator_port|coordinator_id|coordinator_hostname|data_directory|log_file|bolt_cert_file|bolt_key_file|cluster_cert_file|cluster_key_file|cluster_ca_file|metrics_format|metrics_port|monitoring_port|bolt_address|monitoring_address|aws_access_key|aws_secret_key|aws_region|aws_endpoint_url|license_key|organization_name)$'))
+                        metrics format, the system user''s hash file, FIPS mode (fips-mode),
+                        the license (license-key, organization-name) or the AWS configuration
+                        (aws-access-key, aws-secret-key, aws-region, aws-endpoint-url):
+                        the operator derives the former, and the latter come from
+                        the fips, secrets and awsCredentials blocks'
+                      rule: self.all(k, !k.replace('-', '_').matches('^(bolt_port|management_port|coordinator_port|coordinator_id|coordinator_hostname|data_directory|log_file|bolt_cert_file|bolt_key_file|cluster_cert_file|cluster_key_file|cluster_ca_file|metrics_format|metrics_port|monitoring_port|bolt_address|monitoring_address|aws_access_key|aws_secret_key|aws_region|aws_endpoint_url|license_key|organization_name|system_user_internal_hash_file|fips_mode)$'))
                     - message: two keys spell the same flag
                       rule: self.all(k, self.all(j, k == j || k.replace('-', '_')
                         != j.replace('-', '_')))
@@ -866,11 +873,12 @@ spec:
                       rule: self.all(k, k.matches('^[A-Za-z][A-Za-z0-9_-]*$'))
                     - message: 'flags must not set a port, a listen address, the coordinator
                         identity, the data directory, the log file, a TLS file, the
-                        metrics format, the license (license-key, organization-name)
-                        or the AWS configuration (aws-access-key, aws-secret-key,
-                        aws-region, aws-endpoint-url): the operator derives the former,
-                        and the latter come from the secrets and awsCredentials blocks'
-                      rule: self.all(k, !k.replace('-', '_').matches('^(bolt_port|management_port|coordinator_port|coordinator_id|coordinator_hostname|data_directory|log_file|bolt_cert_file|bolt_key_file|cluster_cert_file|cluster_key_file|cluster_ca_file|metrics_format|metrics_port|monitoring_port|bolt_address|monitoring_address|aws_access_key|aws_secret_key|aws_region|aws_endpoint_url|license_key|organization_name)$'))
+                        metrics format, the system user''s hash file, FIPS mode (fips-mode),
+                        the license (license-key, organization-name) or the AWS configuration
+                        (aws-access-key, aws-secret-key, aws-region, aws-endpoint-url):
+                        the operator derives the former, and the latter come from
+                        the fips, secrets and awsCredentials blocks'
+                      rule: self.all(k, !k.replace('-', '_').matches('^(bolt_port|management_port|coordinator_port|coordinator_id|coordinator_hostname|data_directory|log_file|bolt_cert_file|bolt_key_file|cluster_cert_file|cluster_key_file|cluster_ca_file|metrics_format|metrics_port|monitoring_port|bolt_address|monitoring_address|aws_access_key|aws_secret_key|aws_region|aws_endpoint_url|license_key|organization_name|system_user_internal_hash_file|fips_mode)$'))
                     - message: two keys spell the same flag
                       rule: self.all(k, self.all(j, k == j || k.replace('-', '_')
                         != j.replace('-', '_')))
@@ -3153,6 +3161,18 @@ spec:
                 the new setting'
               rule: (has(self.tls) && has(self.tls.intraCluster)) == (has(oldSelf.tls)
                 && has(oldSelf.tls.intraCluster))
+            - message: 'fips cannot be combined with init-file, init-data-file or
+                MEMGRAPH_HA_CLUSTER_INIT_QUERIES: an instance in FIPS mode starts
+                without a license, which the operator sets over Bolt once it runs,
+                and Memgraph refuses to start an unlicensed FIPS instance with init
+                queries it could not run'
+              rule: '!has(self.fips) || ((!has(self.flags) || ((!has(self.flags.coordinators)
+                || self.flags.coordinators.all(k, !(k.replace(''-'', ''_'') in [''init_file'',
+                ''init_data_file'']))) && (!has(self.flags.data) || self.flags.data.all(k,
+                !(k.replace(''-'', ''_'') in [''init_file'', ''init_data_file''])))))
+                && (!has(self.extraEnv) || ((!has(self.extraEnv.coordinators) || self.extraEnv.coordinators.all(e,
+                e.name != ''MEMGRAPH_HA_CLUSTER_INIT_QUERIES'')) && (!has(self.extraEnv.data)
+                || self.extraEnv.data.all(e, e.name != ''MEMGRAPH_HA_CLUSTER_INIT_QUERIES'')))))'
             - message: 'fixOwnershipInitContainer needs securityContext to name runAsUser
                 and one of runAsGroup or fsGroup: the container can only chown the
                 volumes to an identity the cluster names, not to one the platform
